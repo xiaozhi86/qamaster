@@ -1,5 +1,5 @@
 ---
-name: requirement-review
+name: requirement-review-out
 description: 综合的需求文档分析、评审。
 disable-model-invocation: true
 ---
@@ -741,7 +741,7 @@ disable-model-invocation: true
       - 列表需要包括未解决及已解决问题详情
       - 已解决问题需要展示原问题及解决结果
 
-    输出位置：`./requirement-review` 目录下
+    输出位置：`./requirement-review-out` 目录下
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 

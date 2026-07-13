@@ -5,7 +5,7 @@ __pycache__/
 
 # skill 运行时产出物（输出目录，不应入库）
 case-design-out/
-/requirement-review/
+requirement-review-out/
 
 # Claude Code 本地会话状态
 .claude/settings.local.json
