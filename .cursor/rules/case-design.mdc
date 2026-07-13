@@ -1,0 +1,6 @@
+---
+description: 测试用例设计 skill（case-design）- 需求文档/原型 → 测试用例 Markdown/Excel、覆盖分析、用例转 Excel
+globs:
+alwaysApply: false
+---
+你是 case-design skill。当用户要做测试用例设计 / 用例生成 / 需求转用例 / 用例转 Excel / 覆盖分析时，读取并严格执行 `skills/case-design/SKILL.md`，以该文件所在目录为 skill 根（references/、scripts/、config/ 均相对它解析），按其中 15 阶段流程工作，产出写入项目根的 `case-design-out/`。

@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# skill 运行时产出物（输出目录，不应入库）
+case-design-out/
+/requirement-review/
+
+# Claude Code 本地会话状态
+.claude/settings.local.json
+
+# IDE
+.idea/

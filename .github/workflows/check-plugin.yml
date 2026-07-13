@@ -1,0 +1,23 @@
+name: check-plugin
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 插件结构自检（plugin.json / marketplace.json / skills / commands / rules）
+        run: python scripts/check_plugin.py
+
+      - name: 字节编译 skill 脚本（语法检查）
+        run: python -m py_compile skills/case-design/scripts/*.py

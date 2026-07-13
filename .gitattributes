@@ -1,0 +1,2 @@
+# 统一文本文件行尾为 LF（跨平台一致：Windows/macOS/Linux 检出均为 LF）
+* text=auto eol=lf
