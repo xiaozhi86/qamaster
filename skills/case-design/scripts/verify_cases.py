@@ -9,7 +9,8 @@ verify_md.py 只校验“结构”（行数/表头/末行/列宽）；本脚本�
 “内容层 + 覆盖广度 + 追溯性”，把 references/selfcheck.md 中【可机器判定】的
 检查项客观化，并在覆盖广度不足时给出客观数据，供模型判定 selfcheck 自修项是否通过。
 
-【设计不变】本脚本不新增门禁、不改变 selfcheck 的 14 项检查、不改变自修/阻断
+【设计不变】本脚本不新增门禁、不改变 selfcheck 的 15 项检查（检查15 业务行为来源追溯为新增软性项）、
+不改变自修/阻断
 决策、不改变“回读不一致→内存修正→重新整体 Write”机制（见 output_write.md）。
 仅把“可机器判定的检查”从模型主观自证迁移到脚本客观判定，判定标准与
 selfcheck.md / modeling.md / quality_rules.md / risk.md / coverage.md 完全一致。
@@ -23,6 +24,7 @@ selfcheck.md / modeling.md / quality_rules.md / risk.md / coverage.md 完全一�
   检查6  重复用例：关联规则+断言+维度+类型+等级五者全同（软判定，列疑似条数）
   检查7  过度设计：Then 无业务锚点（接口码/状态/数据/日志/MQ/缓存/业务数值/业务反馈）→ 疑似（软判定，兼容性/可靠性豁免，服务"不冗余不机械"）
   检查13 断言完整性：状态变更类用例(When含状态变更动词) Then 须含数据/状态副作用（软判定，防"测试通过却漏 bug"）
+  检查15 业务行为来源追溯(#5)：用例 Given/When/Then 断言的业务行为须有来源三选一（需求文档 token / R·TP 引用 / 假设标记），三者皆无→疑似脑补（软判定）
   关联需求ID追溯：笼统占位/全员相同→需求条目级追溯失效（软判定，对应 modeling.md 20.2）
 
 覆盖统计（给 selfcheck 检查2/3/8 客观数据，不替代模型判定，只供证据）：
@@ -36,6 +38,7 @@ selfcheck.md / modeling.md / quality_rules.md / risk.md / coverage.md 完全一�
   - 风险来源：解析第5列“风险来源”，对技术隐含@开发/业务领域@业务/缺陷反哺来源的 P0/P1 提示需台账角色确认
   - 测试点追溯：解析“测试点清单”section，校验每测试点是否被用例覆盖
   - #4 反向需求追溯：解析需求文档条目（第2参数），列出未被用例引用的需求条目
+  - #5 反向行为来源追溯（检查15）：用例 Given/When/Then 断言的业务行为须有来源三选一（需求文档 token / R·TP 引用 / 假设标记）；规则建模 section 规则项无来源标记->疑似脑补规则
   （风险/测试点清单为强制沉淀 section，缺失则 ⚠ 提示补齐；见 references/output_write.md 追溯性 section）
 
 退出码：0=内容校验全过（覆盖统计与软性提示仍输出，仅供模型参考）；
@@ -653,6 +656,118 @@ def check_assertion_completeness(data_rows):
     return len(suspects), suspects
 
 
+# ===== 检查15：业务行为来源追溯（#5·破脑补·软判定）=====
+# 口径来自 validation_rules.json 的 behavior_source（单一事实源），与 selfcheck.md 检查15、
+# dedup_coverage.md #5 反向行为来源追溯、SKILL.md 0.9 一致。本检查闭合 0.3/0.4 脑补禁令在
+# "业务行为"维度的机械缺口：用例 Given/When/Then 断言的业务行为须能追溯到
+# 需求文档 / 规则建模·风险清单（R/TP 引用）/ 已登记假设（假设A 标记），三者皆无即疑似脑补。
+_BS = _RULES.get("behavior_source", {})
+BEHAVIOR_SIGNALS = list(_BS.get("behavior_signals", []))
+_STATE_TARGET_PAT = re.compile(
+    _BS.get("state_target_pattern", r"状态(由|变更为|更新为|变为|置为|保持为)([一-龥A-Za-z0-9]{2,8})"))
+_ASSUMPTION_TAG_PATS = [re.compile(p) for p in _BS.get("assumption_tag_patterns", [r"假设A\d+", r"基于假设"])]
+_CITATION_PAT = re.compile(_BS.get("citation_pattern", r"(R|TP)\d+"))
+_SOURCE_MARKER_PAT = re.compile(_BS.get("source_marker_pattern", r"来源[:：]"))
+
+
+def extract_behavior_signals(text):
+    """从用例文本抽取业务行为信号：状态流转目标态 + 模态/约束/机制信号词。返回信号集合。"""
+    if not text:
+        return set()
+    sigs = set()
+    for m in _STATE_TARGET_PAT.finditer(text):
+        target = m.group(2)
+        if target:
+            sigs.add(target)
+    for w in BEHAVIOR_SIGNALS:
+        if w in text:
+            sigs.add(w)
+    return sigs
+
+
+def _has_assumption_tag(case_cells):
+    """用例是否含假设标记（假设A1/基于假设），查关联规则列与用例名称列。"""
+    for idx in (IDX_RULE, IDX_NAME):
+        if len(case_cells) > idx:
+            t = case_cells[idx] or ""
+            if any(p.search(t) for p in _ASSUMPTION_TAG_PATS):
+                return True
+    return False
+
+
+def _has_rule_citation(case_cells):
+    """用例关联规则列是否引用 R<序号>/TP<序号>（追溯到规则建模/风险/测试点清单）。"""
+    if len(case_cells) > IDX_RULE:
+        return bool(_CITATION_PAT.search(case_cells[IDX_RULE] or ""))
+    return False
+
+
+def check_behavior_source(data_rows, req_doc_path):
+    """检查15 业务行为来源追溯（#5·软判定）。用例 Given/When/Then 断言的业务行为须有来源
+    三选一：(a)行为 token 出现在需求文档；(b)关联规则引用 R<序号>/TP<序号>（规则建模/风险清单已沉淀）；
+    (c)关联规则或用例名称含假设标记 假设A<序号>/基于假设。三者皆无且行为信号不在需求文档
+    -> 疑似无来源业务行为（脑补），供 selfcheck 检查15 转问题(P0/P1)/假设(P2/P3)，不得静默保留。
+    规则项本身的来源由 check_rule_source 另查（破 rule_coverage 自证洗白）。
+    无需求文档时退回 (b)(c) 判定（无法做 a 的 token 核对，返回 has_req=False 供提示）。
+    返回 (疑似条数, 疑似列表, 是否提供了可读需求文档)。"""
+    req_text = ""
+    if req_doc_path and os.path.exists(req_doc_path):
+        try:
+            with open(req_doc_path, "r", encoding="utf-8") as f:
+                req_text = f.read()
+        except Exception:
+            req_text = ""
+    has_req = req_text != ""
+    suspects = []
+    for i, r in enumerate(data_rows, 1):
+        if len(r) <= IDX_THEN:
+            continue
+        case_text = " ".join(r[IDX_GIVEN:IDX_THEN + 1])
+        sigs = extract_behavior_signals(case_text)
+        if not sigs:
+            continue  # 无业务行为信号，不判
+        if _has_rule_citation(r) or _has_assumption_tag(r):
+            continue  # 已引用 R/TP 或已标假设 -> 视为已登记来源
+        # 无引用、无假设：行为信号须出现在需求文档，否则疑似脑补
+        ungrounded = sorted(s for s in sigs if s and s not in req_text)
+        if ungrounded:
+            suspects.append("行%d: 疑似无来源业务行为（检查15）：未引用R/TP、无假设标记，且行为信号[%s]不在需求文档->需转问题/假设"
+                            % (i, "/".join(ungrounded)[:60]))
+    return len(suspects), suspects, has_req
+
+
+def check_rule_source(lines):
+    """检查15 增强（规则来源·破自证循环·软判定）。规则建模 section 每条规则项建议标注来源
+    （来源:需求文档<章节>/台账Q<序号>/假设A<序号>）。无来源标记 -> 疑似脑补规则。
+    规则建模 section 由模型自写，若无来源约束会被 rule_coverage 反向洗白为"已覆盖"，
+    本检查补该缺口（根因5 自证循环）。无规则建模 section 或无可解析项 -> 跳过（返回 0,[]）。"""
+    in_section = False
+    items = []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("|") and "用例ID" in s:
+            break
+        if re.match(r"^#+\s*.*(规则建模|业务规则|规则模型|建模)", s):
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        if not s or s.startswith("#"):
+            continue
+        if re.match(r"^[-*]?\s*\*\*([^*：:]{2,20})\*\*", s) or re.match(r"^\d+[.、]\s*\*\*?([^*：:（(]{2,20})", s):
+            items.append(s)
+    if not items:
+        return 0, []
+    suspects = []
+    for it in items:
+        if not _SOURCE_MARKER_PAT.search(it):
+            m = re.match(r"^[-*]?\s*\*\*([^*：:]{2,20})\*\*", it) or \
+                re.match(r"^\d+[.、]\s*\*\*?([^*：:（(]{2,20})", it)
+            name = m.group(1).strip() if m else it[:20]
+            suspects.append("规则项[%s] 无来源标记（建议补 来源:需求文档<章节>/台账Q<n>/假设A<n>，破自证循环）" % name)
+    return len(suspects), suspects
+
+
 def parse_tech_impl_names(lines):
     """解析可选'技术实现摘要'section（§5 提供），提取明确提供的存储名清单
     （表名/字段/Key/Topic/Index/Bucket）。section 标题含'技术实现'，其后表格/列表。
@@ -830,7 +945,7 @@ def dump_rules():
     print("  业务锚点: " + " / ".join(r["business_anchors"]))
     print()
     print("【追溯性 section（用例表之前，强制沉淀；缺失则⚠提示补齐）】")
-    print("  规则建模: 粗体项 **类别名** 或 '1. **类别名**'，每类须被用例覆盖(token宽松匹配)")
+    print("  规则建模: 粗体项 **类别名** 或 '1. **类别名**'，每类须被用例覆盖(token宽松匹配)；每项建议标 来源:需求文档<章节>/台账Q<n>/假设A<n>（无->疑似脑补规则）")
     print("  风险清单: 表格 风险ID|风险等级|风险描述|关联模块|风险来源；用例'关联规则'列含 R<序号> 精确覆盖每个 P0/P1")
     print("    风险来源取值: 需求推导 / 技术隐含@开发 / 业务领域@业务 / 缺陷反哺（risk.md 三源共验）")
     print("  测试点清单: 表格 测试点ID|场景类型|测试点描述|关联模块；用例'关联规则'列含 TP<序号> 精确覆盖每个测试点")
@@ -840,6 +955,9 @@ def dump_rules():
     print("  检查9增强 存储schema: 若 .md 含'技术实现摘要'section，断言存储名须在清单内")
     print("  风险来源待确认: 来源∈{技术隐含@开发,业务领域@业务,缺陷反哺} 的 P0/P1 须在台账角色确认")
     print("  #4 反向需求追溯: 需求文档每条目须被用例引用（传第2参数需求文档启用）")
+    print("  检查15/#5 业务行为来源追溯: 用例 Given/When/Then 断言的业务行为须有来源三选一")
+    print("    (a)行为 token 在需求文档 | (b)关联规则引用 R<序号>/TP<序号> | (c)关联规则/用例名称含 假设A<序号>/基于假设")
+    print("    三者皆无->疑似脑补，须转问题(P0/P1)/假设(P2/P3)，不得静默保留；行为信号: " + "/".join(r["behavior_source"]["behavior_signals"]))
     print()
     print("【domain_config.json】可选领域覆盖(同名字段替换)：business_anchors / keyword_dims / exception_subtypes / overdesign_exempt_types")
     print("=" * 64)
@@ -888,6 +1006,8 @@ def main():
     overdesign_n, overdesign_list = check_overdesign(data_rows)
     reqid_n, reqid_list = check_requirement_id(data_rows)
     complete_n, complete_list = check_assertion_completeness(data_rows)
+    behsrc_n, behsrc_list, has_req = check_behavior_source(data_rows, req_doc_path)
+    rulesrc_n, rulesrc_list = check_rule_source(lines)
     print("-" * 48)
     print("【软性校验·列疑似条数，供 selfcheck 决策】")
     print("检查4 断言可观测: 疑似 %d 条" % assert_n)
@@ -915,6 +1035,15 @@ def main():
         print("  - %s" % v)
     print("检查13 断言完整性: 疑似 %d 条（状态变更类用例缺数据/状态副作用）" % complete_n)
     for v in complete_list[:10]:
+        print("  - %s" % v)
+    bs_note = "" if has_req else "（未提供需求文档，仅按 R/TP 引用与假设标记判定，无法做 token 核对）"
+    print("检查15 业务行为来源追溯(#5): 疑似 %d 条（无来源业务行为）%s" % (behsrc_n, bs_note))
+    for v in behsrc_list[:10]:
+        print("  - %s" % v)
+    if len(behsrc_list) > 10:
+        print("  ...（其余 %d 条略）" % (len(behsrc_list) - 10))
+    print("检查15 规则来源(破自证循环): 疑似 %d 条（规则建模项无来源标记）" % rulesrc_n)
+    for v in rulesrc_list[:10]:
         print("  - %s" % v)
 
     # 覆盖统计
