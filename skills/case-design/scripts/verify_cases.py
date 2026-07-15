@@ -24,7 +24,8 @@ selfcheck.md / modeling.md / quality_rules.md / risk.md / coverage.md 完全一�
   检查6  重复用例：关联规则+断言+维度+类型+等级五者全同（软判定，列疑似条数）
   检查7  过度设计：Then 无业务锚点（接口码/状态/数据/日志/MQ/缓存/业务数值/业务反馈）→ 疑似（软判定，兼容性/可靠性豁免，服务"不冗余不机械"）
   检查13 断言完整性：状态变更类用例(When含状态变更动词) Then 须含数据/状态副作用（软判定，防"测试通过却漏 bug"）
-  检查15 业务行为来源追溯(#5)：用例 Given/When/Then 断言的业务行为须有来源三选一（需求文档 token / R·TP 引用 / 假设标记），三者皆无→疑似脑补（软判定）
+  检查15 业务行为来源追溯(#5)：用例 Given/When/Then 断言的业务行为须有来源三选一（需求文档 token / R·TP·API 引用 / 假设标记），三者皆无→疑似脑补（软判定）
+  #6 反向接口追溯：变更影响清单每个变更接口须三类覆盖(契约 presence+type+出参 / 规则 R / 场景 SC)；无清单则跳过（软判定）
   关联需求ID追溯：笼统占位/全员相同→需求条目级追溯失效（软判定，对应 modeling.md 20.2）
 
 覆盖统计（给 selfcheck 检查2/3/8 客观数据，不替代模型判定，只供证据）：
@@ -38,7 +39,7 @@ selfcheck.md / modeling.md / quality_rules.md / risk.md / coverage.md 完全一�
   - 风险来源：解析第5列“风险来源”，对技术隐含@开发/业务领域@业务/缺陷反哺来源的 P0/P1 提示需台账角色确认
   - 测试点追溯：解析“测试点清单”section，校验每测试点是否被用例覆盖
   - #4 反向需求追溯：解析需求文档条目（第2参数），列出未被用例引用的需求条目
-  - #5 反向行为来源追溯（检查15）：用例 Given/When/Then 断言的业务行为须有来源三选一（需求文档 token / R·TP 引用 / 假设标记）；规则建模 section 规则项无来源标记->疑似脑补规则
+  - #5 反向行为来源追溯（检查15）：用例 Given/When/Then 断言的业务行为须有来源三选一（需求文档 token / R·TP·API 引用 / 假设标记）；规则建模 section 规则项无来源标记->疑似脑补规则
   （风险/测试点清单为强制沉淀 section，缺失则 ⚠ 提示补齐；见 references/output_write.md 追溯性 section）
 
 退出码：0=内容校验全过（覆盖统计与软性提示仍输出，仅供模型参考）；
@@ -669,6 +670,75 @@ _ASSUMPTION_TAG_PATS = [re.compile(p) for p in _BS.get("assumption_tag_patterns"
 _CITATION_PAT = re.compile(_BS.get("citation_pattern", r"(R|TP)\d+"))
 _SOURCE_MARKER_PAT = re.compile(_BS.get("source_marker_pattern", r"来源[:：]"))
 
+# ===== #6 反向接口追溯（契约驱动分支·变更影响清单 -> 用例三类覆盖）=====
+# 变更类型枚举（config/validation_rules.json change_types）；非空时校验变更影响清单的变更类型列
+CHANGE_TYPES = set(_RULES.get("change_types", []))
+
+# 契约类覆盖信号（扫描引用本变更接口的用例文本）
+CONTRACT_PRESENCE_TOKENS = ["不传", "未传", "缺失", "必填缺失", "未提供", "为空", "空值"]
+CONTRACT_TYPE_TOKENS = ["类型错传", "类型不匹配", "类型错误", "异型", "类型非法"]
+CONTRACT_OUTPUT_TOKENS = ["错误码", "状态码", "返回", "status", "code", "400", "403", "409", "500", "200"]
+
+
+def _cases_citing(data_rows, pattern_id):
+    """返回关联规则列精确引用 pattern_id（如 API1/R3/SC2，后非数字避免 API10 误匹配 API1）的用例行。"""
+    if not pattern_id:
+        return []
+    pat = re.compile(re.escape(pattern_id) + r"(?!\d)")
+    return [r for r in data_rows if len(r) > IDX_RULE and pat.search(r[IDX_RULE] or "")]
+
+
+def parse_interface_changes(lines):
+    """解析'变更影响清单'section（接口契约模型），返回变更接口数据行。
+    表头含 接口ID|接口名/路径|方法|变更类型|变更描述|变更字段|受影响规则|受影响场景|风险等级|来源。
+    无该 section 返回 []。"""
+    return parse_section_rows(lines, "变更影响清单|接口契约模型|变更接口清单", ["接口ID", "接口名"])
+
+
+def reverse_interface_trace(data_rows, lines):
+    """#6 反向接口追溯（软判定）：对每个变更接口核查 契约类(A-F) + 规则类(G) + 场景类(H) 覆盖。
+    契约类：引用本 API<序号> 的用例须覆盖 presence(不传/缺失) + type(类型错传) + 出参(错误码/状态码)。
+    规则类：该接口"受影响规则"列的每个 R<序号> 须有用例引用覆盖。
+    场景类：该接口"受影响场景"列的每个 SC<序号> 须有用例引用覆盖。
+    无受影响规则->跳规则类；无受影响场景->跳场景类。无变更影响清单->返回 ([], 0, [])。
+    返回 (未覆盖列表, 变更接口总数, 变更类型越界列表)。"""
+    api_rows = parse_interface_changes(lines)
+    if not api_rows:
+        return [], 0, []
+    uncovered = []
+    ctype_issues = []
+    for ar in api_rows:
+        api_id = ar[0].strip() if len(ar) > 0 else ""
+        path = ar[1].strip() if len(ar) > 1 else ""
+        method = ar[2].strip() if len(ar) > 2 else ""
+        ctype = ar[3].strip() if len(ar) > 3 else ""
+        affected_rules = ar[6].strip() if len(ar) > 6 else ""
+        affected_scenarios = ar[7].strip() if len(ar) > 7 else ""
+        if CHANGE_TYPES and ctype and ctype not in CHANGE_TYPES:
+            ctype_issues.append("接口[%s] 变更类型『%s』不在枚举内" % (api_id or path, ctype))
+        cases = _cases_citing(data_rows, api_id) if api_id else []
+        joined = " ".join(row_text(r) for r in cases)
+        miss = []
+        if not any(t in joined for t in CONTRACT_PRESENCE_TOKENS):
+            miss.append("契约-存在性(不传/缺失)")
+        if not any(t in joined for t in CONTRACT_TYPE_TOKENS):
+            miss.append("契约-类型(类型错传)")
+        if not any(t in joined for t in CONTRACT_OUTPUT_TOKENS):
+            miss.append("契约-出参(错误码/状态码)")
+        if affected_rules:
+            rule_ids = re.findall(r"R\d+", affected_rules)
+            unc_r = [rid for rid in rule_ids if not _cases_citing(data_rows, rid)]
+            if unc_r:
+                miss.append("规则类未覆盖%s" % "/".join(unc_r))
+        if affected_scenarios:
+            sc_ids = re.findall(r"SC\d+", affected_scenarios)
+            unc_s = [sid for sid in sc_ids if not _cases_citing(data_rows, sid)]
+            if unc_s:
+                miss.append("场景类未覆盖%s" % "/".join(unc_s))
+        if miss:
+            uncovered.append("%s %s %s 缺:%s" % (api_id, method, path, ";".join(miss)))
+    return uncovered, len(api_rows), ctype_issues
+
 
 def extract_behavior_signals(text):
     """从用例文本抽取业务行为信号：状态流转目标态 + 模态/约束/机制信号词。返回信号集合。"""
@@ -949,6 +1019,17 @@ def dump_rules():
     print("  风险清单: 表格 风险ID|风险等级|风险描述|关联模块|风险来源；用例'关联规则'列含 R<序号> 精确覆盖每个 P0/P1")
     print("    风险来源取值: 需求推导 / 技术隐含@开发 / 业务领域@业务 / 缺陷反哺（risk.md 三源共验）")
     print("  测试点清单: 表格 测试点ID|场景类型|测试点描述|关联模块；用例'关联规则'列含 TP<序号> 精确覆盖每个测试点")
+    print("  变更影响清单(契约驱动分支): 表格 接口ID|接口名/路径|方法|变更类型|变更描述|变更字段|受影响规则|受影响场景|风险等级|来源")
+    print("    变更类型取值: " + " / ".join(r.get("change_types", [])))
+    print("    用例'关联规则'列含 API<序号> 精确覆盖每个变更接口；来源标 [需求文档<章节>/台账Q<n>/假设A<n>/接口文档<版本>/接口文档diff 旧->新]")
+    print("  场景清单: 表格 场景ID|场景描述|关联模块；用例'关联规则'列含 SC<序号> 精确覆盖每个场景")
+    print()
+    print("【统一接口测试矩阵（契约+规则+场景·仅对变更接口/字段/受影响规则场景）】")
+    print("  契约类: A入参存在性(必填不传/选填不传/多余字段) B入参类型(类型错传/三态) C值域 D组合 E出参契约 F鲁棒性 -> 追溯 API<序号>")
+    print("  规则类: G业务规则(正向/异常/组合/跨字段约束) -> 追溯 R<序号>")
+    print("  场景类: H业务场景(主穿越/分支/异常/上下游) -> 追溯 SC<序号>")
+    print("  收敛: 只对变更字段+受影响规则/场景；P0全量/P1全量或pairwise/P2P3采样；类别不同不合并")
+    print("  #6 反向接口追溯: 每个变更接口须三类覆盖(契约presence+type+出参 / 规则R / 场景SC)；无受影响规则->跳规则类，无受影响场景->跳场景类")
     print()
     print("【软性检查（新增·不改变退出码）】")
     print("  检查13 断言完整性: 状态变更类用例(When含%s) Then 须含数据/状态副作用" % "/".join(["创建","支付","扣减","更新","删除","撤销","退款","发货"]))
@@ -956,7 +1037,7 @@ def dump_rules():
     print("  风险来源待确认: 来源∈{技术隐含@开发,业务领域@业务,缺陷反哺} 的 P0/P1 须在台账角色确认")
     print("  #4 反向需求追溯: 需求文档每条目须被用例引用（传第2参数需求文档启用）")
     print("  检查15/#5 业务行为来源追溯: 用例 Given/When/Then 断言的业务行为须有来源三选一")
-    print("    (a)行为 token 在需求文档 | (b)关联规则引用 R<序号>/TP<序号> | (c)关联规则/用例名称含 假设A<序号>/基于假设")
+    print("    (a)行为 token 在需求文档/接口契约文档 | (b)关联规则引用 R<序号>/TP<序号>/API<序号> | (c)关联规则/用例名称含 假设A<序号>/基于假设")
     print("    三者皆无->疑似脑补，须转问题(P0/P1)/假设(P2/P3)，不得静默保留；行为信号: " + "/".join(r["behavior_source"]["behavior_signals"]))
     print()
     print("【domain_config.json】可选领域覆盖(同名字段替换)：business_anchors / keyword_dims / exception_subtypes / overdesign_exempt_types")
@@ -1131,6 +1212,20 @@ def main():
             print("  ⚠ 疑似未覆盖测试点（供复核）：%s" % "；".join(unc_tp))
         else:
             print("  全部测试点均有用例覆盖")
+
+    # #6 反向接口追溯（变更影响清单 -> 用例引用，契约/规则/场景三类覆盖）
+    unc_api, api_total, ctype_issues = reverse_interface_trace(data_rows, lines)
+    print("-- 反向接口追溯 #6（变更接口 -> 用例 契约/规则/场景 三类覆盖）--")
+    if api_total == 0:
+        print("  跳过（未找到'变更影响清单'section；契约驱动分支未启用或无变更接口）")
+    else:
+        print("  变更接口 %d 个，未覆盖（缺类） %d 个" % (api_total, len(unc_api)))
+        if unc_api:
+            print("  ⚠ 疑似未覆盖（供复核）：%s" % "；".join(unc_api))
+        else:
+            print("  全部变更接口三类(契约/规则/场景)覆盖齐全")
+        if ctype_issues:
+            print("  ⚠ 变更类型越界：%s" % "；".join(ctype_issues))
 
     # 风险来源分布 + 待台账角色确认（risk.md 三源共验）
     src_dist, src_pending = risk_source_report(risk_rows)
