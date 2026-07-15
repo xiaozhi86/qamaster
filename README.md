@@ -41,12 +41,58 @@ QA Master 提供两个核心能力，覆盖「需求评审 → 测试用例设�
 
 **15 阶段主流程**：
 
-```
-0. 需求定位（MANIFEST 索引）   ──► 5. 风险分析（P0-P3）        ──► 10. 覆盖率校验 + 反向追溯
-1. 需求分析 + 澄清（落盘台账） ──► 6. 测试策略匹配（决策表）   ──► 11. 输出前自查（14 项）
-2. 测试需求分析                ──► 7. 测试点建模               ──► 12. 对话展示（投影 + 覆盖矩阵）
-3. 规则建模                    ──► 8. 用例生成（G/W/T）        ──► 13. 一次性写入 .md + 脚本回读
-4. 规格建模（SDD）             ──► 9. 去重                     ──► 14. 人工审核门禁 ─► 15. Excel 生成
+```mermaid
+flowchart TD
+    subgraph G1["① 需求澄清"]
+        P0(["0. 需求定位（MANIFEST 索引）"])
+        P1["1. 需求分析 + 澄清（落盘台账）"]
+        P2["2. 测试需求分析"]
+        P0 --> P1 --> P2
+    end
+    subgraph G2["② 规格建模"]
+        P3["3. 规则建模"]
+        P4["4. 规格建模（SDD）"]
+        P3 --> P4
+    end
+    subgraph G3["③ 风险与策略"]
+        P5["5. 风险分析（P0-P3）"]
+        P6["6. 测试策略匹配（决策表）"]
+        P5 --> P6
+    end
+    subgraph G4["④ 测试设计"]
+        P7["7. 测试点建模"]
+        P8["8. 用例生成（G/W/T）"]
+        P9["9. 去重"]
+        P7 --> P8 --> P9
+    end
+    subgraph G5["⑤ 校验与输出"]
+        P10["10. 覆盖率校验 + 反向追溯"]
+        P11["11. 输出前自查（15 项）"]
+        P12["12. 对话展示（投影 + 覆盖矩阵）"]
+        P13["13. 一次性写入 .md + 脚本回读"]
+        P14{"14. 人工审核门禁"}
+        P15(["15. Excel 生成"])
+        P10 --> P11 --> P12 --> P13 --> P14 --> P15
+    end
+    P2 --> P3
+    P4 --> P5
+    P6 --> P7
+    P9 --> P10
+
+    classDef startEnd fill:#d4edda,stroke:#28a745,color:#155724
+    classDef clarify fill:#d1ecf1,stroke:#17a2b8,color:#0c5460
+    classDef model fill:#e2d9f3,stroke:#6f42c1,color:#4a235a
+    classDef risk fill:#fff3cd,stroke:#ffc107,color:#856404
+    classDef design fill:#d7e9f5,stroke:#3b82c4,color:#1a4a6e
+    classDef check fill:#ffe5b4,stroke:#fd7e14,color:#8a4500
+    classDef gate fill:#f8d7da,stroke:#dc3545,color:#721c24
+    class P0,P15 startEnd
+    class P1,P2 clarify
+    class P3,P4 model
+    class P5,P6 risk
+    class P7,P8,P9 design
+    class P10,P11,P12,P13 check
+    class P14 gate
 ```
 
 **产出物**（统一写入项目根 `case-design-out/`）：
@@ -69,11 +115,46 @@ QA Master 提供两个核心能力，覆盖「需求评审 → 测试用例设�
 
 **九阶段流程**：
 
-```
-1. 并行评审      ──► 4. 优化方案总览（P0/P1/P2 + 影响范围）
-2. 结果汇总去重  ──► 5. 用户确认（必须等待，未确认禁入下一步）
-3. 冲突检测      ──► 6. 需求文档重构（多 Agent 融合版）
-                  ──► 7. 自动复查 ─► 8. 二次修复 ─► 9. 最终输出
+```mermaid
+flowchart TD
+    subgraph G1["① 评审与汇总"]
+        P1(["1. 并行评审（各 Agent 输出）"])
+        P2["2. 结果汇总去重（Review Master）"]
+        P3["3. 冲突检测（业务 vs 技术 / 体验 vs 风控）"]
+        P1 --> P2 --> P3
+    end
+    subgraph G2["② 方案与确认"]
+        P4["4. 优化方案总览（P0/P1/P2 + 影响范围）"]
+        P5{"5. 用户确认（必须等待）"}
+        P4 --> P5
+    end
+    subgraph G3["③ 重构与复查"]
+        P6["6. 需求文档重构（多 Agent 融合版）"]
+        P7{"7. 自动复查（Self-Review Agent）"}
+        P8["8. 二次修复（标注修改点）"]
+        P9(["9. 最终输出"])
+        P6 --> P7
+        P7 -- 无问题 --> P9
+        P7 -- 发现问题 --> P8
+        P8 --> P7
+    end
+    P3 --> P4
+    P5 --> P6
+
+    classDef startEnd fill:#d4edda,stroke:#28a745,color:#155724
+    classDef review fill:#d1ecf1,stroke:#17a2b8,color:#0c5460
+    classDef plan fill:#e2d9f3,stroke:#6f42c1,color:#4a235a
+    classDef build fill:#d7e9f5,stroke:#3b82c4,color:#1a4a6e
+    classDef gate fill:#f8d7da,stroke:#dc3545,color:#721c24
+    classDef check fill:#ffe5b4,stroke:#fd7e14,color:#8a4500
+    classDef fix fill:#fff3cd,stroke:#ffc107,color:#856404
+    class P1,P9 startEnd
+    class P2,P3 review
+    class P4 plan
+    class P5 gate
+    class P6 build
+    class P7 check
+    class P8 fix
 ```
 
 每个 Agent 独立思考、并行输出，标注 `✅已满足 / ❌不满足 / ⚠风险项`；Review Master 汇总去重并检测 Agent 间冲突（业务 vs 技术、体验 vs 风控），输出权衡推荐方案。产出落盘到项目根 `requirement-review-out/` 目录。
@@ -112,27 +193,81 @@ flowchart TD
 
 ## 🚀 快速开始
 
-### 平台一：Claude Code（原生 plugin）
+> 三平台通用。**Claude Code 用户直接看下方「平台一」**（两条命令、GitHub 自动下载、最省事）；Codex / Cursor 见各自小节。
 
-本仓库根目录即一个 Claude Code plugin（含 `.claude-plugin/plugin.json` + `marketplace.json`）。`skills/` 下两个 skill 原生可发现，`commands/` 提供 `/case-design`、`/requirement-review` 显式触发。
+### 平台一：Claude Code（原生 plugin·推荐）
 
-**安装**：
+> **最简路径**：仓库已公开，Claude Code 会自动从 GitHub 下载整个仓库并安装，无需你手动 `git clone`。两条命令搞定，适合零基础。CLI / 桌面 app / web / IDE 插件用法一致。
+
+**前置**：已安装 Claude Code；能联网；浏览器能匿名打开 `https://github.com/xiaozhi86/qamaster`（已公开）。
+
+#### 步骤 1 — 添加 marketplace（自动从 GitHub 下载）
+
+在 Claude Code 对话输入框直接输入下面这条（`/plugin` 是 Claude Code 命令，不是 shell，**不要**加 `!` 前缀）：
 
 ```
 /plugin marketplace add xiaozhi86/qamaster
+```
+
+- Claude Code 自动从 `https://github.com/xiaozhi86/qamaster` 克隆仓库到本地缓存，读取 `.claude-plugin/marketplace.json`，注册名为 `qamaster` 的 marketplace。
+- 首次添加第三方 marketplace 会弹**信任确认** -> 选 **Yes / 信任**。
+- 看到类似「marketplace `qamaster` 添加成功，含 1 个插件」即完成。
+
+#### 步骤 2 — 安装插件
+
+```
 /plugin install qamaster@qamaster
 ```
 
-> 也可用本地路径：`/plugin marketplace add <本仓库本地路径>`
+- 格式为 `插件名@marketplace名`，本工程两者都叫 `qamaster`。
+- 可能再弹**启用确认** -> 确认启用。
+- 安装后自动注册：2 个 skill（`case-design`、`requirement-review`）+ 2 个斜杠命令（`/case-design`、`/requirement-review`）。
+- 也可图形化操作：输入 `/plugin` 打开界面 -> 找到 `qamaster` -> Install。
 
-**使用**：
+#### 步骤 3 — 新开一个会话（关键，常被忽略）
+
+插件里的 skill 和命令**只在新会话才会加载**。关掉当前会话、重新开一个，否则装了也触发不了。
+
+#### 步骤 4 — 验证安装成功
+
+1. 输入 `/plugin` 打开管理界面 -> 能看到 `qamaster`，状态为 **enabled**。
+2. 新会话里输入 `/case-design` -> 能自动补全并触发。
+
+两条都满足即安装成功。
+
+#### 步骤 5 — 使用
 
 ```
 /case-design
 /requirement-review
 ```
 
-> 两个 skill 均设了 `disable-model-invocation: true`（不自动触发），故通过上述 `/` 命令显式调用；若你的版本下 `/` 命令未自动唤起 skill，直接说「使用 case-design skill」即可。
+> 两个 skill 均设了 `disable-model-invocation: true`（不自动触发），必须用 `/` 命令显式调用；若你的版本下 `/` 命令未唤起 skill，直接说「使用 case-design skill」即可。
+
+#### 后续：更新 / 卸载
+
+- **更新**（你 `git push` 新版本后）：`/plugin marketplace update qamaster`，或 `/plugin` 界面里 Update；完成后**新开会话**生效。
+- **卸载**：`/plugin uninstall qamaster`，或 `/plugin` 界面卸载。
+
+#### 备选：本地路径安装（开发 / 即时生效用）
+
+不想走 GitHub、或想用本地未推送的改动：
+
+```
+/plugin marketplace add D:/qamaster
+/plugin install qamaster@qamaster
+```
+
+> 远程方式拉的是 GitHub 上的版本；本地未 `git push` 的改动只有本地路径方式才能立即生效。
+
+#### 常见问题
+
+| 现象 | 处理 |
+| --- | --- |
+| 步骤 1 报 404 / 无权限 | 仓库被设回私有；确认 `https://github.com/xiaozhi86/qamaster` 能匿名打开 |
+| 装完 `/case-design` 没反应 | 没新开会话；或插件未 enabled（`/plugin` 看状态） |
+| skill 跑起来脚本报错 | 装 Python 3.7+（Windows 用 python.org 真 Python）；要生成 Excel 再 `pip install openpyxl` |
+| 拉到旧版本 | 本地改动没 `git push`；先 push 再 `/plugin marketplace update qamaster` |
 
 ### 平台二：Codex（AGENTS.md + 自定义 prompt）
 
