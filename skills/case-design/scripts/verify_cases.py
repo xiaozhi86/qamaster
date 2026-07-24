@@ -32,7 +32,7 @@ selfcheck.md / modeling.md / quality_rules.md / risk.md / coverage.md 完全一�
   - 标签维度：测试类型种类数、测试维度种类数、风险等级分布
   - 关键词维度（对测试类型标签错标鲁棒，扫描用例全文）：并发/幂等/安全/上下游/时间组合
   - 状态机流转：合法/非法/回滚/终态（非法流转为状态机核心，0 则提示）
-  - 边界深度：边界用例是否覆盖 最小/最大/临界 三值
+  - 边界深度：边界用例是否覆盖 最小/最大/临界/边界内 四值（边界内=min+1/max-1 刚好满足约束应通过）
   - 异常子类：异常用例覆盖的子类数（输入/数据/状态/权限/服务/网络/缓存/MQ）
   - 规则追溯：解析“规则建模”section 的规则类别，校验每类是否被用例覆盖
   - 风险追溯：解析“风险清单”section，校验每 P0/P1 风险是否被用例覆盖
@@ -135,10 +135,12 @@ FLOW_ROLLBACK = list(_RULES["flow_rollback"])
 FLOW_TERMINAL = list(_RULES["flow_terminal"])
 
 # 边界深度（quality_rules.md 11.4 / modeling.md 边界类）
+# 4 值模型：最小 / 最大 / 临界(=边界点) / 边界内(min+1/max-1, 刚好满足约束应通过)
 BOUNDARY_KEYWORDS = list(_RULES["boundary_keywords"])
 BOUNDARY_MIN_KW = list(_RULES["boundary_min_kw"])
 BOUNDARY_MAX_KW = list(_RULES["boundary_max_kw"])
 BOUNDARY_CRITICAL_KW = list(_RULES["boundary_critical_kw"])
+BOUNDARY_INSIDE_KW = list(_RULES["boundary_inside_kw"])
 
 # 异常子类（coverage.md 8.2）
 EXCEPTION_SUBTYPES = {k: list(v) for k, v in _RULES["exception_subtypes"].items()}
@@ -196,16 +198,10 @@ def is_separator(cells):
     return True
 
 
-def parse_table(path):
-    """解析 .md 中的用例表，返回 (header_cells, data_rows, full_lines)。"""
-    if not os.path.exists(path):
-        return None, "文件不存在: %s" % path
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception as e:
-        return None, "读取失败: %s" % e
-
+def parse_table_from_lines(lines):
+    """解析已读入的 .md 行列表中的用例表，返回 (header_cells, data_rows, full_lines)。
+    与文件读无关——供内存内 gate 调用（Phase 8 出口 gate 在写盘前对 Write 的 content
+    即将落盘文本跑全量校验，零临时文件）。"""
     header_idx = None
     header_cells = None
     for i, ln in enumerate(lines):
@@ -215,7 +211,7 @@ def parse_table(path):
             header_cells = cells
             break
     if header_idx is None:
-        return None, "未找到表头行（含‘用例ID’的表格行）"
+        return None, "未找到表头行（含'用例ID'的表格行）"
 
     data_rows = []
     for ln in lines[header_idx + 1:]:
@@ -229,6 +225,19 @@ def parse_table(path):
             continue
         data_rows.append(cells)
     return (header_cells, data_rows, lines), None
+
+
+def parse_table(path):
+    """解析 .md 中的用例表，返回 (header_cells, data_rows, full_lines)。
+    文件入口（Phase 13 回读用）；内部读文件后委托 parse_table_from_lines。"""
+    if not os.path.exists(path):
+        return None, "文件不存在: %s" % path
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return None, "读取失败: %s" % e
+    return parse_table_from_lines(lines)
 
 
 def count_segments(name):
@@ -401,14 +410,14 @@ def row_text(r):
 
 
 def coverage_stats(data_rows):
-    """标签维度覆盖统计（原有）+ 关键词维度 + 状态机 + 边界深度 + 异常子类。"""
+    """标签维度覆盖统计（原有）+ 关键词维度 + 状态机 + 边界深度(4值) + 异常子类。"""
     type_count = {}
     dim_count = {}
     level_count = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
     flow_legal = flow_illegal = flow_rollback = flow_terminal = 0
     kw_dim_count = {k: 0 for k in KEYWORD_DIMS}
     bound_total = 0
-    bound_min = bound_max = bound_critical = 0
+    bound_min = bound_max = bound_critical = bound_inside = 0
     exc_total = 0
     exc_subtypes_hit = {k: 0 for k in EXCEPTION_SUBTYPES}
 
@@ -455,6 +464,8 @@ def coverage_stats(data_rows):
                 bound_max += 1
             if any(kw in text for kw in BOUNDARY_CRITICAL_KW):
                 bound_critical += 1
+            if any(kw in text for kw in BOUNDARY_INSIDE_KW):
+                bound_inside += 1
 
         # 异常子类
         is_exception = (ctype == "异常") or any(kw in text for kw in ["失败", "拦截", "错误", "非法", "异常", "超时"])
@@ -474,6 +485,7 @@ def coverage_stats(data_rows):
         "kw_dim_count": kw_dim_count,
         "bound_total": bound_total, "bound_min": bound_min,
         "bound_max": bound_max, "bound_critical": bound_critical,
+        "bound_inside": bound_inside,
         "exc_total": exc_total, "exc_subtypes_hit": exc_subtypes_hit,
     }
 
@@ -772,21 +784,12 @@ def _has_rule_citation(case_cells):
     return False
 
 
-def check_behavior_source(data_rows, req_doc_path):
-    """检查15 业务行为来源追溯（#5·软判定）。用例 Given/When/Then 断言的业务行为须有来源
-    三选一：(a)行为 token 出现在需求文档；(b)关联规则引用 R<序号>/TP<序号>（规则建模/风险清单已沉淀）；
-    (c)关联规则或用例名称含假设标记 假设A<序号>/基于假设。三者皆无且行为信号不在需求文档
-    -> 疑似无来源业务行为（脑补），供 selfcheck 检查15 转问题(P0/P1)/假设(P2/P3)，不得静默保留。
-    规则项本身的来源由 check_rule_source 另查（破 rule_coverage 自证洗白）。
-    无需求文档时退回 (b)(c) 判定（无法做 a 的 token 核对，返回 has_req=False 供提示）。
-    返回 (疑似条数, 疑似列表, 是否提供了可读需求文档)。"""
-    req_text = ""
-    if req_doc_path and os.path.exists(req_doc_path):
-        try:
-            with open(req_doc_path, "r", encoding="utf-8") as f:
-                req_text = f.read()
-        except Exception:
-            req_text = ""
+def check_behavior_source_lines(data_rows, req_doc_text):
+    """检查15 业务行为来源追溯（#5·软判定）的内存入口：接受预读的需求文档全文文本
+    而非文件路径。check_behavior_source(data_rows, req_doc_path) 读盘后委托本函数。
+    语义/返回与原实现一致：返回 (疑似条数, 疑似列表, 是否提供了可读需求文档)。
+    req_doc_text 为空串时退回 (b)(c) 判定（无法做 a 的 token 核对，has_req=False）。"""
+    req_text = req_doc_text or ""
     has_req = req_text != ""
     suspects = []
     for i, r in enumerate(data_rows, 1):
@@ -804,6 +807,20 @@ def check_behavior_source(data_rows, req_doc_path):
             suspects.append("行%d: 疑似无来源业务行为（检查15）：未引用R/TP、无假设标记，且行为信号[%s]不在需求文档->需转问题/假设"
                             % (i, "/".join(ungrounded)[:60]))
     return len(suspects), suspects, has_req
+
+
+def check_behavior_source(data_rows, req_doc_path):
+    """检查15 业务行为来源追溯（#5·软判定）。文件入口（Phase 13 回读用）：
+    读需求文档文件后委托 check_behavior_source_lines。返回语义不变。
+    （实现见 check_behavior_source_lines 的文档注释。）"""
+    req_text = ""
+    if req_doc_path and os.path.exists(req_doc_path):
+        try:
+            with open(req_doc_path, "r", encoding="utf-8") as f:
+                req_text = f.read()
+        except Exception:
+            req_text = ""
+    return check_behavior_source_lines(data_rows, req_text)
 
 
 def check_rule_source(lines):
@@ -905,16 +922,10 @@ def risk_source_report(risk_rows):
     return dist, pending
 
 
-def parse_requirement_items(req_doc_path):
-    """从需求文档提取需求条目（标题行 # + 显式编号 REQ-xxx / 需求N）。
-    返回 [(条目标识, 原行)]。文件不存在/不可读返回 []。"""
-    if not req_doc_path or not os.path.exists(req_doc_path):
-        return []
-    try:
-        with open(req_doc_path, "r", encoding="utf-8") as f:
-            rlines = f.readlines()
-    except Exception:
-        return []
+def parse_requirement_items_from_lines(rlines):
+    """从已读入的需求文档行列表提取需求条目（标题行 # + 显式编号 REQ-xxx / 需求N）。
+    返回 [(条目标识, 原行)]。空列表返回 []。parse_requirement_items(req_doc_path)
+    读盘后委托本函数；供内存内 gate 调用（#4 反向需求追溯无需落盘需求文档）。"""
     items = []
     heading_level = 99
     for ln in rlines:
@@ -936,6 +947,19 @@ def parse_requirement_items(req_doc_path):
     return items
 
 
+def parse_requirement_items(req_doc_path):
+    """从需求文档提取需求条目。文件入口（Phase 13 回读用）：读盘后委托
+    parse_requirement_items_from_lines。返回 [(条目标识, 原行)]，文件不存在/不可读返回 []。"""
+    if not req_doc_path or not os.path.exists(req_doc_path):
+        return []
+    try:
+        with open(req_doc_path, "r", encoding="utf-8") as f:
+            rlines = f.readlines()
+    except Exception:
+        return []
+    return parse_requirement_items_from_lines(rlines)
+
+
 def reverse_requirement_trace(data_rows, req_doc_path):
     """#4 反向需求追溯（软判定）：需求文档每条条目须有≥1用例引用（关联需求ID列）。
     未被引用的条目列为'未覆盖需求'。无需求文档（未传第2参数）则跳过，返回 (None, 0)。"""
@@ -954,6 +978,136 @@ def reverse_requirement_trace(data_rows, req_doc_path):
             if not any(item_id in rid for rid in req_ids):
                 uncovered.append(item_id)
     return uncovered, len(items)
+
+
+def reverse_requirement_trace_items(data_rows, req_items):
+    """#4 反向需求追溯的内存入口：接受预解析的需求条目（parse_requirement_items_from_lines
+    的返回值）而非文件路径。供内存内 gate（Phase 8）调用，无需落盘需求文档。
+    无条目则跳过，返回 (None, 0)。"""
+    if not req_items:
+        return None, 0
+    req_ids = [r[IDX_REQ].strip() if len(r) > IDX_REQ else "" for r in data_rows]
+    uncovered = []
+    for item_id, _ in req_items:
+        if item_id.startswith("标题:"):
+            toks = re.findall(r"[一-龥]{2,}|[A-Za-z]{2,}", item_id[3:])
+            toks = toks[:3]
+            if toks and not any(any(tok in rid for tok in toks) for rid in req_ids):
+                uncovered.append(item_id)
+        else:
+            if not any(item_id in rid for rid in req_ids):
+                uncovered.append(item_id)
+    return uncovered, len(req_items)
+
+
+def collect_all_findings(data_rows, lines, req_doc_lines=None):
+    """把全部检查/统计/追溯一次性计算并聚合成结构化 dict（不打印）。
+    供内存内 gate（Phase 8 出口 gate）与文件入口（Phase 13 回读）共用同一计算，
+    保证"写前内存校验"与"写后回读校验"判定口径完全一致。
+
+    参数：
+      data_rows: parse_table_from_lines 返回的用例行列表
+      lines: 同一份 .md 的全部行（供 section 解析）
+      req_doc_lines: 可选，预读的需求文档行列表；非 None 且非空时启用 #4 反向需求追溯
+                     + #5 业务行为 token 核对；为 None 时这两项跳过（与 Phase 13
+                     "未传第2参数则跳过"语义一致）
+
+    返回 dict：
+      {n, hard_violations,
+       soft:{assertions:[n,list], storage:[n,list], schema:[n_or_None,list],
+             dups:[n,list], overdesign:[n,list], reqid:[n,list],
+             completeness:[n,list], behavior:[n,list,has_req], rule_source:[n,list]},
+       coverage:<coverage_stats dict>,
+       traces:{rule:[uncovered_or_None,total], risk:[uncovered_or_None,p0p1,total],
+               testpoint:[uncovered_or_None,total],
+               interface:[uncovered_list,api_total,ctype_issues],
+               requirement:[uncovered_or_None,total]},
+       risk_source:[dist_dict,pending_list]}
+
+    设计约束（不可违背）：
+    * 不改任何 check_* 函数签名/返回/逻辑——本函数只做调用与聚合
+    * 不打印——打印由调用方负责（main() 走 print_findings，gate 走 dict 读取）
+    * hard_violations = check_ids + check_fields，与 main() 一致
+    """
+    # 硬性校验
+    id_violations = check_ids(data_rows)
+    field_violations = check_fields(data_rows)
+    hard_violations = id_violations + field_violations
+
+    # 软性校验
+    assert_n, assert_list = check_assertions(data_rows)
+    storage_n, storage_list = check_storage(data_rows)
+    schema_n, schema_list = check_storage_schema(data_rows, lines)
+    dup_n, dup_list = check_duplicates(data_rows)
+    overdesign_n, overdesign_list = check_overdesign(data_rows)
+    reqid_n, reqid_list = check_requirement_id(data_rows)
+    complete_n, complete_list = check_assertion_completeness(data_rows)
+    if req_doc_lines is not None:
+        req_doc_text = "".join(req_doc_lines) if req_doc_lines else ""
+        behsrc_n, behsrc_list, has_req = check_behavior_source_lines(data_rows, req_doc_text)
+        req_items = parse_requirement_items_from_lines(req_doc_lines or [])
+        unc_req, req_total = reverse_requirement_trace_items(data_rows, req_items)
+    else:
+        # 未提供需求文档：#5 退回 (b)(c) 判定（无 token 核对，has_req=False），
+        # #4 跳过。与 Phase 13 "未传第2参数"行为一致。
+        behsrc_n, behsrc_list, has_req = check_behavior_source_lines(data_rows, "")
+        unc_req, req_total = None, 0
+    rulesrc_n, rulesrc_list = check_rule_source(lines)
+
+    # 覆盖统计
+    stats = coverage_stats(data_rows)
+
+    # 追溯
+    categories = parse_rule_categories(lines)
+    unc_rule, total_cat = rule_coverage(data_rows, categories)
+    risk_rows = parse_section_rows(lines, "风险清单|风险分析|风险列表", ["风险ID", "风险等级"])
+    unc_risk, p0p1_total, risk_total = risk_coverage(data_rows, risk_rows)
+    tp_rows = parse_section_rows(lines, "测试点清单|测试点列表|测试点建模", ["测试点ID", "测试点"])
+    unc_tp, tp_total = testpoint_coverage(data_rows, tp_rows)
+    unc_api, api_total, ctype_issues = reverse_interface_trace(data_rows, lines)
+    src_dist, src_pending = risk_source_report(risk_rows)
+
+    return {
+        "n": len(data_rows),
+        "hard_violations": hard_violations,
+        "soft": {
+            "assertions": [assert_n, assert_list],
+            "storage": [storage_n, storage_list],
+            "schema": [schema_n, schema_list],
+            "dups": [dup_n, dup_list],
+            "overdesign": [overdesign_n, overdesign_list],
+            "reqid": [reqid_n, reqid_list],
+            "completeness": [complete_n, complete_list],
+            "behavior": [behsrc_n, behsrc_list, has_req],
+            "rule_source": [rulesrc_n, rulesrc_list],
+        },
+        "coverage": stats,
+        "traces": {
+            "rule": [unc_rule, total_cat],
+            "risk": [unc_risk, p0p1_total, risk_total],
+            "testpoint": [unc_tp, tp_total],
+            "interface": [unc_api, api_total, ctype_issues],
+            "requirement": [unc_req, req_total],
+        },
+        "risk_source": [src_dist, src_pending],
+    }
+
+
+def run_inmemory(lines, req_doc_lines=None):
+    """内存内全量校验入口（Phase 8 出口 gate 调用，零文件操作）。
+    输入：lines=Write 即将落盘的完整 .md 文本（按行）；
+          req_doc_lines=可选，预读的需求文档行列表（启用 #4/#5）。
+    输出：(parsed, findings_dict)：
+      parsed=None 且 findings=None -> 表头解析失败（gate 须提示结构缺陷）；
+      否则 findings=collect_all_findings 的 dict。
+    与文件入口 main() 口径一致：同一份文本经 run_inmemory 与经
+    `python verify_cases.py <file> [req.md]` 的判定结果相同。"""
+    parsed, err = parse_table_from_lines(lines)
+    if parsed is None:
+        return None, None
+    _header, data_rows, _lines = parsed
+    findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines)
+    return parsed, findings
 
 
 def dump_rules():
@@ -1001,10 +1155,11 @@ def dump_rules():
     print("  回滚: " + "/".join(r["flow_rollback"]))
     print("  终态: " + "/".join(r["flow_terminal"]))
     print()
-    print("【边界深度】(最小/最大/临界 三者任一=0 且有边界用例时⚠)")
+    print("【边界深度】(最小/最大/临界/边界内 四者任一=0 且有边界用例时⚠；边界内=min+1/max-1 刚好满足应通过)")
     print("  最小: " + "/".join(r["boundary_min_kw"]))
     print("  最大: " + "/".join(r["boundary_max_kw"]))
     print("  临界: " + "/".join(r["boundary_critical_kw"]))
+    print("  边界内: " + "/".join(r["boundary_inside_kw"]))
     print("  识别词: " + "/".join(r["boundary_keywords"]))
     print()
     print("【异常子类(8类)】")
@@ -1044,51 +1199,46 @@ def dump_rules():
     print("=" * 64)
 
 
-def main():
-    if len(sys.argv) >= 2 and sys.argv[1] in ("--dump-rules", "--rules"):
-        dump_rules()
-        return 0
-    if len(sys.argv) < 2:
-        print("用法: python verify_cases.py <TC文件.md> [需求文档.md]  |  --dump-rules 查看规则契约")
-        print("  第2参数（可选）：需求文档，用于 #4 反向需求追溯")
-        return 1
-
-    path = sys.argv[1]
-    req_doc_path = sys.argv[2] if len(sys.argv) >= 3 else None
-    parsed, err = parse_table(path)
-    if parsed is None:
-        print(err)
-        return 1
-    header_cells, data_rows, lines = parsed
-    n = len(data_rows)
+def print_findings(findings, basename):
+    """打印 collect_all_findings 的结果（文件入口 Phase 13 回读用）。
+    输出与重构前 main() 内联打印字节级一致（回归安全）：同一份 .md 经
+    `python verify_cases.py <file>` 与重构前产出完全相同的 stdout。
+    内存内 gate 不调用本函数（gate 直接读 dict 做自修决策，不打 human-facing 报告）。"""
+    n = findings["n"]
+    soft = findings["soft"]
+    stats = findings["coverage"]
+    traces = findings["traces"]
+    src_dist, src_pending = findings["risk_source"]
 
     print("===== 用例内容校验 + 覆盖统计 =====")
-    print("文件: %s" % os.path.basename(path))
+    print("文件: %s" % basename)
     print("用例条数: %d" % n)
     print("-" * 48)
 
-    # 硬性校验
-    id_violations = check_ids(data_rows)
-    field_violations = check_fields(data_rows)
-    hard_violations = id_violations + field_violations
+    # 硬性校验（注：findings.hard_violations 已含 id+field；下方分组打印需各自复取，
+    # check_ids/check_fields 为纯函数幂等，与原 main 调用次序一致，回归安全）
+    hard_violations = findings["hard_violations"]
+    data_rows_for_hard = findings.get("_data_rows")
+    id_v = check_ids(data_rows_for_hard) if data_rows_for_hard else []
+    field_v = check_fields(data_rows_for_hard) if data_rows_for_hard else []
     print("【硬性校验·不通过即 exit=1】")
-    print("检查5 ID唯一连续: %s" % ("通过" if not id_violations else "不通过"))
-    for v in id_violations:
+    print("检查5 ID唯一连续: %s" % ("通过" if not id_v else "不通过"))
+    for v in id_v:
         print("  - %s" % v)
-    print("检查11 字段规范(枚举/四段/固定列/等级): %s" % ("通过" if not field_violations else "不通过"))
-    for v in field_violations:
+    print("检查11 字段规范(枚举/四段/固定列/等级): %s" % ("通过" if not field_v else "不通过"))
+    for v in field_v:
         print("  - %s" % v)
 
     # 软性校验
-    assert_n, assert_list = check_assertions(data_rows)
-    storage_n, storage_list = check_storage(data_rows)
-    schema_n, schema_list = check_storage_schema(data_rows, lines)
-    dup_n, dup_list = check_duplicates(data_rows)
-    overdesign_n, overdesign_list = check_overdesign(data_rows)
-    reqid_n, reqid_list = check_requirement_id(data_rows)
-    complete_n, complete_list = check_assertion_completeness(data_rows)
-    behsrc_n, behsrc_list, has_req = check_behavior_source(data_rows, req_doc_path)
-    rulesrc_n, rulesrc_list = check_rule_source(lines)
+    assert_n, assert_list = soft["assertions"]
+    storage_n, storage_list = soft["storage"]
+    schema_n, schema_list = soft["schema"]
+    dup_n, dup_list = soft["dups"]
+    overdesign_n, overdesign_list = soft["overdesign"]
+    reqid_n, reqid_list = soft["reqid"]
+    complete_n, complete_list = soft["completeness"]
+    behsrc_n, behsrc_list, has_req = soft["behavior"]
+    rulesrc_n, rulesrc_list = soft["rule_source"]
     print("-" * 48)
     print("【软性校验·列疑似条数，供 selfcheck 决策】")
     print("检查4 断言可观测: 疑似 %d 条" % assert_n)
@@ -1128,7 +1278,6 @@ def main():
         print("  - %s" % v)
 
     # 覆盖统计
-    stats = coverage_stats(data_rows)
     print("-" * 48)
     print("【覆盖统计·供 selfcheck 检查2/3/8 参考】")
     print("-- 标签维度 --")
@@ -1147,20 +1296,23 @@ def main():
     flow_warn = "（⚠ 非法流转=0，状态机测试缺核心范式）" if flow_total > 0 and stats["flow_illegal"] == 0 else ""
     print("  合法=%d / 非法=%d / 回滚=%d / 其中终态相关=%d%s" % (
         stats["flow_legal"], stats["flow_illegal"], stats["flow_rollback"], stats["flow_terminal"], flow_warn))
-    print("-- 边界深度（references/quality_rules.md 11.4）--")
+    print("-- 边界深度（references/quality_rules.md 11.4 / modeling.md 边界类 4 值）--")
     if stats["bound_total"] > 0:
         depth_warn = ""
-        if stats["bound_min"] == 0 or stats["bound_max"] == 0 or stats["bound_critical"] == 0:
-            miss = []
-            if stats["bound_min"] == 0:
-                miss.append("最小")
-            if stats["bound_max"] == 0:
-                miss.append("最大")
-            if stats["bound_critical"] == 0:
-                miss.append("临界")
+        miss = []
+        if stats["bound_min"] == 0:
+            miss.append("最小")
+        if stats["bound_max"] == 0:
+            miss.append("最大")
+        if stats["bound_critical"] == 0:
+            miss.append("临界")
+        if stats["bound_inside"] == 0:
+            miss.append("边界内")
+        if miss:
             depth_warn = "（⚠ 疑似边界深度不足，缺%s）" % "/".join(miss)
-        print("  边界用例 %d 条，覆盖 最小=%d / 最大=%d / 临界=%d%s" % (
-            stats["bound_total"], stats["bound_min"], stats["bound_max"], stats["bound_critical"], depth_warn))
+        print("  边界用例 %d 条，覆盖 最小=%d / 最大=%d / 临界=%d / 边界内=%d%s" % (
+            stats["bound_total"], stats["bound_min"], stats["bound_max"],
+            stats["bound_critical"], stats["bound_inside"], depth_warn))
     else:
         print("  边界用例 0 条（若无边界场景可忽略，否则提示补齐）")
     print("-- 异常子类（references/coverage.md 8.2）--")
@@ -1174,8 +1326,7 @@ def main():
         print("  异常用例 0 条（若无异常场景可忽略）")
 
     # 规则追溯
-    categories = parse_rule_categories(lines)
-    uncovered, total_cat = rule_coverage(data_rows, categories)
+    uncovered, total_cat = traces["rule"]
     print("-- 规则追溯（解析'规则建模'section，校验每类被用例覆盖）--")
     if total_cat == 0:
         print("  未找到'规则建模'section（或无粗体规则项），跳过规则追溯校验")
@@ -1187,8 +1338,7 @@ def main():
             print("  全部规则类别均有用例覆盖")
 
     # 风险追溯（第5阶段风险清单 → 用例）
-    risk_rows = parse_section_rows(lines, "风险清单|风险分析|风险列表", ["风险ID", "风险等级"])
-    unc_risk, p0p1_total, risk_total = risk_coverage(data_rows, risk_rows)
+    unc_risk, p0p1_total, risk_total = traces["risk"]
     print("-- 风险追溯（解析'风险清单'section，校验每 P0/P1 风险被用例覆盖）--")
     if risk_total == 0:
         print("  ⚠ 未找到'风险清单'section（强制沉淀，请补齐以启用闭环与跨会话记忆）")
@@ -1201,8 +1351,7 @@ def main():
             print("  全部 P0/P1 风险均有用例覆盖")
 
     # 测试点追溯（第7阶段测试点清单 → 用例）
-    tp_rows = parse_section_rows(lines, "测试点清单|测试点列表|测试点建模", ["测试点ID", "测试点"])
-    unc_tp, tp_total = testpoint_coverage(data_rows, tp_rows)
+    unc_tp, tp_total = traces["testpoint"]
     print("-- 测试点追溯（解析'测试点清单'section，校验每测试点被用例覆盖）--")
     if tp_total == 0:
         print("  ⚠ 未找到'测试点清单'section（强制沉淀，请补齐以启用闭环与跨会话记忆）")
@@ -1214,7 +1363,7 @@ def main():
             print("  全部测试点均有用例覆盖")
 
     # #6 反向接口追溯（变更影响清单 -> 用例引用，契约/规则/场景三类覆盖）
-    unc_api, api_total, ctype_issues = reverse_interface_trace(data_rows, lines)
+    unc_api, api_total, ctype_issues = traces["interface"]
     print("-- 反向接口追溯 #6（变更接口 -> 用例 契约/规则/场景 三类覆盖）--")
     if api_total == 0:
         print("  跳过（未找到'变更影响清单'section；契约驱动分支未启用或无变更接口）")
@@ -1228,9 +1377,10 @@ def main():
             print("  ⚠ 变更类型越界：%s" % "；".join(ctype_issues))
 
     # 风险来源分布 + 待台账角色确认（risk.md 三源共验）
-    src_dist, src_pending = risk_source_report(risk_rows)
+    # risk_rows 是否存在以 risk_total 判定（traces.risk[2]），与重构前 main 用 risk_rows 真值判定一致
+    risk_total = traces["risk"][2]
     print("-- 风险来源（risk.md 三源共验，第5列为'风险来源'）--")
-    if not risk_rows:
+    if risk_total == 0:
         print("  未找到风险清单，跳过风险来源校验")
     else:
         if src_dist:
@@ -1245,7 +1395,7 @@ def main():
             print("  无需台账角色确认的风险（或 P0/P1 均为需求推导）")
 
     # #4 反向需求追溯（需求文档条目 → 用例引用）
-    unc_req, req_total = reverse_requirement_trace(data_rows, req_doc_path)
+    unc_req, req_total = traces["requirement"]
     print("-- 反向需求追溯 #4（需求条目 → 用例引用）--")
     if unc_req is None:
         print("  跳过（未传需求文档第2参数，或文档无可解析章节；传 'python verify_cases.py <TC.md> <REQ.md>' 启用）")
@@ -1266,7 +1416,40 @@ def main():
     print("（软性校验与覆盖统计不改变退出码，供模型 selfcheck 决策）")
     print("=" * 48)
 
-    return 1 if hard_violations else 0
+
+def main():
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--dump-rules", "--rules"):
+        dump_rules()
+        return 0
+    if len(sys.argv) < 2:
+        print("用法: python verify_cases.py <TC文件.md> [需求文档.md]  |  --dump-rules 查看规则契约")
+        print("  第2参数（可选）：需求文档，用于 #4 反向需求追溯")
+        return 1
+
+    path = sys.argv[1]
+    req_doc_path = sys.argv[2] if len(sys.argv) >= 3 else None
+    parsed, err = parse_table(path)
+    if parsed is None:
+        print(err)
+        return 1
+    header_cells, data_rows, lines = parsed
+
+    # 读需求文档行（供 #4/#5）；路径不存在/不可读则传 None（与重构前 check_behavior_source/
+    # reverse_requirement_trace 的文件不存在兜底语义一致：#5 退回 (b)(c)、#4 跳过）
+    req_doc_lines = None
+    if req_doc_path and os.path.exists(req_doc_path):
+        try:
+            with open(req_doc_path, "r", encoding="utf-8") as f:
+                req_doc_lines = f.readlines()
+        except Exception:
+            req_doc_lines = None
+
+    findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines)
+    # 附 data_rows 供 print_findings 复算 id/field 分组（幂等，与原 main 调用次序一致）
+    findings["_data_rows"] = data_rows
+    print_findings(findings, os.path.basename(path))
+
+    return 1 if findings["hard_violations"] else 0
 
 
 if __name__ == "__main__":

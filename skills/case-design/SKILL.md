@@ -165,12 +165,12 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 1. Requirement Analysis + Clarification（需求分析与澄清，落盘台账，问题按角色路由 @开发/@产品/@业务，详见 `references/clarification.md`）
 2. Test Requirement Analysis（测试需求分析，维度见 `references/coverage.md`）
-3. Rule Modeling（规则建模，详见 `references/modeling.md`）
+3. Rule Modeling（规则建模，详见 `references/modeling.md`；含**第3阶段出口机器 gate**——规则来源 check_rule_source，≤2轮内存自修）
 4. Specification Modeling（规格建模 SDD，State/Exception/契约标注事实来源由 @开发 校对，详见 `references/modeling.md`）
-5. Risk Analysis（风险分析，三源共验产出 P0-P3：需求推导+技术隐含@开发+业务领域@业务+缺陷反哺，详见 `references/risk.md`）
+5. Risk Analysis（风险分析，三源共验产出 P0-P3：需求推导+技术隐含@开发+业务领域@业务+缺陷反哺，详见 `references/risk.md`；含**第5阶段出口机器 gate**——风险来源 risk_source_report，≤2轮内存自修；含**第5阶段 critique 循环**——P0 漏标对抗式第二视角，≤2轮 critique 自修）
 6. Test Strategy Matching（测试策略匹配，决策表见 `references/methods.md`）
 7. Test Point Modeling（测试点建模，维度见 `references/coverage.md`）
-8. Test Case Generation（用例生成，Given/When/Then + AI友好 + 字段规范 + 断言完整性，详见 `references/modeling.md` 与 `references/quality_rules.md`）
+8. Test Case Generation（用例生成，Given/When/Then + AI友好 + 字段规范 + 断言完整性，详见 `references/modeling.md` 与 `references/quality_rules.md`；含**第8阶段出口机器 gate**——verify_cases.py run_inmemory 全量校验机器可判项，≤2轮内存自修，详见 `references/modeling.md` 15.7）
 9. Duplicate Removal（去重，详见 `references/dedup_coverage.md`）
 10. Coverage Validation（覆盖率校验 + 反向需求追溯 #4 + 反向行为来源追溯 #5，详见 `references/dedup_coverage.md`）
 11. Pre-Output Self-Check（输出前自查，15项：含检查13 断言完整性、检查14 对抗生成遍、检查15 业务行为来源追溯，详见 `references/selfcheck.md`，**内存内零文件操作**）
@@ -226,7 +226,7 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 每轮用例的生成与修改必须在本轮全部内容完成并通过自查后**一次性写入文件**。禁止生成一点、输出一点。详细写入机制（内存内完成、单次 Write、落盘后回读核对、写前规模评估、修改流程起点判定、写入工具白名单）见 `references/output_write.md`。
 
 **核心要点速记**：
-* 本轮全部用例先在上下文（内存）完整生成 + 完成第22章全部自查（15项，含检查13 断言完整性、检查14 对抗生成遍、检查15 业务行为来源追溯）+ 自修循环（最多3轮，全部内存内），自查自修是内存操作不是文件编辑
+* 本轮全部用例先在上下文（内存）完整生成 + **第8阶段出口机器 gate**（`verify_cases.py run_inmemory` 全量校验机器可判项，≤2轮内存自修，独立计数）+ 完成第22章全部自查（15项，含检查13 断言完整性、检查14 对抗生成遍【内部另含≤2轮 critique 子循环，独立计数，补出新用例须回跑第8 gate】、检查15 业务行为来源追溯）+ 自修循环（最多3轮，全部内存内），自查自修是内存操作不是文件编辑；第8 gate 与第11自查检查项不相交、计数独立、不嵌套；另第5阶段 critique 循环（≤2轮）亦独立计数
 * 落盘 = 每个文件恰好一次 Write（整体创建/覆盖），禁止 Edit/MultiEdit/append 落盘或补齐
 * **输出 token 预算（硬约束）**：**默认单文件** `case-design-out/TestCases_<需求标识>.md`（追溯性 section 全需求一份）；单次 Write `content` 预估 > 24000 token 先压缩，压缩后仍超才拆最小 PART `case-design-out/TestCases_<需求标识>_PARTn.md`（按风险排序、不按模块拆）；每个文件各自一次 Write + 回读，**一文件回读通过后自动续跑下一文件（不停顿等用户），全部文件落盘后统一进入第14阶段审核**（详见 `references/output_write.md` 拆分多文件自动续跑）
 * 落盘后立即只读回读核对（行数/表头15列/末行/内容枚举+覆盖统计与追溯）；**回读用 `scripts/verify_md.py` + `scripts/verify_cases.py` 串联返回摘要，禁止 Read 整份 .md 进上下文**（见 scripts 说明）
@@ -240,6 +240,7 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 3. 输出【测试点清单】（仅调试模式可见）
 4. 对话中展示用例紧凑投影+覆盖矩阵（只展示，不写文件，禁止此时发文件写入调用；明细15列见第6步文件）
 5. 内存内自查自修（15项，含检查13 断言完整性、检查14 对抗生成遍、检查15 业务行为来源追溯，零文件操作）+ 写前规模评估（输出 token 预算，决定单文件/PART拆/展示与写入是否分响应）
+   > **第8阶段出口机器 gate 已先跑**（`references/modeling.md` 15.7）：进本第5步前，第8阶段出口 gate 已用 `verify_cases.py run_inmemory` 在内存内全量校验机器可判项并自修（≤2轮，独立计数）。本第5步 LLM 自查只管机器判不了的项（5/10/11/14 + 阻断决策），对 4/6/7/13/15 客观面降为"确认已过"，≤3轮自修与第8 gate ≤2轮各自独立不嵌套
 6. 单次 Write 写入 .md + 脚本回读核对（verify_md.py 结构 + verify_cases.py 内容/覆盖）；**默认单文件单次 Write**（写入 `case-design-out/TestCases_<需求标识>.md`）；仅压缩后仍超预算才拆最小 PART，逐 PART Write+回读、**一 PART 完成自动续跑下一 PART、中途不等用户，全部 PART 落盘 + 回读通过后统一进入第14阶段审核**（详见 `references/output_write.md` 拆分多文件自动续跑）
 
 > 第4步(展示)与第6步(写入)分离：展示不是写文件，写文件是展示之后一个独立、单次的工具调用。此处"分离"指**动作先后**（先展示、后一次性 Write），**不是指拆成两个响应**；禁止把"展示"与"分条增量写入"交织（即禁止边展示边逐条 Write），**非禁止二者在同一响应**。
