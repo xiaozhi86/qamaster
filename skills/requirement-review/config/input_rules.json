@@ -1,0 +1,92 @@
+{
+  "_comment": "requirement-review 输入预处理规则单一事实源。scripts/extract_text.py 与 SKILL.md 第0阶段共同加载。当前部署模型为文本-only（报错 Model only support text input 即本约束触发），故主路=本地OCR+文档解析；多模态LLM作为可选增强（若有视觉端点则启用）。",
+  "_usage": "本文件为可选配置；缺失时脚本用内置默认，行为与无配置一致。",
+
+  "accepted_formats": {
+    "text": [".txt", ".md", ".markdown"],
+    "pdf": [".pdf"],
+    "word": [".docx", ".doc"],
+    "ppt": [".pptx"],
+    "excel": [".xlsx", ".xls"],
+    "image": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"],
+    "image_pdf_signal": "扫描件/图片型PDF（pdfplumber 抽取单页字符数 < min_chars_per_page 视为图片型，转逐页OCR）"
+  },
+
+  "format_strategy": {
+    ".txt":   "直读（UTF-8/GBK 自动探测），跳过解析与OCR",
+    ".md":    "直读，跳过解析与OCR",
+    ".pdf":   "pdfplumber 抽取文本+表格+图片坐标；文本块+图片按y交错就地回填；单页字符<阈值→扫描件→pdf2image逐页转图→OCR整页就位",
+    ".docx":  "python-docx 遍历body子元素抽取正文+表格；内嵌图片就地OCR占位回填",
+    ".doc":   "提示用户另存为.docx，或 pandoc 兜底转换",
+    ".pptx":  "python-pptx shapes按(top,left)排序抽取文本框+表格；Picture就地OCR占位回填",
+    ".xlsx":  "openpyxl 抽取单元格文本（通常无内嵌图）",
+    ".png/.jpg/.jpeg/.gif/.bmp/.webp": "RapidOCR(中文 ch) 直接 OCR"
+  },
+
+  "min_chars_per_page": 20,
+
+  "token_budget": {
+    "_doc": "抽取后单次喂给模型的文本上限。超阈值分块（对齐 case-design 24000 token 预算）。",
+    "single_chunk_threshold": 24000,
+    "chunk_strategy": "超阈值按章节/模块分块，分批喂评审Agent；不可超 32000 单响应上限"
+  },
+
+  "ocr": {
+    "_doc": "OCR 多引擎候选，按顺序逐个尝试：rapidocr_onnxruntime(首选，中文准) → pytesseract(系统tesseract二进制，绕开Python版本限制) → 不可用则降级提示用户。rapidocr 2.x 要求 Python<3.13，3.14 环境装不上时自动降级 pytesseract。",
+    "engines": ["rapidocr_onnxruntime", "pytesseract"],
+    "engines_detail": {
+      "rapidocr_onnxruntime": {
+        "deps": ["rapidocr-onnxruntime", "onnxruntime", "Pillow"],
+        "install_cmd": "pip install rapidocr-onnxruntime onnxruntime Pillow",
+        "python_constraint": "需 Python<3.13（rapidocr 2.x）；3.14 装不上，自动降级下一引擎"
+      },
+      "pytesseract": {
+        "deps": ["pytesseract", "Pillow"],
+        "install_cmd": "pip install pytesseract",
+        "system_dep": "tesseract.exe（独立二进制，与Python版本无关，需单独安装+chi_sim语言包+加入PATH）",
+        "install_hint": "Windows: 下载 tesseract installer 安装并加 PATH；macOS: brew install tesseract；Linux: apt install tesseract-ocr tesseract-ocr-chi-sim"
+      }
+    },
+    "lang": "chi_sim+eng",
+    "confidence_threshold": 0.6,
+    "fallback": "所有OCR引擎均不可用→回退：提示用户提供原型图/流程图的文字说明（不阻断纯文本/含文字层文档的主路解析）"
+  },
+
+  "doc_parse": {
+    "pdf":   {"lib": "pdfplumber", "install_cmd": "pip install pdfplumber"},
+    "word":  {"lib": "python-docx", "install_cmd": "pip install python-docx"},
+    "ppt":   {"lib": "python-pptx", "install_cmd": "pip install python-pptx"},
+    "excel": {"lib": "openpyxl", "install_cmd": "pip install openpyxl"},
+    "pdf_image_fallback": {"lib": "pdf2image", "system_dep": "poppler", "install_hint": "Windows需安装poppler并加入PATH；缺失时扫描件PDF回退提示用户"}
+  },
+
+  "multimodal_optional": {
+    "_doc": "可选增强：若环境另接了视觉模型端点（Claude/GLM-4V/GPT-4V），复杂流程图/原型图优先走多模态理解（比OCR文字更准，能理解箭头/泳道语义）；否则主路OCR。当前GLM文本-only部署=不启用。",
+    "enabled": false,
+    "prefer_for": ["流程图", "泳道图", "原型图", "架构图"],
+    "fallback_when_disabled": "OCR"
+  },
+
+  "image_inplace": {
+    "enabled": true,
+    "placeholder": "【图片@位置{pos}(置信度{conf})：{text}】",
+    "word": "遍历 body 子元素就地回填（保留文档流顺序，含图表）",
+    "pdf": "文本块+图片按 y 坐标交错就地回填；扫描件页整页 OCR 天然就位；复杂版式降级为正文留位置标记+OCR 文末汇总",
+    "ppt": "shapes 按(top,left)排序，Picture 就地 OCR 占位",
+    "fallback_when_coord_unreliable": "PDF 多栏/复杂版式 → 正文留 →见图k@页n-yn，OCR 文本汇总到文末 【图k@页n：<OCR>】"
+  },
+
+    "degrade": {
+    "text_only_model": "检测到当前模型仅支持文本输入（Model only support text input）。请提供以下之一：(a)纯文本需求描述(.txt/.md/粘贴)；(b)已提取文字版；(c)对原型图/流程图的文字说明。图片/扫描件/含图文档须先用 OCR(rapidocr/tesseract) 抽取为纯文本，禁止直接喂图。",
+    "ocr_dep_missing": "所有 OCR 引擎均不可用（rapidocr 需 Python<3.13，tesseract 未安装）。请任选其一：①装 tesseract 系统二进制+chi_sim 语言包+pytesseract(pip install pytesseract)；②降低 Python 至3.12装 rapidocr；③改用纯文本需求描述。或由用户提供该图的文字说明。",
+    "ocr_low_confidence": "OCR置信度偏低（<{threshold}，引擎={engine}），疑似为流程图/原型图（非纯文字）。建议补充该图的文字说明以提高评审准确性。",
+    "pdf_scan_poppler_missing": "检测到扫描件PDF但 pdf2image/poppler 不可用。请：安装poppler并加入PATH后重试；或将PDF另存为文字版；或提供截图由用户转文字说明。",
+    "ocr_engine_used": "本次 OCR 引擎：{engine}"
+  },
+
+  "summary": {
+    "_doc": "extract_text.py 返回摘要而非全文（对齐 case-design verify 脚本降本风格）。",
+    "preview_chars": 2000,
+    "report_fields": ["来源", "字符数", "预处理方式", "置信度", "图片数", "分块数", "降级标记"]
+  }
+}
