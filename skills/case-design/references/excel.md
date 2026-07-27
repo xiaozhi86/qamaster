@@ -123,12 +123,27 @@
 
 > 本节解决"用户已要求生成 Excel，但 .xlsx 文件未实际产出"的问题。根因：.xlsx 是二进制 ZIP 归档（非纯文本），无法用文本写入工具直接生成合法文件；本节镜像 `references/output_write.md` 对 .md 的工具层约束，补齐 Excel 的生成机制。
 
-## 核心约束：必须经脚本执行产出，禁止文本写入 .xlsx
-* **必须**：写一段 Python 脚本（使用 openpyxl）并经 Bash 执行，由脚本读取源 .md、解析用例表、按 21.4 字段规范写出 .xlsx（源 .md 与输出 .xlsx 均位于 `case-design-out/` 下；临时生成/校验脚本亦置于 `case-design-out/` 下用完即删），脚本运行成功后 .xlsx 才算生成
+## 核心约束：必须经 skill 自带永久脚本执行产出，禁止文本写入 .xlsx
+* **必须**：调用 skill 自带永久脚本 `scripts/gen_excel.py`（经 Bash 执行）产出 .xlsx，该脚本为 skill 资产不删除（与 `scripts/verify_cases.py` 同级，见 `references/output_write.md` ch30「不清理的 skill 自带资产」清单）。脚本读取源 .md（与输出 .xlsx 均位于 `case-design-out/` 下）、解析用例表、按 21.4 字段规范写出 .xlsx、并内置生成后两段校验；脚本运行成功且校验全过才算生成成功。
+* **禁止**：在对话中由 agent 即兴写 ad-hoc openpyxl 脚本 + 用完即删——ad-hoc 脚本无代码级单一事实源，编码/换行处理不稳定，是历史"中文乱码 + 不自动换行"缺陷的根因（见本节末「历史缺陷根因」）
 * **禁止**：用文本写入工具（Write/Edit 等）直接把内容写进 `.xlsx` 文件——产出的是损坏文件，等同未生成
 * **禁止**：仅在对话中粘贴 Markdown/CSV 表格冒充"已生成 Excel"
 * **禁止**：口头声明"已生成 Excel"而磁盘上无对应 .xlsx 文件
 * **禁止**：因任何环节失败（依赖缺失、解析失败、脚本异常）而静默放弃——失败必须按"生成失败处理"向用户显式报错
+
+### 脚本代码级强制约束（agent 审视脚本行为，即便将来另写亦须遵守）
+`scripts/gen_excel.py` 已内置以下约束；若 agent 因任何原因需另写或修改 Excel 生成逻辑，必须全部满足：
+* **读源 .md 必须 `open(md_path, "r", encoding="utf-8")`**：Windows 默认 cp936 不带 encoding 会把 UTF-8 中文 .md 按 cp936 错误解码再写进 .xlsx，导致中文乱码（堵乱码根因）
+* **Given(第8列)/When(第9列)/Then(第10列) 单元格必须设 `Alignment(wrap_text=True, vertical="top")`**：不设则长文本溢出邻格或被截断（堵自动换行根因第1点）
+* **When/Then 多步骤必须用真实 `\n`(chr(10)) 串联**：写入单元格前按 `；`/`步骤N：` 边界注入 `\n`，使 wrap_text 在步骤边界硬换行，而非仅在列宽边界软换行（堵自动换行根因第3点；源 .md 单行 `；` 串联合规，换行符由生成器注入，不强制改源 .md）
+* **必须设列宽**：Given/When/Then 宽列（50/55/60 字符量级），其余窄列按字段定宽；openpyxl 无真自动列宽，不设则用默认宽度(~9-11字符)致长文本溢出（堵自动换行根因第2点）
+* **必须设 `ws.freeze_panes = "A2"`（表头冻结）+ `ws.auto_filter.ref = ws.dimensions`（支持筛选）**
+* **表头行必须 `Font(bold=True)`**
+* **固定列取值须从 `config/validation_rules.json` 的 `fixed_columns` 加载**（与 `verify_cases.py` 同一事实源，编辑模式=STEP、标签=AI、责任人=AI、用例状态=Completed，见 20.7-20.10），禁止在脚本内硬编码双份维护
+
+### 历史缺陷根因（ad-hoc 机制的固有问题，已由永久脚本消除）
+* **中文乱码**：ad-hoc 脚本在 Windows 默认 cp936 下 `open(md,"r")` 不带 encoding，把 UTF-8 中文 .md 按 cp936 错误解码再写进 .xlsx，乱码 baked-in 进单元格字符串。openpyxl `Workbook.save()` 内部本就是 UTF-8 XML，乱码**不在 save() 本身**，在读源 .md 的解码步。`scripts/gen_excel.py` 统一 `encoding="utf-8"` 读取 + `sys.stdout.reconfigure(encoding="utf-8")` 输出，根除。
+* **不自动换行**：ad-hoc 脚本不设 `Alignment(wrap_text=True)`、不设列宽、源 .md 的 When/Then 为 `；` 单行无真实换行符 → 即便 wrap_text 也只能软换行。`scripts/gen_excel.py` 强制 wrap_text + 列宽 + `\n` 注入，根除。
 
 ## 脚本职责（一次性完成）
 脚本须在一次执行内完成全部工作，禁止"先建空表头再逐行追加"式分次写入：
@@ -136,7 +151,7 @@
 * **只读取 15 列用例表**：`.md` 中的"规则建模/风险清单/测试点清单"等追溯性 section（见 `references/output_write.md` 追溯性 section）**不读取、不校验、不输出到 Excel**；脚本以"用例ID"表头行定位用例表起始，section 在表前不影响解析
 * 按 21.4 的 15 个字段顺序写出表头行
 * 逐条映射：1 条 .md 用例 = 1 行 Excel，字段顺序、取值与 .md 完全一致
-* 套用 21.2 格式：UTF-8 兼容、自动列宽、自动换行、一行一用例、禁止合并单元格、表头冻结、支持筛选
+* 套用 21.2 格式：UTF-8 兼容、自动列宽（显式设宽，openpyxl 无真自动列宽）、自动换行（Given/When/Then 单元格 `Alignment(wrap_text=True)` + `\n` 注入）、一行一用例、禁止合并单元格、表头冻结（`freeze_panes`）、支持筛选（`auto_filter`）；具体实现见 `scripts/gen_excel.py`
 * 固定列填 21.4 规定的固定值（编辑模式=STEP、标签=AI、责任人=AI、用例状态=Completed，见 20.7-20.10）
 * 文件名：默认与源 .md 同名（扩展名 .md→.xlsx，输出到 `case-design-out/` 下），用户指定则从其指定；禁止重命名/覆盖源 .md
 * **多文件源（仅 PART 溢出拆分时）**：默认源为单文件 `case-design-out/TestCases_<需求标识>.md`，直接生成 `case-design-out/TestCases_<需求标识>.xlsx`。仅当源为多个 `case-design-out/TestCases_<需求标识>_PARTn.md`（合并体压缩后仍超预算才拆）时，**聚合为单一 .xlsx**——Excel 由 openpyxl 脚本经 Bash 产出（非模型直接写 content），不受 32k 输出上限约束，故 PART 合并无障碍。脚本读取全部 PART 的 15 列用例表，合并入单一 sheet、按用例ID排序（用例ID 跨文件全局唯一连续不跳号，合并后仍连续），行数校验 N=各 PART 用例数之和，逐单元格一致性逐行比对各自源 .md。如用户要求按 PART 分文件，则一 .md 对应一 .xlsx 逐文件生成与校验。
@@ -191,8 +206,8 @@
 * 修正后必须**重新跑完整两段校验**（结构验证 + 数据完整性校验），不得只重跑失败项
 
 ## 依赖兜底
-* 检测到 openpyxl 不可用 → 尝试 `pip install openpyxl`（或用户环境等价安装命令）后重试一次
-* 安装失败或仍不可用 → 停止生成，向用户显式报错："Excel 生成依赖 openpyxl，当前环境缺失且自动安装失败，请手动安装后重试"，**不得**静默放弃或降级为文本输出
+* `scripts/gen_excel.py` 启动时自动检测 openpyxl 是否可导入：不可用则尝试 `pip install openpyxl`（回退 `pip3`）后重试一次
+* 安装失败或仍不可用 → 脚本退出码 1，向用户显式报错："Excel 生成依赖 openpyxl，当前环境缺失且自动安装失败，请手动安装后重试"，**不得**静默放弃或降级为文本输出
 
 ## 生成失败处理
 生成失败时输出【Excel 生成失败报告】：
@@ -214,8 +229,9 @@
 * Excel 数据校验不通过时，修正方式是**重新整体生成 .xlsx**（内存内修正脚本/源 .md 后重跑），**禁止**用 Edit/单元格编辑直接改已落盘的 .xlsx（与"禁 Edit"一致，避免 .md 与 .xlsx 不一致）
 
 ## 强制（汇总）
-* 必须经 openpyxl 脚本执行产出 .xlsx，禁止文本写入 .xlsx
-* 脚本须一次完成读取+解析+写出+格式化，禁止分次追加
+* 必须经 `scripts/gen_excel.py` 永久脚本产出 .xlsx（skill 自带资产，不删除），禁止文本写入 .xlsx、禁止 ad-hoc 即兴脚本
+* 脚本须一次完成读取+解析+写出+格式化+两段校验，禁止分次追加
+* 读源 .md 必须 `encoding="utf-8"`；Given/When/Then 必须 `wrap_text=True` 且 `\n` 注入；必须设列宽/`freeze_panes`/`auto_filter`/表头 `Font(bold=True)`
 * 生成后必须落盘/可读/行数/列数四项结构验证全过
 * 结构验证通过后必须自动执行数据完整性校验九项，全过才算生成成功
 * 数据完整性校验结果必须向用户输出【Excel 数据完整性核对报告】，禁止只给结论不给依据
@@ -223,7 +239,7 @@
 * 失败须显式报错，禁止声明已交付
 * 校验不通过必须以 .md 为唯一数据源修正后重新整体生成并重跑两段校验，禁止直接改 .xlsx 单元格
 * 交付摘要声明 .xlsx 前，必须确认文件在磁盘上真实存在并通过结构+数据两段验证（见 SKILL.md 25 交付闸）
-* Excel 生成/校验用的临时脚本（`.py`）、中间文件（CSV/JSON/txt）置于 `case-design-out/` 下，在 .xlsx 通过两段校验后立即删除（见 `references/output_write.md` ch30），禁止残留
+* Excel 生成/校验用的中间文件（CSV/JSON/txt）置于 `case-design-out/` 下，在 .xlsx 通过两段校验后立即删除（见 `references/output_write.md` ch30）；`scripts/gen_excel.py` 为 skill 自带永久资产，**不删除**
 
 ## 禁止（汇总）
 * 用 Write/Edit 直接写 .xlsx

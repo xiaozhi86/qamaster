@@ -401,10 +401,11 @@
 
 ## 适用范围
 执行过程中产生的以下文件均属"临时文件"，须清理：
-* **脚本文件**：为生成/校验 Excel 等目的编写的临时 `.py` 脚本（如 `references/excel.md` 的 openpyxl 生成脚本、数据完整性校验脚本）——置于 `case-design-out/` 下
 * **中间产物**：解析 .md 产生的中间文件（如临时 CSV、临时 JSON、临时 .txt）——置于 `case-design-out/` 下
 * **临时副本/片段**：为分段处理而落盘的用例片段、表头骨架等——置于 `case-design-out/` 下
 * **临时校验输出**：脚本运行产生的临时日志、临时报告文件（交付摘要、核对报告应直接在对话输出，而非落盘残留）
+
+> **注**：Excel 生成原依赖 ad-hoc 即兴 `.py` 脚本（用完即删），现已固化为 skill 自带永久脚本 `scripts/gen_excel.py`（见 `references/excel.md` 21.7），不再属临时文件，移入下方「不清理的 skill 自带资产」。仅解析 .md 的中间产物仍用完即删。
 
 ## 不清理的文件（正式产出物，须保留）
 > 以下产出物均位于 `case-design-out/` 子目录下（命名均为相对 `case-design-out/` 的文件名）：
@@ -415,12 +416,11 @@
 * `case-design-out/Knowledge_<需求标识>.md` —— 知识总结（审核通过后生成/更新）
 * `case-design-out/REQ_<需求标识>.md` —— 用户提供的原始需求文档（若落盘）
 * 用户提供的业务/测试知识库文件
-* **`scripts/` 下的自带可复用脚本（`verify_md.py`、`verify_cases.py`、`verify_knowledge.py`、`project_cases.py`）为 skill 资产，位于 skill 安装目录、不在 `case-design-out/` 内，禁止删除**（仅 ad-hoc 一次性脚本需清理）
+* **`scripts/` 下的自带可复用脚本（`verify_md.py`、`verify_cases.py`、`verify_knowledge.py`、`project_cases.py`、`gen_excel.py`）为 skill 资产，位于 skill 安装目录、不在 `case-design-out/` 内，禁止删除**（`gen_excel.py` 为 Excel 生成永久脚本，替代旧 ad-hoc 用完即删脚本；仅解析 .md 的中间产物仍属临时文件需清理）
 
 ## 清理时机（强制）
 * **即时清理**：每个临时文件在"完成其用途后、进入下一步前"立即删除，禁止等到流程末尾批量清理
-  * 例：生成脚本产出 .xlsx 并通过两段校验后，该 .py 脚本即为"不再使用"，立即删除
-  * 例：解析 .md 的中间 JSON 在校验脚本读完后即删
+  * 例：解析 .md 的中间 JSON 在校验脚本读完后即删；Excel 生成器 `gen_excel.py` 为永久资产不删，但其运行产生的中间文件（若有）用完即删
 * **轮末复核**：每轮交付完成时（交付摘要输出后），复核 `case-design-out/` 目录，删除本轮残留的任何临时文件
 * **会话末清理**：会话结束前，确认 `case-design-out/` 无临时文件遗留
 

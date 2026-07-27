@@ -252,8 +252,11 @@
 > 对应 `references/excel.md` 21.7。仅当用户已要求生成 Excel 时执行；用户未要求则不触发。
 
 ```
-□ 已用 openpyxl 脚本经 Bash 执行产出 .xlsx，未用 Write/Edit 直接写 .xlsx
-□ 脚本一次完成读取+解析+写出+格式化，未分次追加写同一 .xlsx
+□ 已调用 skill 自带永久脚本 `scripts/gen_excel.py`（经 Bash 执行）产出 .xlsx，未用 Write/Edit 直接写 .xlsx，未用 ad-hoc 即兴脚本
+□ 脚本一次完成读取+解析+写出+格式化+两段校验，未分次追加写同一 .xlsx
+□ 源 .md 以 `encoding="utf-8"` 读取，Excel 单元格中文无乱码（自检：抽样 Given/When/Then 单元格无 U+FFFD 替换字符、与源 .md 逐字一致）
+□ Given/When/Then 单元格已设 `Alignment(wrap_text=True)`，When/Then 多步骤以 `\n`(chr(10)) 串联（由生成器注入），非 `；` 单行无换行
+□ 列宽已设（Given/When/Then 宽列）、`freeze_panes=A2`（表头冻结）、`auto_filter`（支持筛选）、表头 `Font(bold=True)`
 □ 结构验证四项全过：落盘非空 / openpyxl 可读 / 数据行数=源.md用例数N / 列数=15且表头顺序与21.4一致
 □ 数据完整性校验九项全过：逐单元格一致 / 必填非空 / 固定列取值 / 用例等级合规 / ID唯一不跳号 / 枚举合规 / 用例名称规范 / 断言可观测 / 存储合规
 □ 已向用户输出【Excel 数据完整性核对报告】，每项填实际核对数值，未只填"通过"
@@ -261,7 +264,7 @@
 □ 依赖缺失时已尝试安装并兜底报错，未降级为文本输出
 □ 校验不通过时以.md为唯一数据源修正后重新整体生成并重跑两段校验，未用Edit直接改.xlsx单元格
 □ 交付摘要声明 .xlsx 前，已确认文件在磁盘真实存在并通过结构+数据两段验证
-□ Excel 生成/校验用的临时脚本与中间文件已在 .xlsx 通过两段校验后删除，无残留（见 references/output_write.md ch30）
+□ `scripts/gen_excel.py` 为 skill 永久资产保留；仅解析 .md 的中间产物（若有）在 .xlsx 通过两段校验后删除，无残留（见 references/output_write.md ch30）
 ```
 
 任一未通过：禁止在交付摘要中声明 Excel 已交付，按 `references/excel.md` 生成失败处理。
