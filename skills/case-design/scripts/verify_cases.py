@@ -30,7 +30,7 @@ selfcheck.md / modeling.md / quality_rules.md / risk.md / coverage.md 完全一�
 
 覆盖统计（给 selfcheck 检查2/3/8 客观数据，不替代模型判定，只供证据）：
   - 标签维度：测试类型种类数、测试维度种类数、风险等级分布
-  - 关键词维度（对测试类型标签错标鲁棒，扫描用例全文）：并发/幂等/安全/上下游/时间组合
+  - 关键词维度（对测试类型标签错标鲁棒，扫描用例全文）：并发/幂等/安全/上下游/时间组合/界面查询/界面列表（UI 非每需求必有，按需，仅统计不强告警；需求涉列表/查询且=0 由 selfcheck 检查14 复核按需补齐）
   - 状态机流转：合法/非法/回滚/终态（非法流转为状态机核心，0 则提示）
   - 边界深度：边界用例是否覆盖 最小/最大/临界/边界内 四值（边界内=min+1/max-1 刚好满足约束应通过）
   - 异常子类：异常用例覆盖的子类数（输入/数据/状态/权限/服务/网络/缓存/MQ）
@@ -172,9 +172,17 @@ _DOMAIN_CFG = _load_domain_config()
 if "business_anchors" in _DOMAIN_CFG:
     BUSINESS_ANCHORS = _DOMAIN_CFG["business_anchors"]
 if "keyword_dims" in _DOMAIN_CFG:
-    KEYWORD_DIMS = _DOMAIN_CFG["keyword_dims"]
+    # dict 字段做 key 级合并（领域扩展语义）：保留 validation_rules 独有 key
+    # （如 0.5.0 新增的界面查询/界面列表），domain_config 同名 key 覆盖 value、
+    # 领域新增 key 加入。整体替换会丢掉内置 key，与 _usage"新增字段不覆盖内置"矛盾。
+    _merged_kw = dict(KEYWORD_DIMS)
+    _merged_kw.update({k: list(v) for k, v in _DOMAIN_CFG["keyword_dims"].items()})
+    KEYWORD_DIMS = _merged_kw
 if "exception_subtypes" in _DOMAIN_CFG:
-    EXCEPTION_SUBTYPES = _DOMAIN_CFG["exception_subtypes"]
+    # dict 字段同上：key 级合并，保留内置子类，domain_config 同名/新增子类覆盖或加入
+    _merged_exc = dict(EXCEPTION_SUBTYPES)
+    _merged_exc.update({k: list(v) for k, v in _DOMAIN_CFG["exception_subtypes"].items()})
+    EXCEPTION_SUBTYPES = _merged_exc
 if "overdesign_exempt_types" in _DOMAIN_CFG:
     OVERDESIGN_EXEMPT_TYPES = set(_DOMAIN_CFG["overdesign_exempt_types"])
 
