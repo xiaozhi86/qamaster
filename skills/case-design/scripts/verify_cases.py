@@ -968,6 +968,38 @@ def parse_requirement_items(req_doc_path):
     return parse_requirement_items_from_lines(rlines)
 
 
+def _req_item_tokens(item_id):
+    """从需求条目标识抽取匹配 token（供 #4 反向需求追溯的宽松匹配）。
+    标题条目（"标题:xxx"）切为：英文/数字≥2 连续段 + 中文 2-gram 滑动窗。
+    用 2-gram 滑动窗而非整段 CJK run，使 20.2 推荐的短写法（如"见需求文档3.2订单创建"）
+    能命中长标题（如"3.2 订单创建功能"）——整段 run "订单创建功能"无法成为短写法的子串，
+    而 2-gram "订单""创建"等可命中。数字/章节号单独成 token 以支持"3.2"定位。
+    非"标题:"条目（REQ-xxx/需求N）返回原 item_id，由调用方做精确子串匹配。"""
+    body = item_id[3:] if item_id.startswith("标题:") else item_id
+    toks = []
+    # 英文≥2 连续段（含点号，如 "REQ-ORD" / "API1"）
+    for m in re.findall(r"[A-Za-z][A-Za-z0-9_\-]{1,}", body):
+        toks.append(m)
+    # 数字串（含点号分隔，如 "3.2" / "001"），便于按章节号定位
+    for m in re.findall(r"\d+(?:\.\d+)*", body):
+        toks.append(m)
+    # 中文 2-gram 滑动窗（"订单创建功能" → 订单/单创/创建/建功/功能）
+    for s in re.findall(r"[一-龥]+", body):
+        if len(s) >= 2:
+            for i in range(len(s) - 1):
+                toks.append(s[i:i + 2])
+            if len(s) == 2:
+                toks.append(s)
+    # 去重保序，保留信息量大的前若干个（防 token 过多误命中）
+    seen = set()
+    uniq = []
+    for t in toks:
+        if t and t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq[:6]
+
+
 def reverse_requirement_trace(data_rows, req_doc_path):
     """#4 反向需求追溯（软判定）：需求文档每条条目须有≥1用例引用（关联需求ID列）。
     未被引用的条目列为'未覆盖需求'。无需求文档（未传第2参数）则跳过，返回 (None, 0)。"""
@@ -978,8 +1010,7 @@ def reverse_requirement_trace(data_rows, req_doc_path):
     uncovered = []
     for item_id, _ in items:
         if item_id.startswith("标题:"):
-            toks = re.findall(r"[一-龥]{2,}|[A-Za-z]{2,}", item_id[3:])
-            toks = toks[:3]
+            toks = _req_item_tokens(item_id)
             if toks and not any(any(tok in rid for tok in toks) for rid in req_ids):
                 uncovered.append(item_id)
         else:
@@ -998,8 +1029,7 @@ def reverse_requirement_trace_items(data_rows, req_items):
     uncovered = []
     for item_id, _ in req_items:
         if item_id.startswith("标题:"):
-            toks = re.findall(r"[一-龥]{2,}|[A-Za-z]{2,}", item_id[3:])
-            toks = toks[:3]
+            toks = _req_item_tokens(item_id)
             if toks and not any(any(tok in rid for tok in toks) for rid in req_ids):
                 uncovered.append(item_id)
         else:
@@ -1207,7 +1237,7 @@ def dump_rules():
     print("=" * 64)
 
 
-def print_findings(findings, basename):
+def print_findings(findings, basename, req_doc_lines=None):
     """打印 collect_all_findings 的结果（文件入口 Phase 13 回读用）。
     输出与重构前 main() 内联打印字节级一致（回归安全）：同一份 .md 经
     `python verify_cases.py <file>` 与重构前产出完全相同的 stdout。
@@ -1406,7 +1436,17 @@ def print_findings(findings, basename):
     unc_req, req_total = traces["requirement"]
     print("-- 反向需求追溯 #4（需求条目 → 用例引用）--")
     if unc_req is None:
-        print("  跳过（未传需求文档第2参数，或文档无可解析章节；传 'python verify_cases.py <TC.md> <REQ.md>' 启用）")
+        # 显式强提示（不再静默跳过）：区分"未传 REQ"与"REQ 不可解析"
+        if req_doc_lines is None:
+            reason = "需求文档第2参数缺失（REQ_<需求标识>.md 未传入或文件不存在）"
+            fix = "按 references/phase0_manifest.md 步骤零落盘 case-design-out/REQ_<需求标识>.md 后重跑 'python verify_cases.py <TC.md> case-design-out/REQ_<需求标识>.md'"
+        else:
+            reason = "需求文档无可解析章节（parse_requirement_items_from_lines 仅认 ## 二级及以上 Markdown 标题或 REQ-xxx/需求N 显式编号）"
+            fix = "在 REQ_<需求标识>.md 中补 ## 二级标题分节（按需求条目切分，如 ## 订单创建 / ## 库存扣减），或补 REQ-xxx/需求N 编号后重跑"
+        print("  ⚠ 需求条目级覆盖未校验（#4 静默跳过升级为显式强提示·闭合覆盖盲区）")
+        print("    原因：%s" % reason)
+        print("    影响：'需求文档每条条目是否均有用例覆盖'未机器校验，覆盖退化为依赖 LLM 自查+人工审核")
+        print("    修复：%s" % fix)
     else:
         print("  需求条目 %d 条，未被用例引用 %d 条" % (req_total, len(unc_req)))
         if unc_req:
@@ -1431,7 +1471,7 @@ def main():
         return 0
     if len(sys.argv) < 2:
         print("用法: python verify_cases.py <TC文件.md> [需求文档.md]  |  --dump-rules 查看规则契约")
-        print("  第2参数（可选）：需求文档，用于 #4 反向需求追溯")
+        print("  第2参数：需求文档 case-design-out/REQ_<需求标识>.md（第0阶段步骤零已强制落盘），用于 #4 反向需求追溯 + #5 token 核对；缺失则 #4 产出显式强提示而非静默跳过")
         return 1
 
     path = sys.argv[1]
@@ -1455,7 +1495,7 @@ def main():
     findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines)
     # 附 data_rows 供 print_findings 复算 id/field 分组（幂等，与原 main 调用次序一致）
     findings["_data_rows"] = data_rows
-    print_findings(findings, os.path.basename(path))
+    print_findings(findings, os.path.basename(path), req_doc_lines=req_doc_lines)
 
     return 1 if findings["hard_violations"] else 0
 

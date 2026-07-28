@@ -287,7 +287,7 @@ Skill 会跳过完整设计流程，先做源 .md 一致性校验，通过后直
 | 文件 | 命名 | 内容 |
 |---|---|---|
 | 索引 | `case-design-out/MANIFEST.md` | 所有需求的快速定位入口（一个文件，跨需求） |
-| 需求文档 | `case-design-out/REQ_<需求标识>.md` | （可选）保存你提供的需求文档 |
+| 需求文档 | `case-design-out/REQ_<需求标识>.md` | 保存你提供的需求文档（**强制**，第0阶段落盘；#4/#5 反向追溯的唯一基准，不落盘则"完整覆盖"承诺失效） |
 | 澄清台账 | `case-design-out/Clarification_Ledger_<需求标识>.md` | 澄清问答，跨会话保留，避免重复提问 |
 | 测试用例 | `case-design-out/TestCases_<需求标识>.md`（默认单文件）/ `case-design-out/TestCases_<需求标识>_PARTn.md`（压缩后仍超预算才拆） | 15 列用例表；默认单文件，仅超 24000 token 才拆最小 PART |
 | 测试用例 Excel | `case-design-out/TestCases_<需求标识>.xlsx` | 与 .md 字段完全一致，用户确认后生成 |
