@@ -8,25 +8,48 @@ disable-model-invocation: false
 
 > **警告：未完成本节步骤直接生成测试用例 = 流程违规，输出无效！**
 
-## 立即执行清单（必须全部完成才能继续）：
+## 立即执行（必须）：
 
 ```
-□ 步骤0-1：创建目录 case-design-out/（若不存在）
-□ 步骤0-2：落盘需求文档 case-design-out/REQ_<需求标识>.md
-□ 步骤0-3：读取/创建索引 case-design-out/MANIFEST.md
-□ 步骤0-4：读取 references/phase0_manifest.md 获得完整规则
-□ 步骤0-5：判定需求规模（重型/中型/轻型）
-□ 步骤0-6：输入形态探测（是否启用契约驱动分支）
+python scripts/case_design_workflow.py start <需求文档路径>
 ```
 
-## 门禁脚本验证（可选，落盘需求文档后执行）：
+然后按照脚本输出的指令逐阶段执行。**模型只需按脚本指令执行当前阶段，无需记忆完整流程。**
+
+## 脚本驱动流程说明
+
+从 v0.7.4 起，本 skill 采用**脚本驱动模式**：
+- **脚本是指挥官**：决定当前阶段、检查产出物、运行门禁
+- **模型是执行者**：按脚本指令执行当前阶段，生成内容
+- **流程合规由脚本保证**：跳阶段 = 脚本拒绝执行
+
+### 使用方式
 
 ```bash
-# 验证第0阶段完成
-python scripts/run_phase.py gate-phase 0 "MANIFEST.md,REQ_*.md"
+# 启动流程
+python scripts/case_design_workflow.py start "需求文档路径"
+
+# 查看当前状态
+python scripts/case_design_workflow.py status
+
+# 推进到下一阶段（产出物就绪后）
+python scripts/case_design_workflow.py next
 ```
 
-**❌ 以上步骤未完成 → 禁止进入第1阶段 → 禁止生成任何测试用例**
+### 阶段产出物
+
+| 阶段 | 产出物 | 门禁 |
+|---|---|---|
+| Phase 0 | MANIFEST.md, REQ_*.md | gate-phase 0 |
+| Phase 1 | Clarification_Ledger_*.md | gate-phase 1 |
+| Phase 2-7 | 内存中（签空串） | gate-phase 2-7 |
+| Phase 8 | TestCases_*.md | gate8 |
+| Phase 9-12 | 内存处理 | 无 |
+| Phase 13 | 最终 Write | 无 |
+| Phase 14 | 人工审核 | 用户确认 |
+| Phase 15 | Excel 生成 | 无 |
+
+**❌ 未调用工作流脚本直接生成测试用例 → 流程违规**
 
 ---
 
