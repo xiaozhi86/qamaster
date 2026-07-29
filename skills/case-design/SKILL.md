@@ -367,41 +367,47 @@ python scripts/run_phase.py gate-phase 3 ""
 * 摘要硬上限 40 行/阶段、仅注入一次；超长需求（用例数 >60）加 `--big` 降级为计数 + 指引（防反噬）。
 * `python scripts/preflight.py --list` 列出全部阶段-ref 映射。
 
-## PreToolUse hook 硬拦截 Write（v0.7.0 新增·v0.7.1 升级为全目录拦截·harness 强制合规）
+## PreToolUse hook 硬拦截 Write（v0.7.0 新增·v0.7.2 升级为内容特征检测·harness 强制合规）
 
 > **把"模型自觉合规"升级为"harness 物理强制"**——这是唯一与模型能力无关、能真正挡住弱模型跳步的机制。
 > 配置见 `.claude/settings.json` 的 `hooks.PreToolUse`，脚本为 `.claude/hooks/case_design_gate.py`。
 
-### v0.7.1 全目录拦截策略
+### v0.7.2 内容特征检测
 
-原 v0.7.0 只拦截 TestCases，弱模型可在内存中生成用例内容然后展示而不 Write。本版升级为**全目录拦截**：
+v0.7.1 只拦截 `case-design-out/` 目录，弱模型会把测试用例写到其他位置绕过门禁。本版升级为**内容特征检测**：
 
-**拦截范围**：所有 `case-design-out/` 目录下的 Write/Edit/MultiEdit，按文件类型分档门禁：
+**双重检测**：
 
-| 文件类型 | 门禁要求 | 说明 |
-|---|---|---|
-| `MANIFEST.md` / `REQ_*.md` | 允许写入，stderr 提示运行 `gate-phase 0` | Phase 0 产物，允许创建 |
-| `Clarification_Ledger_*.md` | 需要 Phase 0 已签名 | 否则 exit 2 阻止 |
-| `TestCases_*.md|xlsx` | 需要 gate8 exit=0 + Phase 0-7 全签 | 否则 exit 2 阻止 |
-| `Knowledge_*.md` | 需要 Phase 0-7 全签 | 知识总结在审核后生成 |
-| 其他 `case-design-out/` 文件 | 需要 Phase 0 签名 | 临时文件、索引等 |
+**A. case-design-out/ 目录下的 Write**：按文件类型分档门禁
+
+| 文件类型 | 门禁要求 |
+|---|---|
+| MANIFEST.md / REQ_*.md | 允许写入，提示运行 gate-phase 0 |
+| Clarification_Ledger_*.md | 需要 Phase 0 已签名 |
+| TestCases_*.md|xlsx | 需要 gate8 + Phase 0-7 全签 |
+| Knowledge_*.md | 需要 Phase 0-7 全签 |
+| 其他 case-design-out/ 文件 | 需要 Phase 0 签名 |
+
+**B. 非 case-design-out/ 目录的 Write**：内容特征检测
+
+检测是否包含测试用例特征：
+- 文件名含"测试用例"/"TestCases"
+- 内容含"# 测试用例"/"测试用例ID"/"用例等级"等关键词
+
+如果检测到测试用例内容，`exit 2` 拦截并提示：
+1. 按 skill 流程执行 Phase 0-7
+2. 逐阶段签名 + gate8
+3. 写到 case-design-out/TestCases_*.md
 
 ### 效果
 
-- 模型必须先 Write MANIFEST/REQ（Phase 0 产物，允许）
-- 然后必须 `gate-phase 0` 签名
-- 才能 Write Clarification_Ledger（Phase 1）
-- 然后必须 `gate-phase 1-7` 签名 + `gate8`
-- 才能 Write TestCases
+模型无论如何输出测试用例：
+- 写到 case-design-out/TestCases_*？→ 需要门禁
+- 写到 测试用例/ 目录？→ 内容检测拦截
+- 写到项目根目录？→ 内容检测拦截
+- 在对话中展示不 Write？→ 无法拦截，但无法产出文件
 
-**每一步都被门禁卡住，无法跳过**。模型跳过阶段 0-7 直接生成用例内容？→ 无法 Write → 被迫按流程执行。
-
-### 技术细节
-
-* **放行条件**：按上表，未满足即 `exit 2` 阻止，stderr 回显可执行修复指令
-* **与脚本侧门禁的关系**：hook（harness 层）与 `check_phase_dependencies`（脚本层）双重校验 Phase 0-7，一处可被绕过另一处仍兜底
-* **不放宽质量底线**：hook 只挡"跳步直接 Write"，不替代任何校验（断言/覆盖/存储合规等仍由 verify_cases 把关）
-* **非 case-design-out 文件**：项目其他文件 Write 不受影响，hook 直接放行
+**每一条产出路径都被门禁卡住**。
 
 ---
 

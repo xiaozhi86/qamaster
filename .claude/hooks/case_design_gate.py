@@ -1,41 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-case_design_gate.py — Claude Code PreToolUse hook：硬拦截跳过门禁直接写产出物。
+case_design_gate.py — Claude Code PreToolUse hook：硬拦截跳过门禁。
 
-v0.7.1 设计动机：
-  原 v0.7.0 只拦截 TestCases_*.md|xlsx，弱模型可以跳过 Phase 0-7
-  在内存中生成用例内容然后展示，不触发 Write。
+v0.7.2 设计动机：
+  v0.7.1 只拦截 case-design-out/ 目录的 Write。
+  弱模型（glm-5）会完全绕过 skill 约定，把测试用例写到其他位置。
 
-  本版升级为"全目录拦截"：
-  - 任何 case-design-out/ 目录下的 Write 都触发门禁检查
-  - 不同文件类型有不同的门禁要求
-  - 迫使模型必须按阶段顺序产出，无法跳过
-  - MANIFEST.md / REQ_*.md：
-      允许无签名写入（Phase 0 产物），但写入后 stderr 提示运行 gate-phase 0
-  - Clarification_Ledger_*.md：
-      需要 Phase 0 已签名（否则 exit 2 阻止）
-  - TestCases_*.md|xlsx：
-      需要 gate8 exit=0 + Phase 0-7 全签（否则 exit 2 阻止）
-  - Knowledge_*.md：
-      需要 Phase 0-7 全签（知识总结在审核后生成）
-  - 其他 case-design-out/ 文件：
-      需要 Phase 0 签名
+  本版升级为"内容特征检测"：
+  - 不仅检查路径，还检查 Write 的内容是否是测试用例
+  - 如果内容包含测试用例特征，强制要求：
+    1. 写到 case-design-out/TestCases_*.md
+    2. 满足门禁（gate8 + Phase 0-7 签名）
 
-效果：
-  - 模型必须先 Write MANIFEST/REQ（Phase 0 产物，允许）
-  - 然后必须 gate-phase 0 签名
-  - 才能 Write Clarification_Ledger（Phase 1）
-  - 然后必须 gate-phase 1-7 签名 + gate8
-  - 才能 Write TestCases
+门禁规则：
+  A. case-design-out/ 目录下的 Write：
+     按文件类型分档门禁（MANIFEST/REQ 允许，其他需签名）
 
-  每一步都被门禁卡住，无法跳过。
+  B. 非 case-design-out/ 目录的 Write：
+     检查内容是否包含测试用例特征：
+     - 文件名含"测试用例"/"TestCases"
+     - 内容含"# 测试用例"/"## 一、.*测试用例"/"测试用例ID"等
+     如果包含，强制要求写到 case-design-out/ 并检查门禁
 
-Claude Code PreToolUse hook 协议：
-  stdin JSON → exit 0=放行，2=阻止（stderr 反馈模型）
-
-跨平台：纯 Python 标准库。
-本脚本是 skill 配套 harness 资产，不删除。
+效果：模型无论如何输出测试用例，都会被门禁卡住。
 """
 import sys
 import os
@@ -55,15 +43,20 @@ OUT_DIR = os.path.join(os.getcwd(), "case-design-out")
 GATE_LOG = os.path.join(OUT_DIR, ".gate_log")
 SIG_FILE = os.path.join(OUT_DIR, ".phase_signatures.json")
 
-# 命中 case-design-out/ 下的文件（跨平台）
+# === 路径正则 ===
 _OUT_DIR_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]", re.I)
-
-# 特定文件类型正则
 _MANIFEST_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]MANIFEST\.md$", re.I)
 _REQ_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]REQ_[^\\/]+\.md$", re.I)
 _CLARIFICATION_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]Clarification_Ledger_[^\\/]+\.md$", re.I)
-_TESTCASES_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]TestCases_[^\\/]+\.(md|xlsx)$", re.I)
+_TESTCASES_PATH_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]TestCases_[^\\/]+\.(md|xlsx)$", re.I)
 _KNOWLEDGE_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]Knowledge_[^\\/]+\.md$", re.I)
+
+# === 内容特征正则（检测是否是测试用例内容）===
+_TESTCASES_NAME_RE = re.compile(r"(测试用例|TestCases?)[_\\/]", re.I)
+_TESTCASES_CONTENT_RE = re.compile(
+    r"(#\s*测试用例|##\s*一、.*测试用例|测试用例ID|测试用例名称|用例等级|测试用例设计|用例总数)",
+    re.I
+)
 
 
 def _match(path, regex):
@@ -74,8 +67,18 @@ def _is_out_dir_file(path):
     return bool(_OUT_DIR_RE.search(path.replace("\\", "/")))
 
 
+def _is_testcases_content(path, content):
+    """检测是否是测试用例内容（基于文件名和内容特征）。"""
+    # 文件名含"测试用例"/"TestCases"
+    if _TESTCASES_NAME_RE.search(path):
+        return True
+    # 内容含测试用例特征
+    if content and _TESTCASES_CONTENT_RE.search(content):
+        return True
+    return False
+
+
 def _phase0_signed():
-    """检查 Phase 0 是否已签名。"""
     if not os.path.exists(SIG_FILE):
         return False
     try:
@@ -89,7 +92,6 @@ def _phase0_signed():
 
 
 def _all_phases_signed():
-    """检查 Phase 0-7 是否全部签名。"""
     if not os.path.exists(SIG_FILE):
         return False, list(range(0, 8))
     try:
@@ -105,7 +107,6 @@ def _all_phases_signed():
 
 
 def _gate8_passed():
-    """检查 gate8 是否 exit=0。"""
     if not os.path.exists(GATE_LOG):
         return False, "无 .gate_log"
     best_rc = None
@@ -137,7 +138,6 @@ def _block(path, reason, hint):
 
 
 def _hint(path, msg):
-    """允许写入，但打印提示。"""
     sys.stderr.write("[case-design-gate] ⚠️  %s\n" % msg)
     return 0
 
@@ -155,76 +155,91 @@ def main():
 
     ti = data.get("tool_input", {}) or {}
     path = ti.get("file_path", "") or ""
+    content = ti.get("content", "") or ""
 
-    # 只拦截 case-design-out/ 目录下的文件
-    if not path or not _is_out_dir_file(path):
+    if not path:
         return 0
 
-    # ===== 分文件类型门禁 =====
+    # ===== A. case-design-out/ 目录下的 Write =====
+    if _is_out_dir_file(path):
+        # MANIFEST.md / REQ_*.md：允许写入，提示运行 gate-phase 0
+        if _match(path, _MANIFEST_RE) or _match(path, _REQ_RE):
+            if _phase0_signed():
+                return _hint(path, "%s 已写入，Phase 0 已签名" % os.path.basename(path))
+            return _hint(
+                path,
+                "%s 已写入。下一步：运行 `python scripts/run_phase.py gate-phase 0 \"MANIFEST.md,REQ_*.md\"` 签名 Phase 0" % os.path.basename(path)
+            )
 
-    # MANIFEST.md / REQ_*.md：允许写入，提示运行 gate-phase 0
-    if _match(path, _MANIFEST_RE) or _match(path, _REQ_RE):
-        # 检查 Phase 0 是否已签
-        if _phase0_signed():
-            return _hint(path, "%s 已写入，但 Phase 0 已签名，无需重复提示" % os.path.basename(path))
-        return _hint(
-            path,
-            "%s 已写入。下一步：运行 `python scripts/run_phase.py gate-phase 0 \"MANIFEST.md,REQ_*.md\"` 签名 Phase 0" % os.path.basename(path)
-        )
+        # Clarification_Ledger_*.md：需要 Phase 0 签名
+        if _match(path, _CLARIFICATION_RE):
+            if not _phase0_signed():
+                return _block(
+                    path,
+                    "Phase 0 未签名",
+                    "先运行 `python scripts/run_phase.py gate-phase 0 \"MANIFEST.md,REQ_*.md\"`"
+                )
+            return _hint(
+                path,
+                "%s 已写入。下一步：运行 `python scripts/run_phase.py gate-phase 1 \"Clarification_Ledger_*.md\"` 签名 Phase 1" % os.path.basename(path)
+            )
 
-    # Clarification_Ledger_*.md：需要 Phase 0 签名
-    if _match(path, _CLARIFICATION_RE):
+        # TestCases_*.md|xlsx：需要 gate8 + Phase 0-7 全签
+        if _match(path, _TESTCASES_PATH_RE):
+            ok, why = _gate8_passed()
+            if not ok:
+                return _block(
+                    path,
+                    why,
+                    "先执行 Phase 0-7 + gate8："
+                    "`python scripts/run_phase.py gate-phase <N> \"<产出物>\"` "
+                    "然后 `python scripts/run_phase.py gate8 <TC.md> <REQ.md>`"
+                )
+            all_ok, missing = _all_phases_signed()
+            if not all_ok:
+                return _block(
+                    path,
+                    "缺阶段签名：%s" % ",".join(str(m) for m in missing),
+                    "逐阶段补签 `python scripts/run_phase.py gate-phase <N> \"<产出物>\"`"
+                )
+            sys.stderr.write("[case-design-gate] ✅ 门禁已过，放行 %s\n" % os.path.basename(path))
+            return 0
+
+        # Knowledge_*.md：需要 Phase 0-7 全签
+        if _match(path, _KNOWLEDGE_RE):
+            all_ok, missing = _all_phases_signed()
+            if not all_ok:
+                return _block(
+                    path,
+                    "知识总结需要 Phase 0-7 全签，缺：%s" % ",".join(str(m) for m in missing),
+                    "先完成测试用例设计并通过审核"
+                )
+            return 0
+
+        # 其他 case-design-out/ 文件：需要 Phase 0 签名
         if not _phase0_signed():
             return _block(
                 path,
-                "Phase 0 未签名",
-                "先运行 `python scripts/run_phase.py gate-phase 0 \"MANIFEST.md,REQ_*.md\"`"
-            )
-        return _hint(
-            path,
-            "%s 已写入。下一步：运行 `python scripts/run_phase.py gate-phase 1 \"Clarification_Ledger_*.md\"` 签名 Phase 1" % os.path.basename(path)
-        )
-
-    # TestCases_*.md|xlsx：需要 gate8 + Phase 0-7 全签
-    if _match(path, _TESTCASES_RE):
-        ok, why = _gate8_passed()
-        if not ok:
-            return _block(
-                path,
-                why,
-                "先执行 Phase 0-7 + gate8："
-                "`python scripts/run_phase.py gate-phase <N> \"<产出物>\"` "
-                "然后 `python scripts/run_phase.py gate8 <TC.md> <REQ.md>`"
-            )
-        all_ok, missing = _all_phases_signed()
-        if not all_ok:
-            return _block(
-                path,
-                "缺阶段签名：%s" % ",".join(str(m) for m in missing),
-                "逐阶段补签 `python scripts/run_phase.py gate-phase <N> \"<产出物>\"`"
-            )
-        sys.stderr.write("[case-design-gate] ✅ 门禁已过，放行 %s\n" % os.path.basename(path))
-        return 0
-
-    # Knowledge_*.md：需要 Phase 0-7 全签
-    if _match(path, _KNOWLEDGE_RE):
-        all_ok, missing = _all_phases_signed()
-        if not all_ok:
-            return _block(
-                path,
-                "知识总结需要 Phase 0-7 全签，缺：%s" % ",".join(str(m) for m in missing),
-                "先完成测试用例设计并通过审核"
+                "写入 case-design-out/ 需要先完成 Phase 0",
+                "先写入 MANIFEST.md 和 REQ_*.md，然后运行 gate-phase 0"
             )
         return 0
 
-    # 其他 case-design-out/ 文件：需要 Phase 0 签名
-    if not _phase0_signed():
-        return _block(
-            path,
-            "写入 case-design-out/ 需要先完成 Phase 0",
-            "先写入 MANIFEST.md 和 REQ_*.md，然后运行 gate-phase 0"
+    # ===== B. 非 case-design-out/ 目录的 Write：内容特征检测 =====
+    if _is_testcases_content(path, content):
+        sys.stderr.write(
+            "[case-design-gate] ❌ 检测到测试用例内容，禁止写到非约定位置\n"
+            + "  文件：%s\n" % path
+            + "  原因：测试用例必须写到 case-design-out/TestCases_*.md 并满足门禁\n"
+            + "  修复：\n"
+            + "    1. 按 skill 流程执行 Phase 0-7\n"
+            + "    2. 逐阶段签名：python scripts/run_phase.py gate-phase <N> \"<产出物>\"\n"
+            + "    3. 第8阶段出口：python scripts/run_phase.py gate8 <TC.md> <REQ.md>\n"
+            + "    4. 通过后写到 case-design-out/TestCases_<需求标识>.md\n"
         )
+        return 2
 
+    # 其他文件放行
     return 0
 
 
