@@ -52,9 +52,11 @@ _TESTCASES_PATH_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]TestCases_[^\\/
 _KNOWLEDGE_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]Knowledge_[^\\/]+\.md$", re.I)
 
 # === 内容特征正则（检测是否是测试用例内容）===
-_TESTCASES_NAME_RE = re.compile(r"(测试用例|TestCases?)[_\\/]", re.I)
+# 路径/文件名含"测试用例"/"TestCases"
+_TESTCASES_PATH_RE = re.compile(r"(测试用例|TestCases?)", re.I)
+# 内容特征：更宽松的匹配
 _TESTCASES_CONTENT_RE = re.compile(
-    r"(#\s*测试用例|##\s*一、.*测试用例|测试用例ID|测试用例名称|用例等级|测试用例设计|用例总数)",
+    r"(测试用例[设计_idID]*|TestCases?|用例[等级idID名称]|用例总数|用例数量|测试用例设计)",
     re.I
 )
 
@@ -68,9 +70,9 @@ def _is_out_dir_file(path):
 
 
 def _is_testcases_content(path, content):
-    """检测是否是测试用例内容（基于文件名和内容特征）。"""
-    # 文件名含"测试用例"/"TestCases"
-    if _TESTCASES_NAME_RE.search(path):
+    """检测是否是测试用例内容（基于路径和内容特征）。"""
+    # 路径/文件名含"测试用例"/"TestCases"
+    if _TESTCASES_PATH_RE.search(path):
         return True
     # 内容含测试用例特征
     if content and _TESTCASES_CONTENT_RE.search(content):
