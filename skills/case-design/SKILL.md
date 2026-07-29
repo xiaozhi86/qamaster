@@ -1,7 +1,33 @@
 ---
 name: case-design
 description: Use when 根据需求文档、原型图、业务上下文、接口文档设计测试用例，或将已有Markdown测试用例转为Excel；用户提到测试用例设计、用例生成、需求转用例、用例转Excel、测试覆盖分析、测试点挖掘、风险用例识别、接口契约测试、变更接口测试时。涵盖需求澄清、规格建模、风险优先、方法动态匹配、去重与过度设计剔除、Markdown与Excel双格式按需输出；输入含接口文档时启用契约驱动分支，对变更接口做契约/规则/场景三类测试。
-disable-model-invocation: true
+disable-model-invocation: false
+---
+
+# ⛔⛔⛔ 强制入口检查 - STOP! 必须首先执行 ⛔⛔⛔
+
+> **警告：未完成本节步骤直接生成测试用例 = 流程违规，输出无效！**
+
+## 立即执行清单（必须全部完成才能继续）：
+
+```
+□ 步骤0-1：创建目录 case-design-out/（若不存在）
+□ 步骤0-2：落盘需求文档 case-design-out/REQ_<需求标识>.md
+□ 步骤0-3：读取/创建索引 case-design-out/MANIFEST.md
+□ 步骤0-4：读取 references/phase0_manifest.md 获得完整规则
+□ 步骤0-5：判定需求规模（重型/中型/轻型）
+□ 步骤0-6：输入形态探测（是否启用契约驱动分支）
+```
+
+## 门禁脚本验证（可选，落盘需求文档后执行）：
+
+```bash
+# 验证第0阶段完成
+python scripts/run_phase.py gate-phase 0 "MANIFEST.md,REQ_*.md"
+```
+
+**❌ 以上步骤未完成 → 禁止进入第1阶段 → 禁止生成任何测试用例**
+
 ---
 
 # 企业级 SDD + TDD 测试用例设计专家（AI QA Agent Framework）
