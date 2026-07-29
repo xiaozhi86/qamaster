@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-case_design_gate.py — Claude Code PreToolUse hook：硬拦截跳过门禁直接写测试用例。
+case_design_gate.py — Claude Code PreToolUse hook：硬拦截跳过门禁直接写产出物。
 
-设计动机：case-design skill 的流程合规原本完全依赖模型自觉调用
-run_phase.py / preflight.py / 各阶段 ref。强模型（glm-5.2）自觉合规，
-弱模型（glm-5）会跳过 Phase 0-7 直接 Write(TestCases_*.md)，而 prompt
-拦不住 Write。本 hook 把约束从"模型层"下沉到"harness 层"：在 Write/Edit
-落到磁盘前由 harness 调用本脚本，未过门禁即 exit 2 阻止，与模型是否自觉无关。
+v0.7.1 设计动机：
+  原 v0.7.0 只拦截 TestCases_*.md|xlsx，弱模型可以跳过 Phase 0-7
+  在内存中生成用例内容然后展示，不触发 Write。
 
-触发范围（最小侵入）：
-  仅当目标路径命中 <cwd>/case-design-out/TestCases_*.(md|xlsx) 时启用门禁。
-  其余文件（MANIFEST / REQ / Clarification_Ledger / Knowledge / 项目内任意文件）
-  一律 exit 0 放行，不影响正常开发与 Phase 0-1 的落盘。
+  本版升级为"全目录拦截"：
+  - 任何 case-design-out/ 目录下的 Write 都触发门禁检查
+  - 不同文件类型有不同的门禁要求
+  - 迫使模型必须按阶段顺序产出，无法跳过
+  - MANIFEST.md / REQ_*.md：
+      允许无签名写入（Phase 0 产物），但写入后 stderr 提示运行 gate-phase 0
+  - Clarification_Ledger_*.md：
+      需要 Phase 0 已签名（否则 exit 2 阻止）
+  - TestCases_*.md|xlsx：
+      需要 gate8 exit=0 + Phase 0-7 全签（否则 exit 2 阻止）
+  - Knowledge_*.md：
+      需要 Phase 0-7 全签（知识总结在审核后生成）
+  - 其他 case-design-out/ 文件：
+      需要 Phase 0 签名
 
-门禁条件（TestCases 写入须同时满足）：
-  1. case-design-out/.gate_log 含 gate8 条目且最近一次 exit=0（第8阶段出口已过）
-  2. case-design-out/.phase_signatures.json 含 Phase 0-7 全部 completed=true
-满足 → exit 0 放行；否则 → exit 2 阻止，stderr 给出可执行修复指引。
+效果：
+  - 模型必须先 Write MANIFEST/REQ（Phase 0 产物，允许）
+  - 然后必须 gate-phase 0 签名
+  - 才能 Write Clarification_Ledger（Phase 1）
+  - 然后必须 gate-phase 1-7 签名 + gate8
+  - 才能 Write TestCases
+
+  每一步都被门禁卡住，无法跳过。
 
 Claude Code PreToolUse hook 协议：
-  - stdin 收到 JSON：{"tool_name":"Write","tool_input":{"file_path":...}, ...}
-  - stdout JSON 可控制行为（此处用退出码足够）；exit 0=放行，2=阻止（stderr 反馈模型）
-  - 非 0/2 的退出码视为错误（非阻断），故本脚本只在明确需阻止时返回 2
+  stdin JSON → exit 0=放行，2=阻止（stderr 反馈模型）
 
-跨平台：纯 Python 标准库；路径用 os.path；cwd 由 Claude Code 设为项目根。
+跨平台：纯 Python 标准库。
 本脚本是 skill 配套 harness 资产，不删除。
 """
 import sys
@@ -45,64 +55,91 @@ OUT_DIR = os.path.join(os.getcwd(), "case-design-out")
 GATE_LOG = os.path.join(OUT_DIR, ".gate_log")
 SIG_FILE = os.path.join(OUT_DIR, ".phase_signatures.json")
 
-# 命中 case-design-out/TestCases_<任意>.(md|xlsx)，跨平台斜杠
-# (?:^|[\\/]) 兼容相对路径开头（无前导分隔符）与绝对路径
-_TARGET_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]TestCases_[^\\/]+\.(md|xlsx)$", re.I)
+# 命中 case-design-out/ 下的文件（跨平台）
+_OUT_DIR_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]", re.I)
+
+# 特定文件类型正则
+_MANIFEST_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]MANIFEST\.md$", re.I)
+_REQ_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]REQ_[^\\/]+\.md$", re.I)
+_CLARIFICATION_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]Clarification_Ledger_[^\\/]+\.md$", re.I)
+_TESTCASES_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]TestCases_[^\\/]+\.(md|xlsx)$", re.I)
+_KNOWLEDGE_RE = re.compile(r"(?:^|[\\/])case-design-out[\\/]Knowledge_[^\\/]+\.md$", re.I)
 
 
-def _is_target(path):
-    # 归一化斜杠后用正则匹配相对路径头部
-    return bool(_TARGET_RE.search(path.replace("\\", "/")))
+def _match(path, regex):
+    return bool(regex.search(path.replace("\\", "/")))
 
 
-def _gate8_status():
-    """返回 (passed:bool, why:str)。passed=True 表示 .gate_log 中存在 exit=0 的 gate8。"""
+def _is_out_dir_file(path):
+    return bool(_OUT_DIR_RE.search(path.replace("\\", "/")))
+
+
+def _phase0_signed():
+    """检查 Phase 0 是否已签名。"""
+    if not os.path.exists(SIG_FILE):
+        return False
+    try:
+        with open(SIG_FILE, "r", encoding="utf-8") as f:
+            sigs = json.load(f)
+        if not isinstance(sigs, dict):
+            return False
+        return sigs.get("phases", {}).get("0", {}).get("completed", False)
+    except Exception:
+        return False
+
+
+def _all_phases_signed():
+    """检查 Phase 0-7 是否全部签名。"""
+    if not os.path.exists(SIG_FILE):
+        return False, list(range(0, 8))
+    try:
+        with open(SIG_FILE, "r", encoding="utf-8") as f:
+            sigs = json.load(f)
+    except Exception:
+        return False, list(range(0, 8))
+    if not isinstance(sigs, dict):
+        return False, list(range(0, 8))
+    phases = sigs.get("phases", {}) if isinstance(sigs.get("phases"), dict) else {}
+    missing = [p for p in range(0, 8) if not phases.get(str(p), {}).get("completed")]
+    return len(missing) == 0, missing
+
+
+def _gate8_passed():
+    """检查 gate8 是否 exit=0。"""
     if not os.path.exists(GATE_LOG):
-        return False, "无 .gate_log（从未跑过门禁脚本，Phase 0-8 均未留痕）"
+        return False, "无 .gate_log"
     best_rc = None
     try:
         with open(GATE_LOG, "r", encoding="utf-8") as f:
             for ln in f:
                 parts = ln.rstrip("\n").split("|")
-                # 字段：script | phase | exit | digest_hash | note | state_version
                 if len(parts) >= 3 and parts[1] == "gate8":
                     try:
-                        rc = int(parts[2])
-                        best_rc = rc  # 取最后一条 gate8 的 exit
+                        best_rc = int(parts[2])
                     except ValueError:
                         continue
-    except Exception as e:
-        return False, ".gate_log 读取异常：%s" % e
-    if best_rc is None:
-        return False, ".gate_log 中无 gate8 条目（未跑第8阶段出口门禁）"
-    if best_rc != 0:
-        return False, "gate8 最近 exit=%s（未通过，须先修至 exit=0 再 Write）" % best_rc
-    return True, ""
-
-
-def _missing_phases():
-    """返回未签名的 Phase 列表（0-7）。"""
-    if not os.path.exists(SIG_FILE):
-        return list(range(0, 8))
-    try:
-        with open(SIG_FILE, "r", encoding="utf-8") as f:
-            sigs = json.load(f)
     except Exception:
-        return list(range(0, 8))
-    if not isinstance(sigs, dict):
-        return list(range(0, 8))
-    phases = sigs.get("phases", {}) if isinstance(sigs.get("phases"), dict) else {}
-    return [p for p in range(0, 8)
-            if not phases.get(str(p), {}).get("completed")]
+        return False, ".gate_log 读异常"
+    if best_rc is None:
+        return False, "无 gate8 条目"
+    if best_rc != 0:
+        return False, "gate8 exit=%s" % best_rc
+    return True, ""
 
 
 def _block(path, reason, hint):
     sys.stderr.write(
-        "[case-design-gate] ❌ 禁止跳过门禁直接写 %s\n" % os.path.basename(path)
+        "[case-design-gate] ❌ 禁止写入 %s\n" % os.path.basename(path)
         + "  原因：%s\n" % reason
         + "  修复：%s\n" % hint
     )
     return 2
+
+
+def _hint(path, msg):
+    """允许写入，但打印提示。"""
+    sys.stderr.write("[case-design-gate] ⚠️  %s\n" % msg)
+    return 0
 
 
 def main():
@@ -110,37 +147,84 @@ def main():
     try:
         data = json.loads(raw) if raw.strip() else {}
     except Exception:
-        # stdin 非 JSON（非标准调用）→ 放行，避免误伤其他工具链
         return 0
+
     tool = data.get("tool_name", "")
     if tool not in ("Write", "Edit", "MultiEdit"):
         return 0
+
     ti = data.get("tool_input", {}) or {}
     path = ti.get("file_path", "") or ""
-    if not path or not _is_target(path):
+
+    # 只拦截 case-design-out/ 目录下的文件
+    if not path or not _is_out_dir_file(path):
         return 0
 
-    # ===== 命中 TestCases 写入：启用硬门禁 =====
-    ok, why = _gate8_status()
-    if not ok:
-        return _block(
-            path, why,
-            "先按流程执行 Phase 0-7，逐阶段签名 "
-            "`python scripts/run_phase.py gate-phase <N> \"<产出物>\"`，"
-            "再跑第8出口 `python scripts/run_phase.py gate8 <TC.md> <REQ.md>`（须 exit=0）。"
+    # ===== 分文件类型门禁 =====
+
+    # MANIFEST.md / REQ_*.md：允许写入，提示运行 gate-phase 0
+    if _match(path, _MANIFEST_RE) or _match(path, _REQ_RE):
+        # 检查 Phase 0 是否已签
+        if _phase0_signed():
+            return _hint(path, "%s 已写入，但 Phase 0 已签名，无需重复提示" % os.path.basename(path))
+        return _hint(
+            path,
+            "%s 已写入。下一步：运行 `python scripts/run_phase.py gate-phase 0 \"MANIFEST.md,REQ_*.md\"` 签名 Phase 0" % os.path.basename(path)
         )
 
-    miss = _missing_phases()
-    if miss:
+    # Clarification_Ledger_*.md：需要 Phase 0 签名
+    if _match(path, _CLARIFICATION_RE):
+        if not _phase0_signed():
+            return _block(
+                path,
+                "Phase 0 未签名",
+                "先运行 `python scripts/run_phase.py gate-phase 0 \"MANIFEST.md,REQ_*.md\"`"
+            )
+        return _hint(
+            path,
+            "%s 已写入。下一步：运行 `python scripts/run_phase.py gate-phase 1 \"Clarification_Ledger_*.md\"` 签名 Phase 1" % os.path.basename(path)
+        )
+
+    # TestCases_*.md|xlsx：需要 gate8 + Phase 0-7 全签
+    if _match(path, _TESTCASES_RE):
+        ok, why = _gate8_passed()
+        if not ok:
+            return _block(
+                path,
+                why,
+                "先执行 Phase 0-7 + gate8："
+                "`python scripts/run_phase.py gate-phase <N> \"<产出物>\"` "
+                "然后 `python scripts/run_phase.py gate8 <TC.md> <REQ.md>`"
+            )
+        all_ok, missing = _all_phases_signed()
+        if not all_ok:
+            return _block(
+                path,
+                "缺阶段签名：%s" % ",".join(str(m) for m in missing),
+                "逐阶段补签 `python scripts/run_phase.py gate-phase <N> \"<产出物>\"`"
+            )
+        sys.stderr.write("[case-design-gate] ✅ 门禁已过，放行 %s\n" % os.path.basename(path))
+        return 0
+
+    # Knowledge_*.md：需要 Phase 0-7 全签
+    if _match(path, _KNOWLEDGE_RE):
+        all_ok, missing = _all_phases_signed()
+        if not all_ok:
+            return _block(
+                path,
+                "知识总结需要 Phase 0-7 全签，缺：%s" % ",".join(str(m) for m in missing),
+                "先完成测试用例设计并通过审核"
+            )
+        return 0
+
+    # 其他 case-design-out/ 文件：需要 Phase 0 签名
+    if not _phase0_signed():
         return _block(
             path,
-            "阶段签名不全，缺 Phase：%s" % ",".join(str(m) for m in miss),
-            "逐阶段补签 `python scripts/run_phase.py gate-phase <N> \"<产出物>\"`"
-            "（Phase 2-7 内存阶段可传空串 \"\"）。"
+            "写入 case-design-out/ 需要先完成 Phase 0",
+            "先写入 MANIFEST.md 和 REQ_*.md，然后运行 gate-phase 0"
         )
 
-    # 放行（仅打印到 stderr，不污染 stdout）
-    sys.stderr.write("[case-design-gate] ✅ 门禁已过，放行 %s\n" % os.path.basename(path))
     return 0
 
 

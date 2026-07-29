@@ -8,6 +8,24 @@
 
 > 本节为每个已发布版本的用户视角摘要；下方各版本技术条目面向维护者。两节互补，不重复。
 
+## v0.7.1（2026-07-29）— 全目录拦截：每一步都卡门禁
+
+**本次发布解决一个核心问题**：v0.7.0 的 hook 只拦截 TestCases 写入，弱模型可以跳过 Phase 0-7 在内存中生成用例内容然后展示，不触发 Write。本版升级为**全目录拦截**，每一步产出物都被门禁卡住。
+
+**新特性：分文件类型门禁**
+
+| 文件类型 | 门禁要求 |
+|---|---|
+| MANIFEST.md / REQ_*.md | 允许写入，提示运行 gate-phase 0 |
+| Clarification_Ledger_*.md | 需要 Phase 0 已签名 |
+| TestCases_*.md|xlsx | 需要 gate8 exit=0 + Phase 0-7 全签 |
+| Knowledge_*.md | 需要 Phase 0-7 全签 |
+| 其他 case-design-out/ 文件 | 需要 Phase 0 签名 |
+
+**效果**：模型必须按顺序 MANIFEST → gate-phase 0 → Clarification_Ledger → gate-phase 1-7 + gate8 → TestCases。跳过任何步骤都会被门禁拦住，stderr 给出可执行修复指令。
+
+**升级原因**：用户反馈 glm-5 在 v0.7.0 下仍跳过阶段 0 直接在对话中生成用例内容——因为没有 Write，hook 无法拦截。全目录拦截后，模型要输出任何产出物都必须先过门禁。
+
 ## v0.7.0（2026-07-29）— harness 强制合规：硬门禁 + PreToolUse hook
 
 **本次发布解决一个核心问题**：不同模型（尤其 glm-5 等弱模型）调用本 skill 时不严格按 Phase 0-15 顺序执行，跳过澄清/规格建模/风险分析直接生成用例。v0.6.0 的机器门禁仍依赖模型"自觉调用脚本"，弱模型不调用即绕过。本次把约束从"模型层"下沉到"harness 层"。
