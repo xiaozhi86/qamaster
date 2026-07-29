@@ -26,12 +26,18 @@ gen_excel.py — 测试用例 .md → .xlsx 永久生成器（Tier B skill 自�
 脚本须一次执行内完成读取+解析+写出+格式化+两段校验，禁止分次追加写同一 .xlsx
 （见 `references/excel.md` 21.7「脚本职责」）。
 
+交付格式硬约束（不可违背）：
+  - 测试用例 Excel 交付格式固定为 `.xlsx`（由 openpyxl 的 Workbook 产出）。
+  - 禁止以 `.csv` / `.xls` / 其他格式作为测试用例交付物。
+  - CSV 仅可作为脚本内部中间产物（若有），用完即删，不得交付给用户。
+  - 输出路径缺省 = 源 .md 同名 `.xlsx`（绝不写 `.csv`）。
+
 退出码：0 = 生成成功且两段校验全过；1 = 生成失败/校验不通过（按 21.7「生成失败处理」报错）。
 本脚本是 skill 自带可复用资产，不删除（见 `references/output_write.md` ch30）。
 
 用法：
   python gen_excel.py <TC文件.md> [输出.xlsx]
-  缺省输出 = 同目录同名 .xlsx（.md→.xlsx，输出到源 .md 所在目录）。
+  缺省输出 = 同目录同名 .xlsx（.md→.xlsx，输出到源 .md 所在目录；绝不产出 .csv）。
 """
 import sys
 import os

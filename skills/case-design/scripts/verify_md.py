@@ -18,7 +18,9 @@ verify_md.py — 测试用例 .md 落盘后回读核对（Tier B 降本脚本）
 用法：
   python verify_md.py <TC文件.md>
 
-退出码：0=解析成功（供模型依据摘要判定）；1=文件不可读/无表头
+退出码：0=结构核对全部通过（表头齐全且顺序一致、用例条数>0、列宽一致、末行完整）；
+       1=文件不可读 / 无表头行 / 结构核对不通过（含缺字段、顺序不一致、列宽错位、末行截断）。
+       退出码与"结论"行一致：结论=不通过 -> return 1（防门禁被弱模型跳过/误判"通过"）。
 本脚本是 skill 自带可复用资产，不删除（见 references/output_write.md ch30）。
 """
 import sys
@@ -137,7 +139,6 @@ def main():
         last_ok = False
 
     overall = "通过" if (header_ok and width_ok and n > 0 and last_ok) else "不通过"
-
     print("===== 回读核对摘要 =====")
     print("文件: %s" % os.path.basename(path))
     print("表头: 列数=%d (权威字段数=%d) -> %s%s；顺序%s" % (
@@ -159,7 +160,8 @@ def main():
     print("结论: %s" % overall)
     print("========================")
 
-    return 0
+    # 退出码与"结论"行一致：结构核对不通过即 return 1（闭合文档与行为不符的 bug）
+    return 0 if overall == "通过" else 1
 
 
 if __name__ == "__main__":

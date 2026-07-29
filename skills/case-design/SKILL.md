@@ -18,7 +18,9 @@ disable-model-invocation: true
 * **需求文档强制落盘**：`REQ_<需求标识>.md` 在第0阶段步骤零强制落盘（用户内联提供或给路径的需求文档均落盘；纯散文/无标题者落盘前补 `## 二级标题` 分节），为 #4/#5 反向需求追溯提供唯一可靠基准——不落盘则"完整覆盖无遗漏"承诺失效（详见 `references/phase0_manifest.md` 步骤零）
 * **读写统一前缀**：凡读写上述产出物，路径均为 `case-design-out/<文件名>`；索引表路径列填写相对 `case-design-out/` 的文件名（不含目录前缀）
 * **目录自动创建**：`case-design-out/` 不存在时按需创建（首次写入产出物前）
-* **临时文件**：Excel 生成/校验的 ad-hoc 脚本与中间产物（CSV/JSON/txt）同样置于 `case-design-out/` 下，用完即删（见 §临时文件清理 / `references/output_write.md` ch30）
+* **临时文件**：Excel 生成/校验的 ad-hoc 脚本与中间产物（CSV/JSON/txt 等**中间产物**，非交付格式）同样置于 `case-design-out/` 下，用完即删（见 §临时文件清理 / `references/output_write.md` ch30）。**测试用例 Excel 交付格式固定为 `.xlsx`**（openpyxl 产出，见 `references/excel.md` 21.7、`scripts/gen_excel.py`），**禁止以 `.csv`/`.xls` 作为交付物**。
+* **已有产出物修改红线（强制）**：`REQ_*.md`、`Clarification_Ledger_*.md`、`TestCases_*.md`、`TestCases_*.xlsx`、`Knowledge_*.md`、`MANIFEST.md` 的修改一律在**原文件**整体 Write 覆盖，**禁止另存新文件、禁止另起新文件名**（文件名须与 `MANIFEST.md` 索引列一致）。仅拆 PART 场景在原文件名加 `_PARTn` 后缀属合规重排，不属另存新文件。落盘后由 `scripts/run_phase.py check-new-file <文件名>` 核对该文件名 ∈ MANIFEST 已登记集合，未登记记 `UNEXPECTED_NEW_FILE`（见 §6.5 后、§19）。
+* **超长需求文档处理（强制）**：需求文档落盘后运行 `python scripts/index_req.py case-design-out/REQ_<需求标识>.md` 生成章节索引 `case-design-out/REQ_<需求标识>.md.index.json`（标题/行号区间/字数/关键词/token 估算/需否分批）；第1/3/5 阶段按索引"按章节按需读"（Read 指定行区间）而非全量载入。`needs_split=true`（token 估算 >24000）时按 `##` 章节分批落盘为 `REQ_<需求标识>_secN.md`，MANIFEST 需求文档列逗号分隔全部文件（对齐 TestCases PART 写法）。
 * **skill 自带资产除外**：`scripts/`、`config/`、`references/` 位于 skill 安装目录（`.claude/skills/case-design/`），**不在 `case-design-out/` 产出目录内**，为 skill 永久资产不删除
 
 > 该约定为全局行为，贯穿第0阶段（索引）至第15阶段（Excel）及知识总结生成。各 references 中提及的产出物文件名，均指 `case-design-out/` 下的相对文件名。
@@ -210,6 +212,36 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 ---
 
+# 6.6 机器门禁包装器与跳过检测（强制·跨平台）
+
+> 把"自愿跑脚本"提升为"包装器统一触发并留痕"。门禁点不再依赖模型自觉——调用 `scripts/run_phase.py` 包装器，由它串联 verify 链、写 sentinel、读写状态机。**Windows 与 macOS 行为一致**（纯 Python，禁用 .sh/.bat/.ps1）。
+
+## 包装器子命令（经 Bash 调用）
+
+| 子命令 | 阶段 | 作用 |
+| -- | -- | -- |
+| `run_phase.py gate8 <TC.md> [REQ.md]` | 第8出口 | 写前内存校验 + 提取 `json-gate-digest` 机器块 + REQ 落盘硬校验（缺失记 `REQ_MISSING`/`REQ_NO_HEADINGS`） |
+| `run_phase.py readback <TC.md> [REQ.md]` | 第13回读 | verify_md + verify_cases 文件入口串联 + 提取机器块 |
+| `run_phase.py check-new-file <文件名>` | 第13落盘后 | 核对文件名 ∈ MANIFEST，未登记记 `UNEXPECTED_NEW_FILE`（闭合"另生新文件"洞） |
+| `run_phase.py state show / set <phase>` | 全阶段 | 读写 `.phase_state.json`（外置循环计数 + 幂等防覆盖，带 version/last_phase） |
+| `echo '<json>' \| run_phase.py verify <TC.md> [REQ.md]` | 第14交付前 | 校验交付摘要粘贴的 digest 块哈希与重算一致（防手编假 sentinel；**经 stdin 传 JSON 避免中文 argv 乱码**） |
+| `run_phase.py summary` | 第14交付前 | 打印 `.gate_log` 全部 sentinel，核对 gate8/readback 齐全且 exit=0 |
+
+## sentinel 与交付摘要联动
+
+* 每次门禁运行向 `case-design-out/.gate_log` 追加一行 sentinel：`script|phase|exit|digest_hash|note|state_version`，`digest_hash` 为脚本 stdout 前 200 字符的短哈希（防伪造）。
+* `verify_cases.py` 在 stdout 末尾输出 ```json-gate-digest``` 机器块（含 5 项机器数值 + `hash`，`hash` 覆盖 file/n/exit/hard/summary）。**交付摘要 5 项数值须从该块原样粘贴**（禁止手填），`run_phase.py verify` 重算比对哈希防篡改。
+* `.gate_log` 与 `.phase_state.json` 交叉引用（每条 sentinel 记 `state_version`），一处漏写另一处能发现。
+* **跳过检测**：交付前 `run_phase.py summary` 核对 gate8（第8出口）+ readback（第13回读）各至少 1 条且 exit=0；REQ 无 `REQ_MISSING`/`REQ_NO_HEADINGS`；check-new-file 无 `UNEXPECTED_NEW_FILE`。**缺任一项即门禁未走完，禁止声明已审核通过**。
+
+## preflight 摘要注入（降认知负载）
+
+* 进入第 N 阶段前运行 `python scripts/preflight.py --phase <N>` 打印对应 ref 的 40 行大纲摘要（标题级 + 关键约束行），即使模型不主动读 ref，摘要也进上下文。
+* 摘要硬上限 40 行/阶段、仅注入一次；超长需求（用例数 >60）加 `--big` 降级为计数 + 指引（防反噬）。
+* `python scripts/preflight.py --list` 列出全部阶段-ref 映射。
+
+---
+
 # 19、输出协议（强制）
 
 ## 默认模式
@@ -312,16 +344,33 @@ Excel 状态：未生成 / 已生成(经21.7脚本产出+结构验证+数据完�
 Excel 数据校验：未执行 / 七项全过 / 不通过(问题项及条数)
 临时文件清理：已清理(清单) / 无临时文件产生 / 清理失败(残留清单)
 待确认问题：Q列表中未关闭 m 条（P0/P1 阻断项）
+门禁 sentinel（取自 case-design-out/.gate_log，经 `run_phase.py summary` 输出）：
+  第8出口 gate8：已过 exit=0 / 缺失(REQ_MISSING/REQ_NO_HEADINGS) / 未跑
+  第13回读 readback：verify_md exit=? verify_cases exit=? / 未跑
+  check-new-file：全部 ∈ MANIFEST / 有 UNEXPECTED_NEW_FILE:<文件名>
+  digest 块校验：粘贴块哈希与重算一致 / 不一致(疑似手编)
 下一步建议：<提示人工动作：审核/回答问题/许可生成Excel/安装openpyxl>
 ```
 
-要求：连跑跳过等待仍须输出摘要；P0/P1 阻断项须显式列出；Excel/知识总结/清理须如实填写，未通过不得声明已生成。**脚本校验摘要**五项数值须从 `verify_cases.py` 回读输出的对应行直接取（检查13 断言完整性 / 检查9增强 存储schema交叉 / 风险来源 / 反向需求追溯 #4 / 检查15 业务行为来源追溯 #5），禁止凭印象手填。**#4 反向需求追溯行**：REQ 已落盘且可解析时填"需求条目 N 条、未引用 K 条/全部覆盖"；REQ 缺失或不可解析时填"未校验(REQ缺失/不可解析,待消除)"——此为显式强提示（`references/dedup_coverage.md` #4 显式强提示节），完整模式须消除（补落盘 REQ/补 ## 标题后重跑）才进第14阶段，**禁止填"跳过"隐瞒**；其余跳过项（如检查9增强未提供技术实现摘要）填"跳过"并注明原因。**拆 PART 自动续跑时**：中间 PART 落盘后交付摘要"下一步建议"填"自动续跑下一 PART"，仅末 PART 填"统一审核全部文件"；审核状态以全部 PART 聚合填写。
+要求：连跑跳过等待仍须输出摘要；P0/P1 阻断项须显式列出；Excel/知识总结/清理须如实填写，未通过不得声明已生成。**脚本校验摘要**五项数值须从 `verify_cases.py` 末尾输出的 ```json-gate-digest``` 机器块**原样粘贴**（含 hash），或经 `run_phase.py gate8/readback` 输出的机器块粘贴——禁止凭印象手填；`run_phase.py verify` 会重算哈希防篡改。**#4 反向需求追溯行**：REQ 已落盘且可解析时填"需求条目 N 条、未引用 K 条/全部覆盖"；REQ 缺失或不可解析时填"未校验(REQ缺失/不可解析,待消除)"——此为显式强提示（`references/dedup_coverage.md` #4 显式强提示节），完整模式须消除（补落盘 REQ/补 ## 标题后重跑）才进第14阶段，**禁止填"跳过"隐瞒**；其余跳过项（如检查9增强未提供技术实现摘要）填"跳过"并注明原因。**拆 PART 自动续跑时**：中间 PART 落盘后交付摘要"下一步建议"填"自动续跑下一 PART"，仅末 PART 填"统一审核全部文件"；审核状态以全部 PART 聚合填写。
 
 ---
 
+# 承重规则速记（常驻·不读 ref 也会错）
+
+> 下列规则是"即使不读 references 也会用错"的承重项，故内联常驻核心，与 `config/validation_rules.json`（单一事实源）一致；散文与 JSON 冲突时以 JSON 为准（见校验规则契约节）。
+
+* **15 列表头顺序（硬）**：用例ID | 关联需求ID | 关联规则 | 测试类型 | 测试维度 | 所属模块 | 用例名称 | Given | When | Then | 编辑模式 | 标签 | 责任人 | 用例等级 | 用例状态（**15 列**，非 16；列数不足/错位 → verify_cases.py exit=1）。
+* **固定值列（硬）**：编辑模式=STEP、标签=AI、责任人=AI、用例状态=Completed（取值固定，禁改值留空）。
+* **测试类型枚举（12 值，硬）**：兼容性 / 功能 / 可靠性 / 契约 / 安全 / 幂等 / 并发 / 异常 / 权限 / 状态迁移 / 边界 / 集成。
+* **测试维度枚举（13 值，硬，含 `界面验证`）**：兼容性验证 / 安全验证 / 幂等验证 / 并发验证 / 接口验证 / 数据验证 / 权限验证 / 状态验证 / 输入验证 / 边界验证 / 集成验证 / 风险验证 / **界面验证**（v0.5.0 加，散文 modeling.md §20.11 旧写 12 值系漂移，**以 13 值为准**）。
+* **用例等级（硬）**：P0 / P1 / P2 / P3（取自第5阶段风险分析）。
+* **5 个有界循环计数（独立·不嵌套）**：第5机器gate ≤2、第5 critique ≤2、第8机器gate ≤2、第8 critique ≤2、第11自查 ≤3。critique 补出的新用例须重跑第8 gate（计入第8 gate ≤2 上限）。计数可外置到 `case-design-out/.phase_state.json`（经 `run_phase.py state` 读写），不必脑记。
+* **优先级规则**：`config/validation_rules.json`（机器判定）> `references/*.md` 散文 > 范例。
+
 # 临时文件清理（全局·强制·概要）
 
-执行中产生的临时脚本/中间产物（CSV/JSON/txt/片段/日志）须在不再使用时立即删除（置于 `case-design-out/` 下）。**例外**：`scripts/` 下的 `verify_md.py`、`verify_cases.py`、`verify_knowledge.py`、`project_cases.py` 为 skill 自带可复用资产，**不删除**；仅 ad-hoc 一次性脚本（如 Excel 生成脚本）用完即删。正式产出物（`case-design-out/` 下的 `TestCases_*.md/.xlsx`、台账、knowledge、原始需求）禁止删除。完整规则见 `references/output_write.md` 临时文件清理节。
+执行中产生的临时脚本/中间产物（CSV/JSON/txt/片段/日志，**均为中间产物非交付格式**）须在不再使用时立即删除（置于 `case-design-out/` 下）。**例外**：`scripts/` 下的 `verify_md.py`、`verify_cases.py`、`verify_knowledge.py`、`project_cases.py`、`gen_excel.py`、`index_req.py`、`preflight.py`、`run_phase.py` 为 skill 自带可复用资产，**不删除**；仅 ad-hoc 一次性脚本用完即删。正式产出物（`case-design-out/` 下的 `TestCases_*.md/.xlsx`、台账、knowledge、原始需求）禁止删除；`.gate_log`/`.phase_state.json`/`*.index.json` 为门禁状态文件，跨轮保留至该需求完成后清理。完整规则见 `references/output_write.md` 临时文件清理节。
 
 ---
 
@@ -357,12 +406,15 @@ Excel 数据校验：未执行 / 七项全过 / 不通过(问题项及条数)
         "Bash(python *verify_cases.py:*)",
         "Bash(python *verify_knowledge.py:*)",
         "Bash(python *project_cases.py:*)",
-        "Bash(python *verify_cases.py --dump-rules)"
+        "Bash(python *verify_cases.py --dump-rules)",
+        "Bash(python *run_phase.py:*)",
+        "Bash(python *index_req.py:*)",
+        "Bash(python *preflight.py:*)"
       ]
     }
   }
   ```
-  （`acceptEdits` 与允许列表二选一；语法/路径按你的 Claude Code 版本与工作目录调整。）
+  （`acceptEdits` 与允许列表二选一；语法/路径按你的 Claude Code 版本与工作目录调整。命令均为平台无关的 `python scripts/<x>.py ...`，Win/Mac 通用。）
 
 > 说明：skill 侧已通过"单文件默认 + 一文件一次 Write + 小体积 Write 合并同响应"将调用数压到最低；权限配置是把这些调用从"每次审批"变为"免审批"的最后一跃，属用户权限边界，须用户自行设定。
 
@@ -376,7 +428,7 @@ Excel 数据校验：未执行 / 七项全过 / 不通过(问题项及条数)
 
 # 参考文件索引（按阶段按需读取）
 
-> 进入对应阶段前读取相应 ref。ref 内容为本 skill 细则，与单文件版规则一致。
+> 进入对应阶段前读取相应 ref（亦可先跑 `python scripts/preflight.py --phase <N>` 注入 40 行大纲摘要）。ref 内容为本 skill 细则，与单文件版规则一致。**承重规则已内联本 SKILL.md「承重规则速记」节，不必为取枚举而读 ref**；ref 提供细则与决策表。
 
 | 阶段/场景 | 读取参考文件 | 内容 |
 | -- | -- | -- |
@@ -395,6 +447,8 @@ Excel 数据校验：未执行 / 七项全过 / 不通过(问题项及条数)
 | 安全/性能场景 | `references/safety_perf.md` | 安全测试维度、性能/兼容/本地化（原 ch27+ch29） |
 | 知识总结 | `references/knowledge.md` | 知识总结 13 维度、生成机制（原 ch31） |
 | 格式范例 | `references/example.md` | 端到端 worked example（原 ch28，仅不确定格式时读） |
+| 超长需求文档 | `scripts/index_req.py` + `scripts/run_phase.py` | 落盘 REQ 后生成章节索引（按需读章节）、分批落盘（token >24000 拆 `_secN.md`）、门禁包装器 |
+| 阶段进入摘要 | `scripts/preflight.py` | `--phase <N>` 注入 40 行 ref 大纲（降认知负载，`--big` 超长需求降级） |
 
 ---
 

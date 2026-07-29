@@ -61,6 +61,7 @@ import sys
 import os
 import re
 import json
+import hashlib
 
 # Windows 控制台默认 cp936，强制 stdout 输出 UTF-8，避免中文乱码
 try:
@@ -1463,6 +1464,68 @@ def print_findings(findings, basename, req_doc_lines=None):
     print("硬性校验结论: %s" % overall)
     print("（软性校验与覆盖统计不改变退出码，供模型 selfcheck 决策）")
     print("=" * 48)
+    # 机器可验证摘要块：供 run_phase.py sentinel 比对 / 交付摘要原样粘贴（防手填）。
+    # run_phase.py 重算本块哈希与 sentinel 比对，弱模型无法凭空伪造与脚本输出一致的哈希。
+    digest = build_digest_block(findings, basename, req_doc_lines)
+    print("```json-gate-digest")
+    print(json.dumps(digest, ensure_ascii=False))
+    print("```")
+
+
+def build_digest_block(findings, basename, req_doc_lines=None):
+    """从 findings 提取交付摘要须填的 5 项机器数值 + exit 意向 + 短哈希，组成机器可验证块。
+    与 print_findings 口径一致；不重复打印明细，只给"摘要行"级 5 数。
+    run_phase.py 读取本块（stdout 末尾的 fenced json-gate-digest）做 sentinel 防伪造比对。"""
+    soft = findings["soft"]
+    traces = findings["traces"]
+    src_dist, src_pending = findings["risk_source"]
+    unc_req, req_total = traces["requirement"]
+    behsrc_n, _behsrc_list, has_req = soft["behavior"]
+    rulesrc_n, _rulesrc_list = soft["rule_source"]
+    complete_n, _complete_list = soft["completeness"]
+    schema_n, _schema_list = soft["schema"]
+
+    # #4 反向需求追溯：与 print_findings 口径一致区分 None(跳过) vs 列表
+    if unc_req is None:
+        if req_doc_lines is None:
+            req_trace = "未校验(REQ缺失/不可解析,待消除)"
+        else:
+            req_trace = "未校验(REQ无可解析章节,待消除)"
+    else:
+        req_trace = "需求条目 %d 条、未引用 %d 条/%s" % (
+            req_total, len(unc_req), "全部覆盖" if not unc_req else "有缺口")
+
+    # 风险来源待确认数 = P0/P1 待台账角色确认数
+    pending_n = len(src_pending) if src_pending else 0
+
+    digest = {
+        "script": "verify_cases.py",
+        "file": basename,
+        "n": findings["n"],
+        "exit": 0 if not findings["hard_violations"] else 1,
+        "hard": "通过" if not findings["hard_violations"] else "不通过",
+        "summary": {
+            "检查13_断言完整性": complete_n,
+            "检查9增强_存储schema交叉": ("跳过" if schema_n is None else schema_n),
+            "风险来源待确认_P0P1": pending_n,
+            "#4_反向需求追溯": req_trace,
+            "#5_业务行为来源追溯": behsrc_n,
+            "规则来源_破自证": rulesrc_n,
+        },
+    }
+    # 短哈希：覆盖 file/n/exit/hard/summary（不含 script/hash 自身），防伪造者改 n/exit
+    # 却照抄 hash 行。run_phase.py 重算比对。
+    hash_payload = {
+        "file": digest["file"],
+        "n": digest["n"],
+        "exit": digest["exit"],
+        "hard": digest["hard"],
+        "summary": digest["summary"],
+    }
+    digest["hash"] = hashlib.sha256(
+        json.dumps(hash_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
+    return digest
 
 
 def main():
