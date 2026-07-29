@@ -8,6 +8,22 @@
 
 > 本节为每个已发布版本的用户视角摘要；下方各版本技术条目面向维护者。两节互补，不重复。
 
+## v0.7.0（2026-07-29）— harness 强制合规：硬门禁 + PreToolUse hook
+
+**本次发布解决一个核心问题**：不同模型（尤其 glm-5 等弱模型）调用本 skill 时不严格按 Phase 0-15 顺序执行，跳过澄清/规格建模/风险分析直接生成用例。v0.6.0 的机器门禁仍依赖模型"自觉调用脚本"，弱模型不调用即绕过。本次把约束从"模型层"下沉到"harness 层"。
+
+**新特性一：PreToolUse hook 硬拦截 Write（keystone）**
+
+新增 `.claude/hooks/case_design_gate.py` + `.claude/settings.json` 的 `hooks.PreToolUse`。仅命中 `case-design-out/TestCases_*.md|.xlsx` 的 `Write/Edit/MultiEdit` 触发；未过 gate8（exit=0）且 Phase 0-7 签名不全即 `exit 2` 阻止工具调用。模型被物理阻断，无法跳步直接落盘——**与模型是否自觉无关**。其余文件（MANIFEST/REQ/Clarification_Ledger/Knowledge/项目任意文件）一律放行。
+
+**新特性二：run_phase.py 三处硬化**
+
+- **Phase 2-7 硬拒绝**：`check_phase_dependencies` 从"可选警告"提为"硬拒绝"，gate8 要求 Phase 0-7 签名齐全才放行（缺签记 `PHASE_DEPS_MISSING`）。闭合弱模型跳过规则建模(3)/风险分析(5)/策略匹配(6)/测试点建模(7) 的漏洞。
+- **阶段顺序校验**：`cmd_gate_phase` 签 Phase N 前须先签 Phase N-1，禁止跨阶段跳签（`PHASE_ORDER_VIOLATION`）。
+- **preflight 自动注入**：`gate-phase N` 内嵌 `_inject_preflight`，随门禁 stdout 注入本阶段 ref 40 行大纲摘要，不再依赖模型自觉读 ref。
+
+**双层校验**：hook（harness 层，Write 前）与 `check_phase_dependencies`（脚本层，gate8 内）双重把关 Phase 0-7，一处可被绕过另一处仍兜底。不放宽任何质量底线（断言/覆盖/存储合规等仍由 verify_cases 把关），只挡"跳步直接 Write"。
+
 ## v0.4.0（2026-07-24，含 v0.3.0 合并发布）
 
 **本次发布解决两个核心问题**：

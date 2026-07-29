@@ -31,6 +31,18 @@ case-design-out/.phase_state.json（外置循环计数 + 幂等防覆盖）。
     - .phase_signatures.json 记录所有阶段的完成状态
     - gate8 验证签名是否完整（可选，增强验证）
 
+新增功能（v0.7.0 - 2026-07-29）：
+  - **Phase 2-7 硬拒绝**：check_phase_dependencies 从"可选警告"提为"硬拒绝"，
+    gate8 要求 Phase 0-7 签名齐全才放行，闭合弱模型跳过中间阶段（规则建模/
+    风险分析/策略匹配/测试点建模）的漏洞。
+  - **阶段顺序校验**：cmd_gate_phase 签 Phase N 前须先签 Phase N-1，
+    禁止跨阶段跳签（PHASE_ORDER_VIOLATION）。
+  - **preflight 自动注入**：cmd_gate_phase 内嵌 _inject_preflight，随门禁
+    stdout 注入本阶段 ref 40 行大纲摘要，不再依赖模型自觉读 ref。
+  - **PreToolUse hook 联动**：.claude/hooks/case_design_gate.py 在 Write/Edit
+    TestCases_*.md|.xlsx 前 hard-block，未过 gate8 且 Phase 0-7 签名不全即
+    exit 2 阻止工具调用，把"模型自觉合规"升级为"harness 强制合规"。
+
 跨平台（强制·不可违背）：
   - 纯 Python 标准库（os / json / hashlib / subprocess / sys），无平台依赖；
   - 路径用 os.path.join，相对路径 case-design-out/...；
@@ -251,15 +263,14 @@ def check_phase_dependencies(current_phase):
         if not phase1_sig.get("completed"):
             return False, "Phase 1 未完成：缺少阶段签名"
 
-    # 检查 Phase 2-7（可选，只检查签名，不强制文件产出）
+    # 检查 Phase 2-7（强制：缺签名即拒绝，闭合弱模型跳过中间阶段）
+    # v0.7.0：从"可选警告"提为"硬拒绝"——glm-5 等弱模型会跳过规则建模(3)/
+    # 风险分析(5)/策略匹配(6)/测试点建模(7) 直接生成用例，软警告挡不住。
     if current_phase >= 8:
-        # 检查 Phase 2-7 是否有签名（可选）
-        signatures = load_signatures()
         for phase in range(2, 8):
             phase_sig = signatures.get("phases", {}).get(str(phase), {})
             if not phase_sig.get("completed"):
-                # 不强制要求，只给警告
-                print(f"[gate8] ⚠️  建议：Phase {phase} 缺少阶段签名")
+                return False, "Phase %s 未完成：缺少阶段签名（请先 gate-phase %s）" % (phase, phase)
 
     return True, ""
 
@@ -340,6 +351,20 @@ def cmd_gate8(tc_path, req_path=None):
         print("[gate8] ⚠️  警告：Phase 0 缺少阶段签名，建议运行 gate_phase.py gate 0")
     if not phase1_sig.get("completed"):
         print("[gate8] ⚠️  警告：Phase 1 缺少阶段签名，建议运行 gate_phase.py gate 1")
+
+    # ===== v0.7.0：Phase 0-7 前置依赖硬校验（接入 check_phase_dependencies） =====
+    # check_phase_dependencies 会硬性检查 Phase 0(MANIFEST+签名)/1(台账+签名)/2-7(签名)
+    # 任一缺失即拒绝 gate8，与 PreToolUse hook 联动（hook 也查 0-7 签名）。
+    dep_ok, dep_msg = check_phase_dependencies(8)
+    if not dep_ok:
+        append_sentinel("verify_cases", "gate8", 1, "",
+                        note="PHASE_DEPS_MISSING",
+                        state_version=state.get("version"))
+        print("[gate8] PHASE_DEPS_MISSING：%s" % dep_msg)
+        print("[gate8] 请先逐阶段补签：python scripts/run_phase.py gate-phase <N> \"<产出物>\"")
+        print("[gate8] （Phase 2-7 为内存阶段，无文件产出时传空串 \"\"）")
+        save_state(state)
+        return 1
 
     # ===== 原有 REQ 检查逻辑 =====
     if req_path:
@@ -443,6 +468,26 @@ def cmd_check_new_file(filename):
     return rc
 
 
+def _inject_preflight(phase_num):
+    """v0.7.0：进入阶段前自动注入对应 ref 的 40 行大纲摘要（降认知负载）。
+    即使模型不主动读 ref，摘要也随门禁 stdout 进上下文。best-effort：脚本缺失/异常
+    不影响门禁主流程。"""
+    pf = os.path.join(SCRIPTS_DIR, "preflight.py")
+    if not os.path.exists(pf):
+        return
+    try:
+        proc = subprocess.run([PY, pf, "--phase", str(phase_num)],
+                             capture_output=True, text=True, encoding="utf-8",
+                             timeout=10)
+        out = (proc.stdout or "").strip()
+        if out:
+            print("----- preflight phase %s 大纲（自动注入，免读 ref） -----" % phase_num)
+            print(out)
+            print("-" * 60)
+    except Exception:
+        pass
+
+
 def cmd_gate_phase(phase_num, outputs_str=None):
     """阶段门禁：验证 Phase N 的产出物并写入签名。
 
@@ -457,6 +502,23 @@ def cmd_gate_phase(phase_num, outputs_str=None):
     state = load_state()
     print("[gate-phase] 当前阶段=last_phase=%s，本次将验证=phase %s" % (
         state.get("last_phase"), phase_num))
+
+    # v0.7.0：阶段顺序校验——签 Phase N 前须先签 Phase N-1，防止弱模型跨阶段跳签
+    if phase_num >= 1:
+        signatures = load_signatures()
+        prev_sig = signatures.get("phases", {}).get(str(phase_num - 1), {})
+        if not prev_sig.get("completed"):
+            append_sentinel("run_phase", "gate-phase", 1, "",
+                            note="PHASE_ORDER_VIOLATION",
+                            state_version=state.get("version"))
+            print("[gate-phase] PHASE_ORDER_VIOLATION：Phase %s 未签，禁止跳签 Phase %s" % (
+                phase_num - 1, phase_num))
+            print("[gate-phase] 请先 gate-phase %s" % (phase_num - 1))
+            save_state(state)
+            return 1
+
+    # v0.7.0：自动注入本阶段 ref 大纲摘要（best-effort，不阻断）
+    _inject_preflight(phase_num)
 
     # 解析产出物列表
     outputs = []

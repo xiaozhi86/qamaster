@@ -253,7 +253,7 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 > 把"自愿跑脚本"提升为"包装器统一触发并留痕"。门禁点不再依赖模型自觉——调用 `scripts/run_phase.py` 包装器，由它串联 verify 链、写 sentinel、读写状态机。**Windows 与 macOS 行为一致**（纯 Python，禁用 .sh/.bat/.ps1）。
 
-## Phase 0-7 前置门禁验证（v0.6.0 新增·强制）
+## Phase 0-7 前置门禁验证（v0.6.0 新增·v0.7.0 硬化·强制）
 
 ### 问题根因
 不同模型可能跳过 Phase 0-7 直接生成测试用例，导致：
@@ -263,13 +263,19 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 - 测试用例质量下降
 
 ### 强制验证
-从 v0.6.0 起，gate8 在执行前强制验证 Phase 0-7 是否完成：
+从 v0.6.0 起 gate8 验证 Phase 0-7；**v0.7.0 起 Phase 2-7 由"仅警告"提为"硬拒绝"**——
+glm-5 等弱模型会跳过规则建模(3)/风险分析(5)/策略匹配(6)/测试点建模(7)，
+软警告挡不住，故全部提为硬拒绝，gate8 要求 Phase 0-7 签名齐全才放行：
 
 | 阶段 | 必须产出文件 | 缺失时行为 |
 |-----|------------|-----------|
 | Phase 0 | MANIFEST.md, REQ_*.md | 硬性拒绝，返回错误码 1 |
 | Phase 1 | Clarification_Ledger_*.md | 硬性拒绝，返回错误码 1 |
-| Phase 2-7 | （内存中） | 可选签名验证，仅警告 |
+| Phase 2-7 | （内存中，签空串 `""` 即可） | **v0.7.0 硬拒绝**（缺签名记 `PHASE_DEPS_MISSING`） |
+
+> Phase 2-7 为内存阶段无文件产出，签名时传空串：
+> `python scripts/run_phase.py gate-phase 3 ""`。门禁只校验"是否签过"，不校验内存内容——
+> 即便如此，硬拒绝仍能把"完全跳过"逼成"至少逐阶段签一遍"，配合下方 hook 物理拦截 Write。
 
 ### 验证逻辑
 ```python
@@ -293,7 +299,7 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 | -- | -- | -- |
 | `run_phase.py gate8 <TC.md> [REQ.md]` | 第8出口 | 写前内存校验 + 提取 `json-gate-digest` 机器块 + REQ 落盘硬校验（缺失记 `REQ_MISSING`/`REQ_NO_HEADINGS`）+ **Phase 0-7 前置门禁验证** |
 | `run_phase.py readback <TC.md> [REQ.md]` | 第13回读 | verify_md + verify_cases 文件入口串联 + 提取机器块 |
-| `run_phase.py gate-phase <phase> <outputs>` | 全阶段 | **阶段门禁：验证产出物并写入签名**（v0.6.0 新增） |
+| `run_phase.py gate-phase <phase> <outputs>` | 全阶段 | **阶段门禁：顺序校验（须先签 N-1）+ 验证产出物 + 写签名 + 自动注入 preflight 摘要**（v0.6.0 / v0.7.0） |
 | `run_phase.py check-new-file <文件名>` | 第13落盘后 | 核对文件名 ∈ MANIFEST，未登记记 `UNEXPECTED_NEW_FILE`（闭合"另生新文件"洞） |
 | `run_phase.py state show / set <phase>` | 全阶段 | 读写 `.phase_state.json`（外置循环计数 + 幂等防覆盖，带 version/last_phase） |
 | `echo '<json>' \| run_phase.py verify <TC.md> [REQ.md]` | 第14交付前 | 校验交付摘要粘贴的 digest 块哈希与重算一致（防手编假 sentinel；**经 stdin 传 JSON 避免中文 argv 乱码**） |
@@ -357,8 +363,20 @@ python scripts/run_phase.py gate-phase 3 ""
 ## preflight 摘要注入（降认知负载）
 
 * 进入第 N 阶段前运行 `python scripts/preflight.py --phase <N>` 打印对应 ref 的 40 行大纲摘要（标题级 + 关键约束行），即使模型不主动读 ref，摘要也进上下文。
+* **v0.7.0：`run_phase.py gate-phase N` 内嵌自动注入**——跑门禁即随 stdout 注入本阶段大纲，无需额外记忆"先跑 preflight"；弱模型只要肯跑门禁，摘要就进上下文。
 * 摘要硬上限 40 行/阶段、仅注入一次；超长需求（用例数 >60）加 `--big` 降级为计数 + 指引（防反噬）。
 * `python scripts/preflight.py --list` 列出全部阶段-ref 映射。
+
+## PreToolUse hook 硬拦截 Write（v0.7.0 新增·harness 强制合规）
+
+> **把"模型自觉合规"升级为"harness 物理强制"**——这是唯一与模型能力无关、能真正挡住弱模型跳步的机制。
+> 配置见 `.claude/settings.json` 的 `hooks.PreToolUse`，脚本为 `.claude/hooks/case_design_gate.py`。
+
+* **拦截范围**：仅命中 `case-design-out/TestCases_*.md` 与 `TestCases_*.xlsx` 的 `Write/Edit/MultiEdit`；其余文件（MANIFEST/REQ/Clarification_Ledger/Knowledge/项目任意文件）一律放行，不影响正常开发与 Phase 0-1 落盘。
+* **放行条件（须同时满足）**：① `.gate_log` 含 `gate8` 且最近 `exit=0`；② `.phase_signatures.json` 含 Phase 0-7 全部 `completed`。
+* **未过即 `exit 2` 阻止**：Write 工具调用被 harness 拦回，stderr 回显"先跑 gate-phase 0-7 → gate8 exit=0"。模型被物理阻断，无法跳过门禁直接落盘用例——**glm-5 想跳也会被挡回补跑**。
+* **与脚本侧门禁的关系**：hook（harness 层）与 `check_phase_dependencies`（脚本层）双重校验 Phase 0-7，一处可被绕过另一处仍兜底；hook 在 Write 前、gate8 在 Write 前/内存内，时序一致。
+* **不放宽质量底线**：hook 只挡"跳步直接 Write"，不替代任何校验（断言/覆盖/存储合规等仍由 verify_cases 把关）。
 
 ---
 
