@@ -227,12 +227,47 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 > 把"自愿跑脚本"提升为"包装器统一触发并留痕"。门禁点不再依赖模型自觉——调用 `scripts/run_phase.py` 包装器，由它串联 verify 链、写 sentinel、读写状态机。**Windows 与 macOS 行为一致**（纯 Python，禁用 .sh/.bat/.ps1）。
 
+## Phase 0-7 前置门禁验证（v0.6.0 新增·强制）
+
+### 问题根因
+不同模型可能跳过 Phase 0-7 直接生成测试用例，导致：
+- 缺少需求澄清环节
+- 缺少规格建模环节
+- 缺少风险分析环节
+- 测试用例质量下降
+
+### 强制验证
+从 v0.6.0 起，gate8 在执行前强制验证 Phase 0-7 是否完成：
+
+| 阶段 | 必须产出文件 | 缺失时行为 |
+|-----|------------|-----------|
+| Phase 0 | MANIFEST.md, REQ_*.md | 硬性拒绝，返回错误码 1 |
+| Phase 1 | Clarification_Ledger_*.md | 硬性拒绝，返回错误码 1 |
+| Phase 2-7 | （内存中） | 可选签名验证，仅警告 |
+
+### 验证逻辑
+```python
+# gate8 执行前检查：
+1. MANIFEST.md 是否存在？→ 不存在：MANIFEST_MISSING，拒绝执行
+2. Clarification_Ledger_*.md 是否存在？→ 不存在：CLARIFICATION_MISSING，拒绝执行
+3. Phase 2-7 签名是否完整？→ 不完整：警告，但不拒绝
+```
+
+### 错误信息示例
+```
+[gate8] MANIFEST_MISSING：Phase 0 未完成
+[gate8] 缺少 case-design-out/MANIFEST.md
+[gate8] 请先执行 Phase 0：需求定位和 MANIFEST 创建
+[gate8] 参考：references/phase0_manifest.md
+```
+
 ## 包装器子命令（经 Bash 调用）
 
 | 子命令 | 阶段 | 作用 |
 | -- | -- | -- |
-| `run_phase.py gate8 <TC.md> [REQ.md]` | 第8出口 | 写前内存校验 + 提取 `json-gate-digest` 机器块 + REQ 落盘硬校验（缺失记 `REQ_MISSING`/`REQ_NO_HEADINGS`） |
+| `run_phase.py gate8 <TC.md> [REQ.md]` | 第8出口 | 写前内存校验 + 提取 `json-gate-digest` 机器块 + REQ 落盘硬校验（缺失记 `REQ_MISSING`/`REQ_NO_HEADINGS`）+ **Phase 0-7 前置门禁验证** |
 | `run_phase.py readback <TC.md> [REQ.md]` | 第13回读 | verify_md + verify_cases 文件入口串联 + 提取机器块 |
+| `run_phase.py gate-phase <phase> <outputs>` | 全阶段 | **阶段门禁：验证产出物并写入签名**（v0.6.0 新增） |
 | `run_phase.py check-new-file <文件名>` | 第13落盘后 | 核对文件名 ∈ MANIFEST，未登记记 `UNEXPECTED_NEW_FILE`（闭合"另生新文件"洞） |
 | `run_phase.py state show / set <phase>` | 全阶段 | 读写 `.phase_state.json`（外置循环计数 + 幂等防覆盖，带 version/last_phase） |
 | `echo '<json>' \| run_phase.py verify <TC.md> [REQ.md]` | 第14交付前 | 校验交付摘要粘贴的 digest 块哈希与重算一致（防手编假 sentinel；**经 stdin 传 JSON 避免中文 argv 乱码**） |
@@ -244,6 +279,54 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 * `verify_cases.py` 在 stdout 末尾输出 ```json-gate-digest``` 机器块（含 5 项机器数值 + `hash`，`hash` 覆盖 file/n/exit/hard/summary）。**交付摘要 5 项数值须从该块原样粘贴**（禁止手填），`run_phase.py verify` 重算比对哈希防篡改。
 * `.gate_log` 与 `.phase_state.json` 交叉引用（每条 sentinel 记 `state_version`），一处漏写另一处能发现。
 * **跳过检测**：交付前 `run_phase.py summary` 核对 gate8（第8出口）+ readback（第13回读）各至少 1 条且 exit=0；REQ 无 `REQ_MISSING`/`REQ_NO_HEADINGS`；check-new-file 无 `UNEXPECTED_NEW_FILE`。**缺任一项即门禁未走完，禁止声明已审核通过**。
+
+## 阶段签名机制（v0.6.0 新增）
+
+### 目的
+记录每个阶段的完成状态，防止跨阶段跳过。
+
+### 使用方式
+```bash
+# Phase 0 完成后
+python scripts/run_phase.py gate-phase 0 "MANIFEST.md,REQ_001.md"
+
+# Phase 1 完成后
+python scripts/run_phase.py gate-phase 1 "Clarification_Ledger_001.md"
+
+# Phase 2-7（可选，不强制文件产出）
+python scripts/run_phase.py gate-phase 2 ""
+python scripts/run_phase.py gate-phase 3 ""
+# ...
+```
+
+### 签名文件：`.phase_signatures.json`
+```json
+{
+  "phases": {
+    "0": {
+      "completed": true,
+      "timestamp": "2026-07-29T13:00:00",
+      "outputs": ["MANIFEST.md", "REQ_001.md"],
+      "signature": "abc123..."
+    },
+    "1": {
+      "completed": true,
+      "timestamp": "2026-07-29T13:05:00",
+      "outputs": ["Clarification_Ledger_001.md"],
+      "signature": "def456..."
+    }
+  }
+}
+```
+
+### 签名内容
+- **时间戳**：阶段完成时间
+- **产出文件**：该阶段产出的文件列表
+- **文件哈希**：产出文件的 SHA256 哈希（防篡改）
+
+### 验证方式
+- gate8 会验证 Phase 0-1 的签名（可选）
+- 缺少签名会给出警告，但不拒绝执行
 
 ## preflight 摘要注入（降认知负载）
 
