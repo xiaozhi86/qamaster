@@ -1,7 +1,13 @@
 {
   "name": "qamaster",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "企业级 QA 工具集：测试用例设计（case-design）+ 需求文档多角色评审（requirement-review）。三平台（Claude Code / Codex / Cursor）薄引用适配。",
   "license": "MIT",
-  "keywords": ["qa", "testing", "test-case", "requirement-review","test","case","review", "claude-code", "codex", "cursor"]
+  "keywords": ["qa", "testing", "test-case", "requirement-review","test","case","review", "claude-code", "codex", "cursor"],
+  "min-models": {
+    "anthropic": "claude-sonnet-4-5",
+    "zhipu": "glm-5.2",
+    "openai": "gpt-4o",
+    "google": "gemini-2.0-flash"
+  }
 }
