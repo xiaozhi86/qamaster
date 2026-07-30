@@ -12,10 +12,8 @@
       "version": "0.7.5",
       "keywords": ["qa", "testing", "test-case", "requirement-review","test","case","review"],
       "min-models": {
-        "anthropic": "claude-sonnet-4-5",
-        "zhipu": "glm-5.2",
-        "openai": "gpt-4o",
-        "google": "gemini-2.0-flash"
+        "deepseek": "deepseek-v4-flash",
+        "zhipu": "glm-5.2"
       }
     }
   ]
