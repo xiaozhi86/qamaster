@@ -147,6 +147,43 @@ try:
 except Exception:
     warn("git 不可用，跳过已跟踪文件检查")
 
+# 9. case-design 机制守回归（闭合 plan P0-1/P0-2/P1-4）
+wf = ROOT / "skills/case-design/scripts/case_design_workflow.py"
+if wf.exists():
+    wf_text = wf.read_text(encoding="utf-8")
+    # P0-2：驱动器必须真实调用 gate8 / readback（非仅文档提及）
+    if 'run_gate8(' not in wf_text or 'run_readback(' not in wf_text:
+        err("case_design_workflow.py: 驱动器未调用 gate8/readback（P0-2 回归）")
+    if 'phase == 8' not in wf_text or 'phase == 13' not in wf_text:
+        err("case_design_workflow.py: 缺 Phase 8/13 内容门禁分支（P0-2 回归）")
+    # P1-3：Phase 2-7 须要求 .phase_digest_N（非签空串）
+    if ".phase_digest_" not in wf_text or "resolve_outputs" not in wf_text:
+        err("case_design_workflow.py: Phase 2-7 未要求 .phase_digest 产物（P1-3 回归）")
+    # P1-4：Phase 0 签名须含 REQ（动态 resolve_outputs 处理 phase 0）
+    if not re.search(r"phase == 0", wf_text):
+        err("case_design_workflow.py: Phase 0 outputs 未动态含 REQ（P1-4 回归）")
+else:
+    err("skills/case-design/scripts/case_design_workflow.py: 缺失")
+
+# P0-1：install_hook.py 必须存在 + README 须含 hook 安装步骤
+ih = ROOT / "scripts/install_hook.py"
+if not ih.exists():
+    err("scripts/install_hook.py: 缺失（P0-1：hook 无法在消费方安装）")
+readme = (ROOT / "README.md").read_text(encoding="utf-8") if (ROOT / "README.md").exists() else ""
+if "install_hook.py" not in readme:
+    err("README.md: 未提及 install_hook.py 安装步骤（P0-1 回归）")
+if "步骤 4.5" not in readme and "物理强制 hook" not in readme:
+    err("README.md: 未含 hook 安装步骤（P0-1 回归）")
+
+# P2-6：preflight 须含 hook 生效自检
+pf = ROOT / "skills/case-design/scripts/preflight.py"
+if pf.exists():
+    pf_text = pf.read_text(encoding="utf-8")
+    if "check_hook_active" not in pf_text or "--check-hook" not in pf_text:
+        err("preflight.py: 缺 hook 生效自检（P2-6 回归）")
+else:
+    err("skills/case-design/scripts/preflight.py: 缺失")
+
 # 输出
 print("== qamaster 插件结构自检 ==")
 for w in warnings:

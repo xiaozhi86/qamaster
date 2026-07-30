@@ -19,12 +19,12 @@ case_design_workflow.py — 脚本驱动的测试用例设计流程
   6. 直到 Phase 15 完成
 
 阶段产出物：
-  Phase 0: case-design-out/MANIFEST.md, case-design-out/REQ_*.md
+  Phase 0: case-design-out/MANIFEST.md, case-design-out/REQ_*.md（签名须含 REQ）
   Phase 1: case-design-out/Clarification_Ledger_*.md
-  Phase 2-7: 内存中（签空串）
-  Phase 8: case-design-out/TestCases_*.md（需 gate8）
-  Phase 9-12: 内存处理
-  Phase 13: 最终 Write
+  Phase 2-7: case-design-out/.phase_digest_<N>.md（内存阶段可哈希摘要，不再签空串）
+  Phase 8: case-design-out/TestCases_*.md + gate8（驱动器强制 gate8 exit=0 才放行）
+  Phase 9-12: 内存处理（签空串）
+  Phase 13: 最终 Write + readback（驱动器强制 readback exit=0 才放行）
   Phase 14: 人工审核（暂停等待用户）
   Phase 15: Excel 生成
 
@@ -82,13 +82,13 @@ def save_workflow_state(state):
 
 
 def run_gate_phase(phase, outputs):
-    """调用 run_phase.py gate-phase。返回 True=成功。"""
+    """调用 run_phase.py gate-phase。返回 (ok, output)。"""
     import subprocess
     script = os.path.join(SCRIPTS_DIR, "run_phase.py")
     outputs_str = ",".join(outputs) if outputs else ""
     cmd = [sys.executable, script, "gate-phase", str(phase), outputs_str]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
-    return result.returncode == 0
+    return result.returncode == 0, (result.stdout or "") + (result.stderr or "")
 
 
 def find_req_files():
@@ -109,6 +109,63 @@ def find_testcases_files():
     return glob.glob(pattern)
 
 
+def req_file_path():
+    """返回首个 case-design-out/REQ_*.md 的完整路径，无则 None。"""
+    files = find_req_files()
+    return files[0] if files else None
+
+
+def testcases_file_path():
+    """返回首个 case-design-out/TestCases_*.md 的完整路径，无则 None。"""
+    files = find_testcases_files()
+    return files[0] if files else None
+
+
+def _run_run_phase(subcmd, tc_path, req_path=None):
+    """调用 run_phase.py <subcmd> <TC.md> [REQ.md]，返回 (exit_code, combined_output)。"""
+    import subprocess
+    script = os.path.join(SCRIPTS_DIR, "run_phase.py")
+    cmd = [sys.executable, script, subcmd, tc_path]
+    if req_path:
+        cmd.append(req_path)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    return result.returncode, (result.stdout or "") + (result.stderr or "")
+
+
+def run_gate8(tc_path, req_path=None):
+    """第8出口门禁：verify_cases 全量校验。返回 (exit_code, output)。"""
+    return _run_run_phase("gate8", tc_path, req_path)
+
+
+def run_readback(tc_path, req_path=None):
+    """第13回读：verify_md + verify_cases 文件入口串联。返回 (exit_code, output)。"""
+    return _run_run_phase("readback", tc_path, req_path)
+
+
+def resolve_outputs(phase):
+    """解析某阶段门禁须校验存在性的产出文件列表（相对 case-design-out/ 的文件名）。
+
+    Phase 0: MANIFEST.md + REQ_<id>.md（动态）
+    Phase 1: Clarification_Ledger_<id>.md（动态）
+    Phase 2-7: .phase_digest_<phase>.md（内存阶段可哈希摘要，闭合"签空串"洞）
+    Phase 8/13: TestCases_<id>.md（动态）
+    Phase 9-12: []（纯内存，无文件产出，签空串）
+    """
+    if phase == 0:
+        outs = ["MANIFEST.md"]
+        req = req_file_path()
+        if req:
+            outs.append(os.path.basename(req))
+        return outs
+    if phase == 1:
+        return [os.path.basename(f) for f in find_clarification_files()]
+    if 2 <= phase <= 7:
+        return [".phase_digest_%s.md" % phase]
+    if phase in (8, 13):
+        return [os.path.basename(f) for f in find_testcases_files()]
+    return []
+
+
 def extract_req_id(req_doc_path):
     """从需求文档路径提取需求标识。"""
     basename = os.path.basename(req_doc_path)
@@ -125,10 +182,10 @@ def extract_req_id(req_doc_path):
 PHASE_INSTRUCTIONS = {
     0: {
         "name": "需求定位",
-        "instruction": "创建 case-design-out/ 目录，写入 MANIFEST.md 和 REQ_<需求标识>.md",
-        "outputs": ["MANIFEST.md"],
-        "model_action": "请创建输出目录和索引文件。将需求文档内容写入 case-design-out/REQ_<需求标识>.md",
-        "check": lambda: os.path.exists(os.path.join(OUT_DIR, "MANIFEST.md"))
+        "instruction": "创建 case-design-out/ 目录，写入 MANIFEST.md 和 REQ_<需求标识>.md（REQ 为 #4/#5 反向追溯基准，须含 ## 二级标题）",
+        "outputs": [],  # 动态：MANIFEST.md + REQ_<id>.md（见 resolve_outputs）
+        "model_action": "请创建输出目录与索引 MANIFEST.md，将需求文档落盘为 case-design-out/REQ_<需求标识>.md（含 ## 二级标题），运行 index_req 生成 .index.json",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, "MANIFEST.md")) and req_file_path() is not None
     },
     1: {
         "name": "需求澄清",
@@ -143,55 +200,55 @@ PHASE_INSTRUCTIONS = {
         "instruction": "提取测试需求，维度见 references/coverage.md",
         "outputs": [],
         "ref": "references/coverage.md",
-        "model_action": "请阅读 references/coverage.md，进行测试需求分析（内存操作，无需写文件）",
-        "check": None  # 内存阶段
+        "model_action": "请阅读 references/coverage.md，进行测试需求分析，将本阶段产出摘要落盘 case-design-out/.phase_digest_2.md（≥1 段，含维度/测试需求清单）",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_2.md"))
     },
     3: {
         "name": "规则建模",
         "instruction": "建立业务规则模型，详见 references/modeling.md",
         "outputs": [],
         "ref": "references/modeling.md",
-        "model_action": "请阅读 references/modeling.md §规则建模，建立规则模型（内存操作）",
-        "check": None
+        "model_action": "请阅读 references/modeling.md §规则建模，建立规则模型，将产出摘要落盘 case-design-out/.phase_digest_3.md（含规则项 R<序号> 与来源）",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_3.md"))
     },
     4: {
         "name": "规格建模",
         "instruction": "建立规格模型（SDD），详见 references/modeling.md",
         "outputs": [],
         "ref": "references/modeling.md",
-        "model_action": "请阅读 references/modeling.md §规格建模，建立状态/异常/契约模型（内存操作）",
-        "check": None
+        "model_action": "请阅读 references/modeling.md §规格建模，建立状态/异常/契约模型，将产出摘要落盘 case-design-out/.phase_digest_4.md",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_4.md"))
     },
     5: {
         "name": "风险分析",
         "instruction": "识别风险，产出 P0-P3 优先级，详见 references/risk.md",
         "outputs": [],
         "ref": "references/risk.md",
-        "model_action": "请阅读 references/risk.md，进行风险分析，产出 P0-P3 风险清单（内存操作）",
-        "check": None
+        "model_action": "请阅读 references/risk.md，进行风险分析，将 P0-P3 风险清单摘要落盘 case-design-out/.phase_digest_5.md",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_5.md"))
     },
     6: {
         "name": "测试策略匹配",
         "instruction": "选择测试方法，决策表见 references/methods.md",
         "outputs": [],
         "ref": "references/methods.md",
-        "model_action": "请阅读 references/methods.md，匹配测试策略（内存操作）",
-        "check": None
+        "model_action": "请阅读 references/methods.md，匹配测试策略，将方法→用例映射摘要落盘 case-design-out/.phase_digest_6.md",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_6.md"))
     },
     7: {
         "name": "测试点建模",
         "instruction": "设计测试点，维度见 references/coverage.md",
         "outputs": [],
         "ref": "references/coverage.md",
-        "model_action": "请阅读 references/coverage.md，设计测试点（内存操作）",
-        "check": None
+        "model_action": "请阅读 references/coverage.md，设计测试点，将测试点清单摘要落盘 case-design-out/.phase_digest_7.md",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_7.md"))
     },
     8: {
         "name": "测试用例生成",
         "instruction": "生成测试用例，运行 gate8，详见 references/modeling.md",
         "outputs": [],  # 动态获取
         "ref": "references/modeling.md",
-        "model_action": "请阅读 references/modeling.md §用例生成，生成测试用例。完成后运行 gate8",
+        "model_action": "请阅读 references/modeling.md §用例生成，生成测试用例。完成后运行 gate8（驱动器将强制 gate8 exit=0 才放行）",
         "check": lambda: len(find_testcases_files()) > 0
     },
     9: {
@@ -333,29 +390,53 @@ def cmd_next():
         print("[workflow] ⚠️  产出物未就绪，请先完成当前阶段")
         return 2
 
-    # 运行门禁（内存阶段签空串）
-    outputs = info.get('outputs', [])
-    if phase >= 2 and phase <= 7:
-        # 内存阶段
-        pass
-    elif phase == 1:
-        # Phase 1 需要澄清台账
-        clarification_files = find_clarification_files()
-        if clarification_files:
-            outputs = [os.path.basename(f) for f in clarification_files]
-    elif phase == 8:
-        # Phase 8 需要 TestCases
-        testcases_files = find_testcases_files()
-        if testcases_files:
-            outputs = [os.path.basename(f) for f in testcases_files]
+    # 解析本阶段门禁须校验存在性的产出文件（动态）
+    outputs = resolve_outputs(phase)
 
-    if outputs or (phase >= 2 and phase <= 7):
-        print(f"[workflow] 运行门禁: gate-phase {phase}")
-        if run_gate_phase(phase, outputs):
-            print("[workflow] ✅ 门禁通过")
+    # Phase 2-7：内存阶段须有 .phase_digest_N.md 可哈希产物（闭合"签空串"洞）
+    # Phase 0/1/8/13：文件产出阶段
+    if outputs:
+        print(f"[workflow] 运行门禁: gate-phase {phase}（校验产出：{', '.join(outputs)}）")
+        ok, out = run_gate_phase(phase, outputs)
+        if ok:
+            print("[workflow] ✅ 阶段门禁通过")
         else:
-            print("[workflow] ❌ 门禁失败，请检查产出物")
+            print(out)
+            print("[workflow] ❌ 阶段门禁失败，请检查产出物")
             return 1
+
+    # ===== 内容门禁（驱动器强制，闭合 v0.7.4"驱动器跳过 gate8/readback"洞） =====
+    if phase == 8:
+        # 第8出口：verify_cases 全量校验须 exit=0 才放行
+        tc = testcases_file_path()
+        req = req_file_path()
+        if not tc:
+            print("[workflow] ❌ Phase 8 缺少 TestCases_*.md，无法运行 gate8")
+            return 1
+        print(f"[workflow] 运行第8出口门禁: gate8（verify_cases 全量校验）")
+        rc, out = run_gate8(tc, req)
+        print(out)
+        if rc != 0:
+            print("[workflow] ❌ gate8 未通过（exit=%s），禁止推进到 Phase 9" % rc)
+            print("[workflow] 修复：按 verify_cases 输出修正 TestCases 后重跑 `python scripts/case_design_workflow.py next`")
+            return 1
+        print("[workflow] ✅ gate8 通过（exit=0）")
+
+    if phase == 13:
+        # 第13回读：verify_md + verify_cases 文件入口串联须 exit=0 才放行
+        tc = testcases_file_path()
+        req = req_file_path()
+        if not tc:
+            print("[workflow] ❌ Phase 13 缺少 TestCases_*.md，无法运行 readback")
+            return 1
+        print(f"[workflow] 运行第13回读门禁: readback（verify_md + verify_cases）")
+        rc, out = run_readback(tc, req)
+        print(out)
+        if rc != 0:
+            print("[workflow] ❌ readback 未通过（exit=%s），禁止推进到 Phase 14" % rc)
+            print("[workflow] 修复：按 verify_md/verify_cases 输出修正 TestCases 后重跑 `python scripts/case_design_workflow.py next`")
+            return 1
+        print("[workflow] ✅ readback 通过（exit=0）")
 
     # 更新阶段
     state['phase'] = phase + 1
@@ -378,10 +459,12 @@ def cmd_next():
 def cmd_gate(phase):
     """手动运行门禁。"""
     print(f"[workflow] 运行 gate-phase {phase}")
-    if run_gate_phase(phase, []):
+    ok, out = run_gate_phase(phase, resolve_outputs(phase))
+    if ok:
         print("[workflow] ✅ 门禁通过")
         return 0
     else:
+        print(out)
         print("[workflow] ❌ 门禁失败")
         return 1
 

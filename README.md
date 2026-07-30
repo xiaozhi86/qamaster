@@ -21,9 +21,8 @@ QA Master 提供两个核心能力，覆盖「需求评审 → 测试用例设�
 >
 > case-design 需要强指令遵循能力（逐阶段执行 15 步流程 + 触发门禁脚本）。**低于下述版本的模型无法按流程执行，请勿使用**：
 >
-> | 厂商        | 最低模型 | 不达标示例                           |
-> |-----------|---|---------------------------------|
-> | DeepSeek  | deepseek-v4-flash 及以上 | 低版本会跳阶段、不读 SKILL.md、写到非约定位置                             |
+> | 厂商       | 最低模型            | 不达标示例                           |
+> |----------|-----------------|---------------------------------|
 > | 智谱（Zhipu） | **GLM-5.2 及以上** | GLM-5（会跳阶段、不读 SKILL.md、写到非约定位置） |
 
 >
@@ -251,6 +250,25 @@ flowchart TD
 
 两条都满足即安装成功。
 
+#### 步骤 4.5 — 安装物理强制 hook（关键·常被忽略）
+
+> **为什么需要这一步**：插件自带 `.claude/hooks/case_design_gate.py` + `.claude/settings.json`（PreToolUse 物理拦截），但 Claude Code **不会**把插件自带的 `.claude/settings.json` hooks 自动合并进你的项目。结果：跳过这步，case-design 的「物理强制门禁」不触发，只剩「模型自觉」的软门禁——弱模型可直接把测试用例写到任意位置绕过流程。
+
+在你**要跑 case-design 的项目根目录**执行（在 Claude Code 输入框用 `!` 前缀跑 shell，或终端里跑）：
+
+```
+! python "<插件安装路径>/scripts/install_hook.py"
+```
+
+- 本地路径安装时，插件路径就是 `D:/qamaster`，即 `! python "D:/qamaster/scripts/install_hook.py"`。
+- GitHub 安装时，插件路径在 `C:/Users/<你>/.claude/plugins/marketplaces/qamaster`，即 `! python "C:/Users/<你>/.claude/plugins/marketplaces/qamaster/scripts/install_hook.py"`。
+- 该脚本把 hook 拷进当前项目的 `.claude/hooks/`，并幂等合并 PreToolUse 配置进 `.claude/settings.json`；可重复运行、可用 `--verify` 只检查、`--force` 覆盖旧 hook。
+- **装完新开会话**，hook 才会被加载。
+
+校验是否装好：`! python "<插件路径>/scripts/install_hook.py" --verify`，两行都 ✓ 即生效。
+
+> 不装 hook 也能用 case-design（软门禁 + 脚本驱动仍工作），但**物理强制**这一层缺失，请尽量安装。Codex / Cursor 平台无 PreToolUse hook 概念，跳过本步，用各自平台机制等价实现（脚本驱动 + 软门禁仍可用）。
+
 #### 步骤 5 — 使用
 
 ```
@@ -282,6 +300,7 @@ flowchart TD
 | --- | --- |
 | 步骤 1 报 404 / 无权限 | 仓库被设回私有；确认 `https://github.com/xiaozhi86/qamaster` 能匿名打开 |
 | 装完 `/case-design` 没反应 | 没新开会话；或插件未 enabled（`/plugin` 看状态） |
+| 模型把测试用例写到非约定位置 | 没装物理强制 hook——跑 `python <插件路径>/scripts/install_hook.py` 并新开会话（见步骤 4.5） |
 | skill 跑起来脚本报错 | 装 Python 3.7+（Windows 用 python.org 真 Python）；要生成 Excel 再 `pip install openpyxl` |
 | 拉到旧版本 | 本地改动没 `git push`；先 push 再 `/plugin marketplace update qamaster` |
 

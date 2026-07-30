@@ -8,6 +8,21 @@
 
 > 本节为每个已发布版本的用户视角摘要；下方各版本技术条目面向维护者。两节互补，不重复。
 
+## v0.7.6（2026-07-30）— 闭合门禁机制破绽（hook 落地 + 驱动器强制 gate8）
+
+**本次发布解决一个核心问题**：真实运行暴露 v0.7.0–v0.7.5 的「harness 物理强制 / 脚本驱动彻底解决弱模型跳阶段」在默认安装下落空——hook 在消费方项目根本没启用，驱动器也跳过了 gate8/readback 两个关键内容门禁。
+
+**闭合的破绽**：
+
+- **P0-1 hook 不落地**：插件自带的 `.claude/settings.json` hooks 不会被 Claude Code 自动合并进消费方项目，导致「物理强制」降级为「模型自觉」软门禁。新增 `scripts/install_hook.py`：一键把 hook 拷进当前项目 `.claude/hooks/` 并幂等合并 PreToolUse 配置进 `.claude/settings.json`（`--verify` 只检查、`--force` 覆盖）。README 增「步骤 4.5 安装物理强制 hook」+ FAQ。
+- **P0-2 驱动器跳过 gate8/readback**：`case_design_workflow.py` 的 `next` 全程只跑 `gate-phase`（签名），从不跑 `gate8`（第8出口内容校验）和 `readback`（第13回读）。现 Phase 8 强制 `gate8` exit=0、Phase 13 强制 `readback` exit=0 才放行，未过则报错并拒绝推进。
+- **P1-3 Phase 2-7 签空串**：规则建模/风险/策略/测试点阶段此前签空串、零可验证物。现要求每阶段落 `case-design-out/.phase_digest_<N>.md` 可哈希摘要，`gate-phase N` 校验其存在并哈希，闭合「完全跳过自动化成已签 6 个空」。
+- **P1-4 Phase 0 签名漏 REQ**：`.phase_signatures.json` 的 Phase 0 outputs 此前只有 `MANIFEST.md`，未覆盖 #4/#5 基准 REQ。现动态纳入 `REQ_<id>.md`，与文档一致。
+- **P2-5/P2-6 降延迟 + hook 自检**：`preflight.py --phase 0` 注入干脆的行动清单（建目录→写 MANIFEST→落盘 REQ→index_req→next），减少模型反复读 ref 转圈；新增 `--check-hook` 与 Phase 0 hook 生效自检，未装即大声告警。
+- **E CI 守回归**：`scripts/check_plugin.py` 增项校验上述机制（驱动器调 gate8/readback、Phase 2-7 digest、Phase 0 含 REQ、install_hook 存在、README 含步骤、preflight 含 hook 自检），防回归。
+
+**升级**：`/plugin marketplace update qamaster`，新开会话；已有项目跑 `python <插件路径>/scripts/install_hook.py` 安装物理强制 hook。
+
 ## v0.7.5（2026-07-30）— 多厂商最低模型声明
 
 **本次发布解决一个核心问题**：用户问"如何一劳永逸阻止弱模型"，发现 hook/脚本驱动对"不读 SKILL.md、不调用脚本"的弱模型都无效。唯一根治方案是**声明最低模型要求，让人类别用弱模型跑**。

@@ -28,6 +28,7 @@ references/<file>.md 的紧凑摘要（标题级大纲 + 关键约束行），�
 import sys
 import os
 import re
+import json
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -35,6 +36,58 @@ except Exception:
     pass
 
 REFS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "references")
+
+# Phase 0 行动清单（降延迟·给模型一句干脆的"只做这几件事"，减少反复读 ref）
+PHASE0_CHECKLIST = [
+    "1. 建 case-design-out/ 目录（不存在则创建）",
+    "2. 写索引 case-design-out/MANIFEST.md（整表 Write，新需求路径一次性填全，status=进行中）",
+    "3. 落盘需求文档 case-design-out/REQ_<需求标识>.md（含 ## 二级标题，为 #4/#5 反向追溯基准）",
+    "4. 跑 python scripts/index_req.py case-design-out/REQ_<需求标识>.md 生成 .index.json",
+    "5. 跑 python scripts/case_design_workflow.py next（驱动器校验 MANIFEST+REQ 存在并签 Phase 0）",
+    "（Phase 0 不要生成测试用例；不要跳到 Phase 1 之前生成用例）",
+]
+
+
+def check_hook_active():
+    """检查当前项目 cwd 是否装了 case-design 物理强制 hook。
+
+    返回 (active: bool, detail: str)。检查 cwd/.claude/settings.json 的
+    PreToolUse 条目是否含指向 case_design_gate 的 command。"""
+    settings_path = os.path.join(os.getcwd(), ".claude", "settings.json")
+    if not os.path.exists(settings_path):
+        return False, "当前项目无 .claude/settings.json（物理强制 hook 未安装）"
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return False, "settings.json 解析失败：%s" % e
+    if not isinstance(data, dict):
+        return False, "settings.json 非 object"
+    hooks = data.get("hooks", {}) or {}
+    ptu = hooks.get("PreToolUse", [])
+    if not isinstance(ptu, list):
+        ptu = [ptu]
+    for entry in ptu:
+        if not isinstance(entry, dict):
+            continue
+        for h in entry.get("hooks", []) or []:
+            cmd = (h.get("command") or "") if isinstance(h, dict) else ""
+            if "case_design_gate" in cmd:
+                # 进一步确认 hook 脚本文件存在
+                return True, "PreToolUse 已配 case_design_gate（%s）" % cmd
+    return False, "settings.json 未配 case_design_gate 的 PreToolUse 条目"
+
+
+def print_hook_status():
+    """打印 hook 生效自检（Phase 0 入口提示用户物理强制是否在线）。"""
+    active, detail = check_hook_active()
+    if active:
+        print("[preflight] ✅ 物理强制 hook 已生效：%s" % detail)
+    else:
+        print("[preflight] ⚠️  物理强制 hook 未生效（软门禁）：%s" % detail)
+        print("[preflight]    未装 hook 时，弱模型可绕过门禁直接写 TestCases 到任意位置。")
+        print("[preflight]    安装：python <插件路径>/scripts/install_hook.py（详见 README 步骤 4.5）")
+    return active
 
 # 阶段号 -> 对应 ref 文件（与 SKILL.md 参考文件索引一致）
 PHASE_REF = {
@@ -107,11 +160,16 @@ def main():
         print("===== 阶段-ref 映射 =====")
         for ph in sorted(PHASE_REF.keys()):
             print("第%d阶段 -> %s" % (ph, PHASE_REF[ph]))
-        print("用法: python preflight.py --phase <N> [--big]")
+        print("用法: python preflight.py --phase <N> [--big] | --check-hook | --list")
         return 0
 
+    if "--check-hook" in args:
+        print("===== case-design 物理强制 hook 自检 =====")
+        ok = print_hook_status()
+        return 0 if ok else 2
+
     if "--phase" not in args:
-        print("用法: python preflight.py --phase <N> [--big] | --list")
+        print("用法: python preflight.py --phase <N> [--big] | --check-hook | --list")
         return 1
     i = args.index("--phase")
     if i + 1 >= len(args):
@@ -137,6 +195,16 @@ def main():
 
     print("===== 第%d阶段 preflight 摘要 =====" % phase)
     print("对应 ref: references/%s" % ref_name)
+
+    # Phase 0 入口：行动清单 + hook 生效自检（降延迟 + 闭合"软门禁不自检"洞）
+    if phase == 0:
+        print("----- Phase 0 行动清单（只做这几件事，勿反复读 ref） -----")
+        for line in PHASE0_CHECKLIST:
+            print(line)
+        print("----- hook 生效自检 -----")
+        print_hook_status()
+        print("-" * 60)
+
     if big:
         # 超长需求模式：降级为计数 + 一句指引，防摘要反噬
         print("【超长需求模式】用例数>60，preflight 降级输出。")
