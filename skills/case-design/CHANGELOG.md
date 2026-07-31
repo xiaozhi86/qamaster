@@ -8,6 +8,31 @@
 
 > 本节为每个已发布版本的用户视角摘要；下方各版本技术条目面向维护者。两节互补，不重复。
 
+## v0.8.0（2026-07-31）— harness 全权驱动：彻底实现「与模型无关」的强制执行
+
+**本次发布推翻 v0.7.5 的错误前提并根治核心问题。** v0.7.5 结论「hook/脚本驱动对不读 SKILL.md 的弱模型都无效，唯一根治是声明最低模型」——其前提「插件无法自动部署 hook」本身错了：硬门禁一直放在 `.claude/settings.json`，而 Claude Code 对插件自带的 `settings.json` **只认 `agent`/`subagentStatusLine`，`hooks` 块被静默丢弃**，所以默认安装下硬门禁从未生效，整个流程退化为「靠模型自觉」（glm5.2 自觉、其他模型跳步）。
+
+**根因**：强制执行权寄托在模型层（SKILL.md 散文 + 自愿调脚本），而非 harness 层；且唯一硬门禁写错文件、默认不生效。
+
+**修复：把强制执行权彻底收归 harness（hook）层**——模型无论是否读 SKILL.md / 是否调脚本，都无法绕过任一阶段。
+
+- **改动1 hook 自动部署**：新建插件根 `hooks/hooks.json`（PreToolUse + PostToolUse + UserPromptSubmit，`${CLAUDE_PLUGIN_ROOT}` 引用脚本），随 `/plugin install` 自动激活；从 `.claude/settings.json` 删除被丢弃的 `hooks` 键；旧 `.claude/hooks/case_design_gate.py` 退役（不再被引用）。
+- **改动2/强化4 阶段由产出物派生、不信任可伪造状态**：新 PreToolUse（`scripts/case_design_pre.py`）完全不读 `.phase_signatures.json`/`.gate_log`，当前阶段由「实际产出物是否存在」派生；对用例 Write 用 `verify_cases.run_inmemory` 做**内存内全量重校验**（un-forgeable）。
+- **改动3/强化8 全通道拦截**：matcher 扩到 `Write|Edit|MultiEdit|Bash`；Edit/MultiEdit 读盘+应用 patch 再校验（闭合旧 hook「Edit content 恒空」盲区）；Bash 写交付物一律拒（须用 Write 走内容门禁，闭合 Gap1）；内容判定用 `verify_cases` 表格解析器替代既漏判又误伤的关键词正则。
+- **强化2 会话守卫**：仅 case-design 会话进行中介入（UserPromptSubmit 识别 `/case-design` 建会话标记），不污染无关项目/文件。
+- **强化3 防伪造闭环**：`.cd_session.json`/`.cd_tickets.json` 等状态文件标记 harness-owned，PreToolUse 禁止模型写——只有 UserPromptSubmit/PostToolUse（harness 事件）能写。
+- **改动4 暂停门禁用「真正用户输入」作唯一钥匙**：澄清(Phase1)/审核(Phase14) 门禁只能由 UserPromptSubmit 解析用户原始 prompt 后置位（`scripts/case_design_submit.py`），模型无法伪造。
+- **改动5/强化6 推进 + 注入由 harness 驱动**：PostToolUse（`scripts/case_design_post.py`）每次交付物落盘后注入「下一阶段完整行动指令」（复用 PHASE_INSTRUCTIONS + ref），**模型无需读 SKILL.md 即知下一步**——这才是「与模型是否读 SKILL.md 无关」的彻底实现。
+- **强化7 UserPromptSubmit 三职责**：开局建会话+注入 Phase0、记录运行模式（完整/连跑/轻量，模型不可改）、解析澄清/审核写票据。
+
+**未由 hook 消除的残留风险（诚实声明）**：① 模型把用例直接打在对话文本里——hook 无法阻止文本露出，只能确保「不出未经流程的合规交付文件」+ Stop 威慑；② 经未纳入 matcher 的写盘工具（部分 MCP）；③ Codex/Cursor 无这些 hook 事件，仅软门禁；④ 模型可对澄清问题「脑灌」回答——结构合规可保、语义真实靠人工审核。
+
+**测试**：`scripts/_test_gate.py` 覆盖 8 个对抗场景（无会话放行/会话内普通放行/用例写非约定位置阻断/阶段顺序阻断/harness-owned 文件禁写/Bash 写交付物阻断/Bash 非写放行/Phase0 放行）全过；`py_compile` 全脚本通过；`check_plugin.py` 结构自检通过。
+
+**待续（非核心·不阻断模型无关目标）**：`run_phase.py`/`case_design_workflow.py` 现降级为可选人类工具（强制不再经它们），其 digest 内容校验收紧为低优先；SKILL.md/README 的「必须 start/next」「唯一根治是声明最低模型」等过时表述待对齐（当前不破坏功能，仅冗余）。
+
+**升级**：`/plugin marketplace update qamaster` 后**新开会话**——新 hook 随插件自动激活（无需再跑 install_hook.py）。
+
 ## v0.7.6（2026-07-30）— 闭合门禁机制破绽（hook 落地 + 驱动器强制 gate8）
 
 **本次发布解决一个核心问题**：真实运行暴露 v0.7.0–v0.7.5 的「harness 物理强制 / 脚本驱动彻底解决弱模型跳阶段」在默认安装下落空——hook 在消费方项目根本没启用，驱动器也跳过了 gate8/readback 两个关键内容门禁。

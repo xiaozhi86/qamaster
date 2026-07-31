@@ -111,6 +111,14 @@ def _merge_hook_into_settings(settings):
 
 
 def install(force=False):
+    # v0.8.0：hook 已随插件自动激活（hooks/hooks.json），无需手动安装；
+    # 旧 .claude/settings.json hook 已退役——重新安装会与新 harness 冲突，故拦截。
+    v08 = os.path.join(REPO_ROOT, "hooks", "hooks.json")
+    if os.path.exists(v08):
+        print("[install_hook] ℹ️ v0.8.0+：hook 已随插件自动激活（hooks/hooks.json），无需手动安装。")
+        print("[install_hook]    旧 .claude/settings.json hook 已退役；请勿重新安装（会与新 harness 冲突）。")
+        print("[install_hook]    新会话后 PreToolUse/PostToolUse/UserPromptSubmit 即自动生效。")
+        return 0
     if not os.path.exists(SRC_HOOK):
         print("[install_hook] ❌ 找不到 hook 源：%s" % SRC_HOOK)
         print("[install_hook] 请确认在 qamaster 仓库（或已安装的插件目录）内运行。")

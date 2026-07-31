@@ -9,10 +9,9 @@ min-models:
   google: gemini-2.0-flash
 ---
 
-# ⚠️ 最低模型要求（必读·人）
+# ℹ️ 模型建议（v0.8.0 起·harness 驱动·仅供参考）
 
-> 本 skill 需要强指令遵循能力，要求逐阶段执行 15 步流程并触发门禁脚本。
-> 低于下述版本的模型**无法按流程执行**，请勿使用：
+> **v0.8.0 起，流程合规由 harness（hook）强制，与所用模型无关**——不再依赖模型自觉读 SKILL.md 或调用脚本。下方模型仅为「产出质量」建议，**不再是能否按流程执行的前提**；harness 会拦截跳步/越界写/伪造状态。
 
 | 厂商       | 最低模型 | 不达标示例                           |
 |----------|---|---------------------------------|
@@ -20,57 +19,45 @@ min-models:
 
 
 
-> **不达标模型的实际表现**：跳过需求澄清/规格建模/风险分析，直接生成测试用例；不调用工作流脚本；把产出物写到 `测试用例/` 等非约定位置绕过门禁。
-> 若必须用弱模型，请改用"脚本驱动模式"（见下方入口），并保留 PreToolUse hook 兜底——但即便如此，弱模型仍可能不调用脚本。
+> **harness 强制（与模型无关）**：逐阶段顺序、用例内容 gate8 内存校验、产出物位置、澄清/审核暂停门禁、防伪造，全部由 `hooks/hooks.json` 的 PreToolUse/PostToolUse/UserPromptSubmit hook 在 harness 层判定。模型只需按 PostToolUse 注入的「下一阶段指令」做事、把产出物写到 `case-design-out/`。残留风险（对话直出文本 / MCP 写盘）见 CHANGELOG v0.8.0。
 
 ---
 
-# ⛔⛔⛔ 强制入口检查 - STOP! 必须首先执行 ⛔⛔⛔
+# ✅ 入口与执行方式（v0.8.0 · harness 驱动·无需手动启动）
 
-> **警告：未完成本节步骤直接生成测试用例 = 流程违规，输出无效！**
+> **无需手动调用任何脚本。** 用户输入 `/case-design`（或提供需求文档）时，`UserPromptSubmit` hook 自动建会话标记并注入 Phase 0 行动清单；每写一个阶段产出物，`PostToolUse` hook 自动校验并注入下一阶段指令。**模型只需「按注入指令做事 + 把产出物写到 `case-design-out/`」**。
 
-## 立即执行（必须）：
+## harness 强制规则（与模型无关）
 
-```
-python scripts/case_design_workflow.py start <需求文档路径>
-```
+- **顺序**：写 Phase N 产出物前，Phase 0..N-1 产出物须已落盘（harness 派生判定，不信任任何模型可写状态）。
+- **内容**：用例文件 Write 前在内存跑 `verify_cases` 全量校验（gate8），不过即拦。
+- **位置**：用例表只能写到 `case-design-out/TestCases_<需求标识>.md`；写别处、用 Bash/`cat>`/`tee` 落盘一律拦。
+- **暂停门禁**：澄清(Phase 1)/审核(Phase 14) 须**用户真实输入**（仅 UserPromptSubmit 认用户 prompt），模型无法自答/自批。
+- **防伪造**：`.cd_session.json`/`.cd_tickets.json` 等状态文件 harness 独占，模型禁写。
 
-然后按照脚本输出的指令逐阶段执行。**模型只需按脚本指令执行当前阶段，无需记忆完整流程。**
+## 旧脚本驱动模式（v0.8.0 降级为可选·人类状态查询）
 
-## 脚本驱动流程说明
-
-从 v0.7.4 起，本 skill 采用**脚本驱动模式**：
-- **脚本是指挥官**：决定当前阶段、检查产出物、运行门禁
-- **模型是执行者**：按脚本指令执行当前阶段，生成内容
-- **流程合规由脚本保证**：跳阶段 = 脚本拒绝执行
-
-### 使用方式
+> v0.7.4 的 `case_design_workflow.py start/next` 现已**不是流程必需**——harness 自动驱动。该脚本降级为可选的人类状态查询工具；其签名 `.phase_signatures.json`/`.gate_log` 不再被 harness 采信（harness 直接由产出物派生阶段）。
 
 ```bash
-# 启动流程
-python scripts/case_design_workflow.py start "需求文档路径"
-
-# 查看当前状态
+# 可选：人类查看当前阶段（模型无需调用）
 python scripts/case_design_workflow.py status
-
-# 推进到下一阶段（产出物就绪后）
-python scripts/case_design_workflow.py next
 ```
 
 ### 阶段产出物
 
-| 阶段 | 产出物 | 门禁 |
+| 阶段 | 产出物 | harness 判定 |
 |---|---|---|
-| Phase 0 | MANIFEST.md, REQ_*.md | gate-phase 0 |
-| Phase 1 | Clarification_Ledger_*.md | gate-phase 1 |
-| Phase 2-7 | 内存中（签空串） | gate-phase 2-7 |
-| Phase 8 | TestCases_*.md | gate8 |
-| Phase 9-12 | 内存处理 | 无 |
-| Phase 13 | 最终 Write | 无 |
-| Phase 14 | 人工审核 | 用户确认 |
-| Phase 15 | Excel 生成 | 无 |
+| Phase 0 | MANIFEST.md, REQ_*.md | 存在且非空 |
+| Phase 1 | Clarification_Ledger_*.md | 存在；进 Phase 2 前须用户已回答澄清 |
+| Phase 2-7 | .phase_digest_<N>.md | 存在且非空（内存阶段摘要） |
+| Phase 8 | TestCases_*.md | gate8 内存全量校验通过 |
+| Phase 9-12 | 内存处理 | PostToolUse 注入指令 |
+| Phase 13 | 回读 | verify_cases 回归 |
+| Phase 14 | 人工审核 | 须用户「审核通过」 |
+| Phase 15 | Excel/Knowledge | 须 Phase 8 过 + 审核通过 |
 
-**❌ 未调用工作流脚本直接生成测试用例 → 流程违规**
+**❌ 跳阶段 / 写到非约定位置 / 伪造状态 → harness 拦截，产出无效**
 
 ---
 
@@ -87,7 +74,7 @@ python scripts/case_design_workflow.py next
 2. 第0阶段必须先读 `references/phase0_manifest.md` 获得完整规则后再执行（见 §6 第0阶段）。
 3. 禁止跳过任何阶段直接生成用例——必须严格顺序执行第0→15阶段（§6 主执行流程）；跳过澄清/规格建模/风险分析/自查/审核门禁直接产出用例即判违规。
 
-违反以上视为流程违规，输出无效。机器侧由 `scripts/run_phase.py` 留痕核对（gate8/readback sentinel 齐全且 exit=0，见 §6.6）。
+违反以上视为流程违规，输出无效。机器侧由 **harness（`hooks/hooks.json` 的 PreToolUse/PostToolUse）强制**：阶段顺序、gate8 内存校验、位置/伪造拦截，与模型是否自觉无关（见 CHANGELOG v0.8.0；§6.6 旧脚本留痕已降级为可选）。
 
 ---
 

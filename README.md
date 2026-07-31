@@ -17,16 +17,16 @@ QA Master 提供两个核心能力，覆盖「需求评审 → 测试用例设�
 
 两个 skill 的**正文统一存放在 `skills/` 下，为单一事实源，不随平台复制**。三个平台（Claude Code / Codex / Cursor）各自加一层薄引用包装，运行时读取对应 `SKILL.md` 执行。
 
-> ### ⚠️ 最低模型要求
+> ### ℹ️ 模型建议（v0.8.0 起·harness 驱动）
 >
-> case-design 需要强指令遵循能力（逐阶段执行 15 步流程 + 触发门禁脚本）。**低于下述版本的模型无法按流程执行，请勿使用**：
+> **v0.8.0 起，流程合规由 harness（hook）强制，与所用模型无关**——不再依赖模型自觉读 SKILL.md 或调用脚本。下方仅为「产出质量」建议模型，**不再是能否按流程执行的前提**：
 >
 > | 厂商       | 最低模型            | 不达标示例                           |
 > |----------|-----------------|---------------------------------|
 > | 智谱（Zhipu） | **GLM-5.2 及以上** | GLM-5（会跳阶段、不读 SKILL.md、写到非约定位置） |
 
 >
-> 弱模型的典型表现：跳过需求澄清/规格建模/风险分析直接生成用例；不调用工作流脚本；把产出物写到 `测试用例/` 等非约定位置绕过门禁。PreToolUse hook 会兜底拦截违规写入，但弱模型仍可能完全不调用脚本——请直接使用达标模型。
+> harness（`hooks/hooks.json` 的 PreToolUse/PostToolUse/UserPromptSubmit）会强制逐阶段执行、拦截跳步/越界写/伪造状态、用 gate8 校验用例内容。即便使用其他模型，流程仍被严格执行；残留风险（对话直出文本 / MCP 写盘）见 `skills/case-design/CHANGELOG.md` v0.8.0。
 
 ---
 
@@ -250,9 +250,9 @@ flowchart TD
 
 两条都满足即安装成功。
 
-#### 步骤 4.5 — 安装物理强制 hook（关键·常被忽略）
+#### 步骤 4.5 — 安装物理强制 hook（v0.8.0 起已随插件自动激活·本步可跳过）
 
-> **为什么需要这一步**：插件自带 `.claude/hooks/case_design_gate.py` + `.claude/settings.json`（PreToolUse 物理拦截），但 Claude Code **不会**把插件自带的 `.claude/settings.json` hooks 自动合并进你的项目。结果：跳过这步，case-design 的「物理强制门禁」不触发，只剩「模型自觉」的软门禁——弱模型可直接把测试用例写到任意位置绕过流程。
+> **v0.8.0 起，本步已无需手动执行**：硬门禁现通过插件根 `hooks/hooks.json`（PreToolUse/PostToolUse/UserPromptSubmit）随 `/plugin install` **自动激活**，新开会话即生效，与所用模型无关。下方 `install_hook.py` 已降级为可选（仅 v0.8.0 之前的老版本需要；v0.8.0+ 运行会提示「已自动激活」且不做改动，避免重新装回与新 harness 冲突的旧 hook）。
 
 在你**要跑 case-design 的项目根目录**执行（在 Claude Code 输入框用 `!` 前缀跑 shell，或终端里跑）：
 

@@ -184,6 +184,36 @@ if pf.exists():
 else:
     err("skills/case-design/scripts/preflight.py: 缺失")
 
+# 10. v0.8.0 harness 驱动：hooks/hooks.json + 新 hook 脚本 + 旧 settings.json hooks 残留检测
+hooks_json = ROOT / "hooks/hooks.json"
+if not hooks_json.exists():
+    err("hooks/hooks.json: 缺失（v0.8.0 harness 自动激活入口，须随插件部署）")
+else:
+    hj = load_json(hooks_json)
+    if hj is not None:
+        hook_events = set()
+        for event in ("PreToolUse", "PostToolUse", "UserPromptSubmit"):
+            for entry in (hj.get("hooks", {}).get(event, []) or []):
+                for h in (entry.get("hooks", []) or []):
+                    hook_events.add(event)
+                    if "${CLAUDE_PLUGIN_ROOT}" not in (h.get("command", "") or ""):
+                        warn(f"hooks/hooks.json: {event} 命令未用 ${{CLAUDE_PLUGIN_ROOT}} 引用脚本")
+        for needed in ("PreToolUse", "PostToolUse", "UserPromptSubmit"):
+            if needed not in hook_events:
+                err(f"hooks/hooks.json: 缺少 {needed} hook（v0.8.0 三件套）")
+for s in ("case_design_pre.py", "case_design_post.py", "case_design_submit.py"):
+    if not (ROOT / "scripts" / s).exists():
+        err(f"scripts/{s}: 缺失（v0.8.0 harness hook 脚本）")
+# 旧 .claude/settings.json 不应再含 hooks（v0.8.0 已迁出，残留会与新 harness 冲突）
+st = ROOT / ".claude/settings.json"
+if st.exists():
+    try:
+        sd = json.loads(st.read_text(encoding="utf-8"))
+        if isinstance(sd, dict) and sd.get("hooks"):
+            err(".claude/settings.json: 仍含 hooks 键（v0.8.0 已迁至 hooks/hooks.json，须删除以免冲突）")
+    except Exception:
+        warn(".claude/settings.json: 解析失败")
+
 # 输出
 print("== qamaster 插件结构自检 ==")
 for w in warnings:
