@@ -184,10 +184,67 @@ def verify():
     return 1
 
 
+def clean_stale_v07():
+    """v0.8.1：检测并清理消费方项目残留的 v0.7.x 旧门禁。
+    旧 install_hook 曾把 .claude/hooks/case_design_gate.py + PreToolUse 配置
+    合并进消费方项目；v0.8.0 起应由 hooks/hooks.json 接管，旧配置残留会与新
+    harness 冲突（旧 gate 无会话守卫、做粗暴关键词过滤，正是 bug 来源）。"""
+    cwd = os.getcwd()
+    stale_hook = os.path.join(cwd, HOOK_REL)
+    settings_path = os.path.join(cwd, SETTINGS_REL)
+    cleaned = []
+    # 1. 删除旧 gate 脚本拷贝
+    if os.path.exists(stale_hook):
+        try:
+            os.remove(stale_hook)
+            cleaned.append(HOOK_REL)
+        except Exception as e:
+            print("[install_hook] ⚠ 删除旧 gate 失败 %s: %s" % (HOOK_REL, e))
+    # 2. 从 settings.json 移除指向旧 gate 的 PreToolUse 条目
+    settings = _read_json(settings_path, {})
+    if isinstance(settings, dict) and settings.get("hooks"):
+        hooks = settings.get("hooks", {})
+        ptu = hooks.get("PreToolUse", [])
+        if not isinstance(ptu, list):
+            ptu = [ptu]
+        new_ptu = []
+        removed = False
+        for entry in ptu:
+            if not isinstance(entry, dict):
+                new_ptu.append(entry)
+                continue
+            hs = entry.get("hooks", []) or []
+            keep_hs = [h for h in hs
+                       if isinstance(h, dict) and "case_design_gate" not in (h.get("command") or "")]
+            if len(keep_hs) != len(hs):
+                removed = True
+            if keep_hs:
+                entry["hooks"] = keep_hs
+                new_ptu.append(entry)
+        if removed:
+            hooks["PreToolUse"] = new_ptu
+            if not new_ptu:
+                hooks.pop("PreToolUse", None)
+            if not hooks:
+                settings.pop("hooks", None)
+            _write_json(settings_path, settings)
+            cleaned.append("PreToolUse->case_design_gate (removed from settings.json)")
+    return cleaned
+
+
 def main():
     args = sys.argv[1:]
     if "--verify" in args:
         return verify()
+    if "--clean-stale" in args:
+        print("[install_hook] === 清理 v0.7.x 残留旧门禁 ===")
+        cleaned = clean_stale_v07()
+        if cleaned:
+            print("[install_hook] ✓ 已清理：%s" % "；".join(cleaned))
+            print("[install_hook]    新会话后 v0.8.0 harness（hooks/hooks.json）自动生效。")
+        else:
+            print("[install_hook] 未检测到 v0.7.x 残留（无需清理）。")
+        return 0
     force = "--force" in args
     return install(force=force)
 

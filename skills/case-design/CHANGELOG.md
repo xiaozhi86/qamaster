@@ -8,6 +8,30 @@
 
 > 本节为每个已发布版本的用户视角摘要；下方各版本技术条目面向维护者。两节互补，不重复。
 
+## v0.8.1（2026-08-01）— 闭合「与模型无关」三处破绽：激活兜底 + 内容优先 + 清旧 gate
+
+**v0.8.0 之后实测仍跳步的根因**（本次闭合）：
+
+- **根因 A（致命）**：会话激活正则 `_is_start` 含 `/case-design`，但插件实际暴露的命令名是 `/qamaster:case-design`——该串**不含子串 `/case-design`**（`qamaster:` 前无斜杠），激活正则返回 False → 不建会话标记 → PreToolUse 会话守卫 `_session_active` 返回 False → **整个门禁 return 0 放行**。即「与模型无关」目标破防的**直接原因**：整条强制链挂在「会话是否激活」上，而激活靠一条 prompt 正则，漏一个命令名就整层失效。
+- **根因 B**：会话守卫是**唯一总开关**，未激活即整层 return 0，无兜底——激活判据没命中，强制层自动失效。
+- **根因 C**：门禁只认文件名前缀（`TestCases_` 等），模型把用例写到 `xxx_测试用例.md` → `_classify` 返回 `(None,"other")` → 不命中任何规则 → 放行。
+- **根因 D（解释实测现象）**：消费方项目残留 v0.7.x 旧 gate（`install_hook.py` 曾拷入 `.claude/hooks/case_design_gate.py` + 合并进该项目 `.claude/settings.json`）。旧 gate `_TESTCASES_PATH_RE=(测试用例|TestCases?)` 对路径含「测试用例」**无条件命中、无会话守卫** → `xxx_测试用例.md` 被粗暴拦。即实测 `Write ⎿ Error writing file` 几乎确定是**旧 v0.7.3 gate 在拦**，不是新 v0.8.0 gate（新 gate 会话未激活会 return 0 放行，Write 会成功）。模型于是绕开文件、改在对话里直出整张用例表（hook 拦不住对话文本）。
+
+**修复**：激活不再依赖「prompt 里有没有触发词」，门禁不再只认文件名前缀。
+
+- **改动1（根因 A）**：`case_design_submit.py` `_is_start` 正则扩到 `/qamaster:case-design`、`qamaster:case-design`、`/case-design`、中文意图（设计测试用例/需求转用例）+ 结构化标记。覆盖裸命令与命名空间命令两种调用形态。
+- **改动2（根因 B）**：`case_design_pre.py` 新增 `_should_guard(root, path, content)`——**三重 OR 兜底**：① 会话标记活跃；② `case-design-out/` 目录已存在；③ 操作呈现 case-design 特征（路径含 `case-design-out`/`测试用例`/`TestCases`，或内容是 `verify_cases` 可解析的用例表，无论路径）。会话守卫不再无脑 return 0：会话未激活但**内容是用例表**时仍拦截。消除「激活正则没命中→整层失效」单点。
+- **改动3（根因 C）**：`_is_case_table` 内容优先——**任何路径**写入用例表结构（含「用例ID」表头 + 数据行）都触发规则 A 拦截，不依赖文件名前缀。`_classify` 文件名前缀降为辅助信号。
+- **改动4（根因 D）**：`install_hook.py` 新增 `--clean-stale`——检测并删除消费方项目残留的旧 `.claude/hooks/case_design_gate.py` 拷贝、并从其 `.claude/settings.json` 移除指向旧 gate 的 PreToolUse 条目（幂等）。消费方升级 v0.8.x 后应跑一次 `python <插件路径>/scripts/install_hook.py --clean-stale`，否则旧 gate 的粗暴关键词拦截会持续误伤。
+- **Bash heredoc**：`cat > x.md <<'EOF' ... EOF` 写用例表也会被拦（内容判定对 Bash 命令体生效）。
+- **`case_design_post.py`** 同步：会话未激活时不注入下一阶段指令（避免污染无关项目）。
+
+**验证**：`scripts/_test_gate.py` 14/14 对抗场景通过——含 `/qamaster:case-design` 激活、**会话未启动但内容是用例表→拦**（根因 A/B/C 闭环）、任意路径写表→拦、Bash heredoc→拦、普通文档写入不误拦。`py_compile` 全过；`check_plugin.py` 通过；`install_hook.py --clean-stale` 实测能清空残留 settings.json + 删旧 gate 脚本。
+
+**残留风险（不变）**：对话直出文本不可阻止（只能不出合规文件）；经未纳入 matcher 的 MCP 写盘；Codex/Cursor 无 hook 事件。
+
+**升级**：`/plugin marketplace update qamaster` 后新开会话；**曾在 v0.7.x 跑过 `install_hook.py` 的项目须补跑 `python <插件路径>/scripts/install_hook.py --clean-stale`** 清掉旧 gate。
+
 ## v0.8.0（2026-07-31）— harness 全权驱动：彻底实现「与模型无关」的强制执行
 
 **本次发布推翻 v0.7.5 的错误前提并根治核心问题。** v0.7.5 结论「hook/脚本驱动对不读 SKILL.md 的弱模型都无效，唯一根治是声明最低模型」——其前提「插件无法自动部署 hook」本身错了：硬门禁一直放在 `.claude/settings.json`，而 Claude Code 对插件自带的 `settings.json` **只认 `agent`/`subagentStatusLine`，`hooks` 块被静默丢弃**，所以默认安装下硬门禁从未生效，整个流程退化为「靠模型自觉」（glm5.2 自觉、其他模型跳步）。

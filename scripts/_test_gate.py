@@ -75,6 +75,27 @@ try:
         json.dump({"clarification_answered": True, "review_approved": False}, f)
     rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(out, ".phase_digest_2.md"), "content": "x" * 40})
     results.append(("11 digest-after-clarif allow", rc == 0, err))
+
+    # --- v0.8.1: 根因 A/B/C/D 对抗场景 ---
+    # 12) 会话未启动 + 写用例表到非约定路径 -> 必须拦（根因 B 兜底 + C 内容优先）
+    tmp2 = tempfile.mkdtemp()
+    try:
+        rc, err = run_pre(tmp2, "Write", {"file_path": os.path.join(tmp2, "电销通话AI总结_测试用例.md"), "content": bad})
+        results.append(("12 no-session wrong-path table block", rc == 2, err))
+    finally:
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+    # 13) 会话未启动 + 普通文档写入 -> 放行（不误伤）
+    tmp3 = tempfile.mkdtemp()
+    try:
+        rc, err = run_pre(tmp3, "Write", {"file_path": os.path.join(tmp3, "README.md"), "content": "# 项目说明\n这是一个普通项目\n"})
+        results.append(("13 no-session plain doc allow", rc == 0, err))
+    finally:
+        shutil.rmtree(tmp3, ignore_errors=True)
+
+    # 14) Bash heredoc 含用例表内容 -> 拦（根因 C 的 Bash 通道）
+    rc, err = run_pre(tmp, "Bash", {"command": "cat > out.md <<'EOF'\n" + bad + "\nEOF"})
+    results.append(("14 bash heredoc table block", rc == 2, err))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

@@ -101,6 +101,26 @@ def _session_active(root):
     return isinstance(sess, dict) and sess.get("active") is True
 
 
+def _should_guard(root, path, content):
+    """v0.8.1：门禁是否生效，三重 OR 兜底，消除「激活正则没命中→整层失效」单点。
+    1) 会话标记显式活跃；或
+    2) case-design-out/ 目录已存在（模型已开始往约定目录写）；或
+    3) 当前操作呈现 case-design 特征：路径含 case-design-out/测试用例/TestCases，
+       或内容是 verify_cases 可解析的用例表（无论路径）。
+    无关项目的普通写入三者皆不命中 -> 放行（不污染）。"""
+    if _session_active(root):
+        return True
+    out = _out(root)
+    if os.path.isdir(out):
+        return True
+    p = (path or "").replace("\\", "/").lower()
+    if "case-design-out" in p or "测试用例" in (path or "") or (TC_PREFIX.lower() in p):
+        return True
+    if _is_case_table(content or ""):
+        return True
+    return False
+
+
 def _tickets(root):
     return _load_json(os.path.join(_out(root), ".cd_tickets.json"),
                       {"clarification_answered": False, "review_approved": False})
@@ -147,7 +167,8 @@ def _req_path(root):
 
 
 def _is_case_table(text):
-    """是否是一张用例表（结构判定，替代脆弱关键词正则）。"""
+    """是否是一张用例表（结构判定，替代脆弱关键词正则）。v0.8.1：无论路径，
+    内容满足即拦——这才是「写到别处也拦」。"""
     if not text or ("用例" not in text and "case" not in text.lower()):
         return False
     v = _load_verify()
@@ -252,15 +273,30 @@ def main():
 
     # 会话守卫：非 case-design 会话一律放行（不污染无关工作·强化2）
     if not _session_active(root):
-        return 0
+        # v0.8.1 兜底：会话未激活但内容是用例表 -> 仍拦（根因 A/B/C）。
+        # 先做内容判定，命中即阻断；未命中则按 _should_guard 决定是否继续。
+        _content = ""
+        if tool == "Write":
+            _content = (ti.get("content", "") or "")
+        elif tool == "Bash":
+            _content = (ti.get("command", "") or "")
+        if _is_case_table(_content):
+            return _block("检测到用例表内容，禁止写到非约定位置。",
+                          "用例表必须写到 case-design-out/%s_<需求标识>.md。" % TC_PREFIX)
+        if not _should_guard(root, "", _content):
+            return 0
 
     out = _out(root)
 
     # ---- Bash 分支：禁止用 Bash 产出交付物（须用 Write 走内容门禁·Gap1）----
+    # v0.8.1：会话未激活时，若 Bash 命令含用例表内容（heredoc body），仍拦。
     if tool == "Bash":
         cmd = ti.get("command", "") or ""
-        if not _BASH_WRITE_RE.search(cmd):
+        if not _BASH_WRITE_RE.search(cmd) and not _is_case_table(cmd):
             return 0
+        if _is_case_table(cmd):
+            return _block("检测到用例表内容经 Bash 写盘。",
+                          "用例表必须经 Write 工具写到 case-design-out/%s_<需求标识>.md。" % TC_PREFIX)
         for p in _bash_write_paths(cmd):
             _ph, kind = _classify(p)
             if kind in ("deliverable", "testcase", "knowledge") or _is_case_table(cmd):

@@ -71,9 +71,16 @@ def _detect_mode(prompt):
 
 
 def _is_start(prompt):
-    return bool(re.search(
-        r"/case-design|case-design\s*skill|使用\s*case-design|<<<需求文档开始>>>|【业务需求描述】|【需求标识】",
-        prompt))
+    # v0.8.1：覆盖裸命令 + 命名空间命令 + 中文意图 + 结构化标记。
+    # 关键修复：`/qamaster:case-design` 不含子串 `/case-design`（`qamaster:` 前无斜杠），
+    # 故须显式匹配 `qamaster:case-design` / 去斜杠容错。
+    if re.search(r"/(?:qamaster:)?case-design|qamaster:case-design|case-design", prompt):
+        return True
+    if re.search(r"<<<需求文档开始>>>|【业务需求描述】|【需求标识】", prompt):
+        return True
+    if re.search(r"设计测试用例|测试用例设计|需求转用例|用例设计", prompt):
+        return True
+    return False
 
 
 def _req_id(prompt):
