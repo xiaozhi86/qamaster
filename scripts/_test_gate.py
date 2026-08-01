@@ -109,9 +109,17 @@ try:
 
     # 17) 约定 TestCases_ + 标准 15 列 + 0-7 完成 + gate8 过 -> 放行（回归）
     good_table = "| 用例ID | 关联需求ID | 关联规则 | 测试类型 | 测试维度 | 所属模块 | 用例名称 | Given | When | Then | 编辑模式 | 标签 | 责任人 | 用例等级 | 用例状态 |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| ORD_CREATE_001 | REQ-1 | R1 | 功能 | 输入验证 | 订单 | 【订单】【创建】【成功】【返回200】 | 已登录 | 提交订单 | 返回200 SUCCESS | STEP | AI | AI | P0 | Completed |\n"
-    # setup: phase 2-7 digests
+    # setup: phase 2-7 digests with correct markers per phase
+    phase_content = {
+        2: "# 测试需求分析\n维度：功能/边界/异常/状态\n覆盖范围：订单创建全链路\n",
+        3: "# 规则建模\nR1: 订单金额计算规则\nR2: 库存扣减规则\n",
+        4: "# 规格建模\n状态机：待支付→已支付→已发货\n异常：库存不足\n",
+        5: "# 风险分析\nP0: 资金安全\nP1: 库存一致性\n",
+        6: "# 策略匹配\n方法：等价类+边界值+决策表\n",
+        7: "# 测试点建模\nTP1: 订单创建正向\nTP2: 金额边界\n",
+    }
     for n in range(2, 8):
-        open(os.path.join(out, ".phase_digest_%d.md" % n), "w", encoding="utf-8").write("# Phase %d 分析\n规则建模风险策略测试点摘要内容详述\n" % n)
+        open(os.path.join(out, ".phase_digest_%d.md" % n), "w", encoding="utf-8").write(phase_content[n])
     json.dump({"clarification_answered": True, "review_approved": False}, open(os.path.join(out, ".cd_tickets.json"), "w"))
     rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(out, TC + "_ORD.md"), "content": good_table})
     results.append(("17 valid TestCases_ 15col allow", rc == 0, err))
@@ -120,6 +128,31 @@ try:
     plain_doc = "# 操作手册\n## 步骤一\n先做A再做B\n"
     rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(tmp, "manual.md"), "content": plain_doc})
     results.append(("18 plain manual no-false-positive", rc == 0, err))
+
+    # --- v0.8.3: Phase 9-12 + 13 全阶段强制 ---
+    # 19) Knowledge 未完成 Phase 9-12 -> 必须拦
+    json.dump({"clarification_answered": True, "review_approved": True}, open(os.path.join(out, ".cd_tickets.json"), "w"))
+    # persist TC
+    open(os.path.join(out, TC + "_ORD.md"), "w", encoding="utf-8").write(good_table)
+    rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(out, "Knowledge_ORD.md"), "content": "# 知识总结\n"})
+    results.append(("19 Knowledge-without-phase9-12 block", rc == 2, err))
+
+    # 20) 补齐 Phase 9-12 digest + Knowledge -> 放行
+    phase_9_12 = {
+        9: "# 去重\n去除重复用例 2 条\n",
+        10: "# 覆盖率校验\n覆盖率 95%，追溯全通过\n",
+        11: "# 自查\n检查1 通过\n检查2 通过\n15项全通过\n",
+        12: "# 展示\n用例投影 + 覆盖矩阵\n",
+    }
+    for n in range(9, 13):
+        open(os.path.join(out, ".phase_digest_%d.md" % n), "w", encoding="utf-8").write(phase_9_12[n])
+    rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(out, "Knowledge_ORD.md"), "content": "# 知识总结\n业务沉淀\n"})
+    results.append(("20 Knowledge-after-all-phases allow", rc == 0, err))
+
+    # 21) 30 字节桩 digest（无标记词）-> 视为未完成
+    open(os.path.join(out, ".phase_digest_9.md"), "w", encoding="utf-8").write("x" * 31)
+    rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(out, "Knowledge_ORD2.md"), "content": "# 知识总结2\n"})
+    results.append(("21 stub-digest-no-marker block", rc == 2, err))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

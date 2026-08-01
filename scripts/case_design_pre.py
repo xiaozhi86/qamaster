@@ -41,6 +41,20 @@ CLAR_PREFIX = "Clarification_Ledger"
 REQ_PREFIX = "REQ"
 DIGEST_RE = re.compile(r"\.phase_digest_(\d+)\.md$")
 
+# v0.8.3：各阶段 digest 须含的标记词（防 30 字节桩塞数）；Phase 9-12 新增
+_PHASE_MARKERS = {
+    2: ["测试需求", "维度", "覆盖范围", "测试范围"],
+    3: ["R1", "R2", "规则建模", "规则项", "规则"],
+    4: ["状态", "状态机", "规格", "异常", "契约"],
+    5: ["P0", "P1", "风险", "风险等级"],
+    6: ["方法", "策略", "等价类", "边界值", "决策表"],
+    7: ["TP1", "TP2", "测试点", "测试点清单"],
+    9: ["去重", "重复"],
+    10: ["覆盖", "追溯", "覆盖率"],
+    11: ["检查1", "检查2", "自查", "selfcheck", "15项"],
+    12: ["展示", "投影", "矩阵", "覆盖矩阵"],
+}
+
 # harness-owned：模型禁写（防伪造状态/票据）
 HARNESS_OWNED = {
     ".cd_session.json", ".cd_tickets.json",
@@ -136,21 +150,40 @@ def _first_nonempty(pattern):
 
 
 def _phase_done(root, n):
-    """阶段 n 的产出物是否真实存在（文件派生，不读可伪造签名）。"""
+    """阶段 n 的产出物是否真实存在（文件派生，不读可伪造签名）。
+    v0.8.3：Phase 2-12 加内容标记校验（不只查存在），Phase 9-12 新增 digest 文件。"""
     out = _out(root)
     if n == 0:
         return _nonempty(os.path.join(out, "MANIFEST.md")) and \
             _first_nonempty(os.path.join(out, REQ_PREFIX + "_*.md")) is not None
     if n == 1:
         return _first_nonempty(os.path.join(out, CLAR_PREFIX + "_*.md")) is not None
-    if 2 <= n <= 7:
-        return _nonempty(os.path.join(out, ".phase_digest_%d.md" % n))
+    if n == 8:
+        # Phase 8 = 用例文件已落盘
+        return _tc_path(root) is not None
+    if n in (2, 3, 4, 5, 6, 7, 9, 10, 11, 12):
+        path = os.path.join(out, ".phase_digest_%d.md" % n)
+        if not _nonempty(path):
+            return False
+        text = _read_text(path)
+        markers = _PHASE_MARKERS.get(n, [])
+        # 须命中至少 1 个本阶段标记词（防 30 字节桩塞数）
+        return any(m in text for m in markers) if markers else True
+    if n == 13:
+        # Phase 13 = 用例已落盘 + 过 gate8（readback 等价）
+        tc = _tc_path(root)
+        if not tc:
+            return False
+        req = _req_path(root)
+        req_text = _read_text(req) if req else ""
+        ok, _ = _gate8_ok(_read_text(tc), req_text)
+        return ok
     return False
 
 
 def _max_phase_done(root):
     m = -1
-    for n in range(0, 8):
+    for n in range(0, 14):
         if _phase_done(root, n):
             m = n
         else:
@@ -393,8 +426,11 @@ def main():
             return _block("澄清门禁未满足：尚未记录用户澄清回答。",
                           "Phase 1 已提澄清问题；须等用户回答后再进入 Phase 2+（用户回答后 harness 自动记录）。")
 
-    # 规则 C：最终制品（Excel/Knowledge）须 gate8 通过 + 审核票据
+    # 规则 C：最终制品（Excel/Knowledge）须 全阶段(0-13)完成 + gate8 通过 + 审核票据
     if kind == "knowledge":
+        if _max_phase_done(root) < 13:
+            return _block("生成 Knowledge/Excel 前，阶段 0-13 须全部完成（当前最高=%d）。" % _max_phase_done(root),
+                          "补齐缺失阶段产出物（含 .phase_digest_9 去重 / .phase_digest_10 覆盖 / .phase_digest_11 自查 / .phase_digest_12 展示），再用例过 gate8 + 回读。")
         tc = _tc_path(root)
         if not tc:
             return _block("生成 Knowledge/Excel 前须先有用例文件。", "先完成 Phase 8 用例生成。")

@@ -52,7 +52,7 @@ def _is_deliverable(base, tc_prefix):
         return True
     if base.startswith("Clarification_Ledger_"):
         return True
-    if base.startswith(".phase_digest_"):
+    if base.startswith(".phase_digest_"):  # covers .phase_digest_2..12
         return True
     if base.startswith(tc_prefix + "_") and base.lower().endswith(".md"):
         return True

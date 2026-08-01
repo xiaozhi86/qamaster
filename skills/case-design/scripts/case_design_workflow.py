@@ -256,38 +256,38 @@ PHASE_INSTRUCTIONS = {
         "instruction": "去重测试用例，详见 references/dedup_coverage.md",
         "outputs": [],
         "ref": "references/dedup_coverage.md",
-        "model_action": "请阅读 references/dedup_coverage.md，去除重复用例",
-        "check": None
+        "model_action": "请阅读 references/dedup_coverage.md，去除重复用例，将去重结果落盘 case-design-out/.phase_digest_9.md（含去重记录：哪些用例被合并/删除）",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_9.md"))
     },
     10: {
         "name": "覆盖率校验",
         "instruction": "校验覆盖率，详见 references/dedup_coverage.md",
         "outputs": [],
         "ref": "references/dedup_coverage.md",
-        "model_action": "请阅读 references/dedup_coverage.md，校验覆盖率和反向追溯",
-        "check": None
+        "model_action": "请阅读 references/dedup_coverage.md，校验覆盖率和反向追溯，将覆盖结果落盘 case-design-out/.phase_digest_10.md（含覆盖率/追溯结论）",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_10.md"))
     },
     11: {
         "name": "输出前自查",
         "instruction": "15项自查，详见 references/selfcheck.md",
         "outputs": [],
         "ref": "references/selfcheck.md",
-        "model_action": "请阅读 references/selfcheck.md，执行15项自查",
-        "check": None
+        "model_action": "请阅读 references/selfcheck.md，执行15项自查，将自查结果落盘 case-design-out/.phase_digest_11.md（含检查1..检查15 逐项结论）",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_11.md"))
     },
     12: {
         "name": "用例展示",
         "instruction": "在对话中展示用例投影和覆盖矩阵",
         "outputs": [],
-        "model_action": "请在对话中展示测试用例摘要和覆盖矩阵（不写文件）",
-        "check": None
+        "model_action": "请在对话中展示测试用例摘要和覆盖矩阵，并将展示摘要落盘 case-design-out/.phase_digest_12.md（含展示/投影/矩阵记录）",
+        "check": lambda: os.path.exists(os.path.join(OUT_DIR, ".phase_digest_12.md"))
     },
     13: {
         "name": "最终输出",
         "instruction": "写入测试用例文件",
         "outputs": [],  # 动态获取
         "ref": "references/output_write.md",
-        "model_action": "请阅读 references/output_write.md，将测试用例写入 case-design-out/TestCases_<需求标识>.md",
+        "model_action": "请阅读 references/output_write.md，将测试用例写入 case-design-out/TestCases_<需求标识>.md（15 列标准表头，首列用例ID）。harness 会在写前内存内跑 gate8 校验，不过会拦。",
         "check": lambda: len(find_testcases_files()) > 0
     },
     14: {
