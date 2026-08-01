@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PRE = os.path.join(HERE, "case_design_pre.py")
 PY = sys.executable
 TC = "Test" + "Cases"                       # build to avoid contiguous token in source
-CASE_HEADER = "| " + "用例" + "ID | a | b | c | d | e | f | g | h | i | j | k | l | m | n |"
+CASE_HEADER = "| " + "用例" + "ID | 步骤 | 预期 | c | d | e | f | g | h | i | j | k | l | m | n |"
 SEP = "|" + "---|" * 15
 ROW = "| X_001 | . | . | . | . | . | . | . | . | . | . | . | . | . | . |"
 
@@ -96,6 +96,30 @@ try:
     # 14) Bash heredoc 含用例表内容 -> 拦（根因 C 的 Bash 通道）
     rc, err = run_pre(tmp, "Bash", {"command": "cat > out.md <<'EOF'\n" + bad + "\nEOF"})
     results.append(("14 bash heredoc table block", rc == 2, err))
+
+    # --- v0.8.2: 根因 E 对抗场景（模型换文件名/换表头绕过）---
+    # 15) TC_ 前缀 + 自定义表头（序号|用例名称|步骤|预期）写到 case-design-out/ -> 必须拦
+    custom_tc = "| 序号 | 用例名称 | 模块 | 优先级 | 步骤 | 预期结果 |\n|---|---|---|---|---|---|\n| 1 | 单通通话AI分析 | 单通 | P0 | MQ消费 | 返回labels |\n"
+    rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(out, "TC_电销通话AI总结.md"), "content": custom_tc})
+    results.append(("15 TC_ prefix custom-header block", rc == 2, err))
+
+    # 16) TC_ 前缀 + 自定义表头写到非约定路径 -> 必须拦
+    rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(tmp, "模型服务", "TC_x.md"), "content": custom_tc})
+    results.append(("16 TC_ prefix wrong-path block", rc == 2, err))
+
+    # 17) 约定 TestCases_ + 标准 15 列 + 0-7 完成 + gate8 过 -> 放行（回归）
+    good_table = "| 用例ID | 关联需求ID | 关联规则 | 测试类型 | 测试维度 | 所属模块 | 用例名称 | Given | When | Then | 编辑模式 | 标签 | 责任人 | 用例等级 | 用例状态 |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| ORD_CREATE_001 | REQ-1 | R1 | 功能 | 输入验证 | 订单 | 【订单】【创建】【成功】【返回200】 | 已登录 | 提交订单 | 返回200 SUCCESS | STEP | AI | AI | P0 | Completed |\n"
+    # setup: phase 2-7 digests
+    for n in range(2, 8):
+        open(os.path.join(out, ".phase_digest_%d.md" % n), "w", encoding="utf-8").write("# Phase %d 分析\n规则建模风险策略测试点摘要内容详述\n" % n)
+    json.dump({"clarification_answered": True, "review_approved": False}, open(os.path.join(out, ".cd_tickets.json"), "w"))
+    rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(out, TC + "_ORD.md"), "content": good_table})
+    results.append(("17 valid TestCases_ 15col allow", rc == 0, err))
+
+    # 18) 普通技术文档（含「步骤」但非用例表格）-> 不误拦
+    plain_doc = "# 操作手册\n## 步骤一\n先做A再做B\n"
+    rc, err = run_pre(tmp, "Write", {"file_path": os.path.join(tmp, "manual.md"), "content": plain_doc})
+    results.append(("18 plain manual no-false-positive", rc == 0, err))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

@@ -116,7 +116,7 @@ def _should_guard(root, path, content):
     p = (path or "").replace("\\", "/").lower()
     if "case-design-out" in p or "测试用例" in (path or "") or (TC_PREFIX.lower() in p):
         return True
-    if _is_case_table(content or ""):
+    if _looks_like_testcase_content(content or "") or _filename_looks_like_testcase(path or ""):
         return True
     return False
 
@@ -182,6 +182,40 @@ def _is_case_table(text):
         except Exception:
             pass
     return bool(re.search(r"\|\s*用例ID", text)) and text.count("|") > 20
+
+
+# v0.8.2：语义识别——不依赖「用例ID」精确字样。模型用「序号」等表头仍能识别。
+_TC_DIM_WORDS = ["步骤", "预期", "优先级", "前置", "Given", "When", "Then",
+                 "场景", "测试步骤", "预期结果", "测试场景", "P0", "P1", "P2", "P3"]
+_TC_DIM_WORDS_EN = ["test case", "scenario", "test step", "expected result",
+                    "priority", "test scenario", "test point"]
+
+
+def _looks_like_testcase_content(text):
+    """语义层用例产出识别：含表格 + 用例语义 + 维度词即 True，不依赖「用例ID」字样。
+    收窄到「表格 + 用例 + 维度词」组合，普通技术文档不命中。"""
+    if not text:
+        return False
+    # 至少 2 行 markdown 表格
+    table_rows = [ln for ln in text.splitlines() if ln.strip().startswith("|")]
+    if len(table_rows) < 2:
+        return False
+    low = text.lower()
+    has_case = ("用例" in text) or ("test case" in low) or ("testcase" in low) or ("scenario" in low)
+    has_dim = any(w in text or w.lower() in low for w in _TC_DIM_WORDS) or \
+        any(w in low for w in _TC_DIM_WORDS_EN)
+    return has_case and has_dim
+
+
+def _filename_looks_like_testcase(path):
+    """文件名语义识别：覆盖 TC_/testcase/测试用例/_用例 等模型常见变体。"""
+    if not path:
+        return False
+    base = os.path.basename(path.replace("\\", "/")).lower()
+    for kw in ("测试用例", "testcase", "tc_", "_用例", "cases", "case_", "用例表", "_tc."):
+        if kw in base:
+            return True
+    return False
 
 
 def _gate8_ok(text, req_text):
@@ -276,30 +310,33 @@ def main():
         # v0.8.1 兜底：会话未激活但内容是用例表 -> 仍拦（根因 A/B/C）。
         # 先做内容判定，命中即阻断；未命中则按 _should_guard 决定是否继续。
         _content = ""
+        _path = ""
         if tool == "Write":
             _content = (ti.get("content", "") or "")
+            _path = (ti.get("file_path", "") or "")
+        elif tool in ("Edit", "MultiEdit"):
+            _path = (ti.get("file_path", "") or "")
         elif tool == "Bash":
             _content = (ti.get("command", "") or "")
-        if _is_case_table(_content):
-            return _block("检测到用例表内容，禁止写到非约定位置。",
-                          "用例表必须写到 case-design-out/%s_<需求标识>.md。" % TC_PREFIX)
-        if not _should_guard(root, "", _content):
+        if _looks_like_testcase_content(_content) or _filename_looks_like_testcase(_path):
+            return _block("检测到测试用例产出内容。",
+                          "测试用例必须经 Write 工具写到 case-design-out/%s_<需求标识>.md。" % TC_PREFIX)
+        if not _should_guard(root, _path, _content):
             return 0
 
     out = _out(root)
 
     # ---- Bash 分支：禁止用 Bash 产出交付物（须用 Write 走内容门禁·Gap1）----
-    # v0.8.1：会话未激活时，若 Bash 命令含用例表内容（heredoc body），仍拦。
     if tool == "Bash":
         cmd = ti.get("command", "") or ""
-        if not _BASH_WRITE_RE.search(cmd) and not _is_case_table(cmd):
+        if not _BASH_WRITE_RE.search(cmd) and not _looks_like_testcase_content(cmd):
             return 0
-        if _is_case_table(cmd):
-            return _block("检测到用例表内容经 Bash 写盘。",
-                          "用例表必须经 Write 工具写到 case-design-out/%s_<需求标识>.md。" % TC_PREFIX)
+        if _looks_like_testcase_content(cmd):
+            return _block("检测到测试用例产出内容经 Bash 写盘。",
+                          "测试用例必须经 Write 工具写到 case-design-out/%s_<需求标识>.md。" % TC_PREFIX)
         for p in _bash_write_paths(cmd):
             _ph, kind = _classify(p)
-            if kind in ("deliverable", "testcase", "knowledge") or _is_case_table(cmd):
+            if kind in ("deliverable", "testcase", "knowledge") or _filename_looks_like_testcase(p):
                 return _block(
                     "禁止用 Bash 写 case-design 交付物（%s）。" % os.path.basename(p),
                     "交付物必须经 Write 工具写入，以便 harness 校验内容与阶段顺序。改用 Write。")
@@ -318,18 +355,24 @@ def main():
                       "该文件由 harness（hook）独占维护，模型不可写/不可伪造。")
 
     phase, kind = _classify(path)
-    is_table = _is_case_table(content)
+    is_testcase_output = _looks_like_testcase_content(content) or _filename_looks_like_testcase(norm)
+    is_standard_table = _is_case_table(content)  # 严格 15 列（含「用例ID」）
 
-    # 规则 A：任何位置写入「用例表」-> 须落约定路径 + 阶段顺序 + gate8
-    if is_table:
-        conv = norm.startswith(out.replace("\\", "/")) and base.startswith(TC_PREFIX + "_")
-        if not conv:
-            return _block("检测到用例表内容写到非约定位置：%s" % path,
-                          "用例表必须写到 case-design-out/%s_<需求标识>.md。" % TC_PREFIX)
+    # 规则 A：任何位置写入「测试用例产出」-> 须落约定路径 + 阶段顺序 + gate8
+    if is_testcase_output:
+        # 门 1：必须写到约定位置 + 约定文件名
+        if not (norm.startswith(out.replace("\\", "/")) and base.startswith(TC_PREFIX + "_")):
+            return _block("检测到测试用例产出。必须写到 case-design-out/%s_<需求标识>.md（前缀 %s_，15 列标准表头含『用例ID』）。" % (TC_PREFIX, TC_PREFIX),
+                          "当前路径/文件名不合规。改用 Write 写到 case-design-out/%s_<需求标识>.md。" % TC_PREFIX)
+        # 门 2：阶段 0-7 须完成
         if _max_phase_done(root) < 7:
             return _block(
                 "用例表门禁：阶段 0-7 未全部完成（当前最高已完成阶段=%d）。" % _max_phase_done(root),
                 "先按序产出：MANIFEST+REQ(0) -> Clarification_Ledger(1) -> .phase_digest_2..7，再生成用例。")
+        # 门 3：内容须是标准 15 列用例表（gate8）
+        if not is_standard_table:
+            return _block("用例须采用 15 列标准表头（首列『用例ID』）。当前表头非标准。",
+                          "运行 `python scripts/verify_cases.py --dump-rules` 查看标准表头，改为 15 列标准格式后重新 Write。")
         req_text = _read_text(_req_path(root)) if _req_path(root) else ""
         ok, hard = _gate8_ok(content, req_text)
         if not ok:
