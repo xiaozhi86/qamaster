@@ -131,6 +131,47 @@ for must in (
     if not must.exists():
         err(f"{must.relative_to(ROOT)}: 缺失")
 
+# 6.5 Runtime（Agent Runtime Engineering）结构完整性
+rt_dir = ROOT / "runtime"
+for must in (rt_dir / "qamaster_runtime.py", rt_dir / "state_store.py", rt_dir / "phases.py"):
+    if not must.exists():
+        err(f"{must.relative_to(ROOT)}: 缺失（Runtime 受控流程核心文件）")
+if (rt_dir / "phases.py").exists():
+    import importlib.util
+    sys.path.insert(0, str(rt_dir))
+    try:
+        spec = importlib.util.spec_from_file_location("qamaster_phases", rt_dir / "phases.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        err(f"runtime/phases.py: 加载失败 - {e}")
+        mod = None
+    finally:
+        try:
+            sys.path.remove(str(rt_dir))
+        except ValueError:
+            pass
+    if mod is not None:
+        ids = [p["id"] for p in mod.PHASES]
+        if ids != list(range(0, 16)):
+            err("runtime/phases.py: 阶段编号必须连续 0-15，实际: %s" % ids)
+        gates = {p["gate"] for p in mod.PHASES}
+        if not gates <= {"auto", "confirm", "license"}:
+            err("runtime/phases.py: 非法 gate 类型: %s" % gates)
+        for pid, want in ((1, "confirm"), (14, "confirm"), (15, "license")):
+            actual = mod.PHASE_BY_ID[pid]["gate"]
+            if actual != want:
+                err(f"runtime/phases.py: Phase {pid} gate 应为 {want}，实际 {actual}")
+        for pid in (0, 13, 15):
+            if not mod.PHASE_BY_ID[pid].get("gate_checks"):
+                warn(f"runtime/phases.py: Phase {pid} 无机器检查项（建议至少一个确定性检查）")
+        for p in mod.PHASES:
+            for r in p.get("refs", []):
+                if not (ROOT / "skills" / "case-design" / r).exists():
+                    err(f"runtime/phases.py: Phase {p['id']} 引用的细则不存在: {r}")
+if not (ROOT / "scripts" / "test_runtime.py").exists():
+    warn("scripts/test_runtime.py: 缺失（Runtime 自证测试）")
+
 # 7. README
 if not (ROOT / "README.md").exists():
     err("README.md: 缺失")

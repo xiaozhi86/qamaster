@@ -9,12 +9,16 @@
 
 也可通过自定义 prompt 触发：把 `codex/prompts/*.md` 拷贝到 `~/.codex/prompts/`，即可用 `/case-design`、`/requirement-review`。
 
+## Runtime（可选增强，Claude Code 默认启用）
+
+`runtime/qamaster_runtime.py` 是 case-design 的流程状态机（0-14 阶段严格顺序 + 质量门禁 + 人工确认点，模型无关）。Codex 下若能执行 Python，可先用 `python runtime/qamaster_runtime.py start` 启动受控流程；不用 Runtime 时退回 `skills/case-design/SKILL.md` 的 15 阶段定义执行，业务规则完全一致。
+
 ## 产出位置
 
-- case-design → 项目根的 `case-design-out/`（自动创建）。
+- case-design → 项目根的 `case-design-out/`（自动创建；Runtime 状态在 `case-design-out/.runtime/state.json`）。
 - requirement-review → 项目根的 `requirement-review/`。
 
 ## 依赖
 
-- Python 3.7+：case-design 的回读校验脚本在 `skills/case-design/scripts/`；生成 Excel 需 `openpyxl`（缺失时 skill 会自动尝试安装并兜底报错）。
+- Python 3.7+：case-design 的回读校验脚本在 `skills/case-design/scripts/`；Runtime 在 `runtime/`；生成 Excel 需 `openpyxl`（缺失时 skill 会自动尝试安装并兜底报错）。
 - skill 正文中 Claude Code 专属建议（`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`.claude/settings.json`、`acceptEdits`）在 Codex 无对应物，忽略即可；等价行为用 Codex 自身配置实现。

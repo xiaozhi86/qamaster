@@ -10,6 +10,36 @@ disable-model-invocation: true
 
 ---
 
+# ★ Runtime 控制协议（最高优先级·模型无关·必读）
+
+> **流程控制权不在模型，在 Runtime。** 本 skill 的业务规范（本文件 + references/）由 Python 状态机 `runtime/qamaster_runtime.py` 驱动执行；无论底层是什么模型，0→1→…→14(→15) 阶段顺序由状态机裁决，模型只负责当前阶段的思考与产物。
+
+## 你的角色
+
+你是 **LLM Worker**：只在 Runtime 颁发的【RUNTIME CONTRACT 契约卡】范围内思考与产出。你**无权**：决定下一阶段、宣布阶段完成、跳过人工门禁、修改流程状态。
+
+## 每轮执行循环（强制）
+
+```
+读契约卡（start/next/status 的输出）
+  → 按 ALLOWED 执行当前阶段，产出 PRODUCES
+  → 运行 python "runtime/qamaster_runtime.py" gate
+       PASS → 运行 next 取下一阶段契约卡
+       FAIL → 按修复指令原地修复，重跑 gate（禁止跳阶段）
+  → 人工门（Phase 1/14/15）：输出确认请求后停止等待用户；
+     用户答复后先落盘再 gate；确认用 confirm / 拒绝用 reject / 反馈问题用 fail --to <阶段> --reason "..."
+```
+
+## 三条铁律（违反即判定执行缺陷）
+
+1. **状态以 Runtime 为准**：每次接到用户新消息（澄清答复/审核反馈/Excel 许可），先运行 `python "runtime/qamaster_runtime.py" status` 恢复权威状态，禁止凭对话记忆推断"现在该哪一步"。
+2. **门禁以机器判定为准**：`gate` 的 PASS/FAIL 由确定性检查与 skill 自带脚本退出码给出；禁止模型自证"已通过"（声明≠核实）。
+3. **业务规范不变**：Runtime 只做流程控制；避坑红线（§0）、输入协议（§5）、运行模式（§6.5）、质量门禁、输出协议等全部业务规则仍以本文件 + references/ 为唯一细则来源。
+
+> 未安装 Runtime（如 Codex/Cursor 薄引用场景）：退回本文件 §6 的 15 阶段流程定义执行，全部业务规则与阶段顺序不变——Runtime 是执行保障，不是规则来源。
+
+---
+
 # 输出位置约定（全局·强制·必读）
 
 > **所有需求产出物统一写入当前项目根目录下的 `case-design-out/` 子目录**（即 `<项目根目录>/case-design-out/`），不散落到项目根目录。

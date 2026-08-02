@@ -165,33 +165,42 @@ flowchart TD
 
 ---
 
-## 🏗️ 架构：单一事实源 + 薄引用包装
+## 🏗️ 架构：Agent Runtime Engineering（模型无关的流程强制）
+
+> **模型负责思考，Runtime 负责控制。** 自 v0.6 起，case-design 的 0-14(+Excel) 阶段流程不再依赖模型的指令遵循能力，而由内置 Python 状态机（`runtime/`）裁决：阶段迁移、质量门禁、人工确认点全部代码化，**任何模型（Claude / GPT / GLM / Gemini / DeepSeek）都不可绕过**。
 
 ```mermaid
 flowchart TD
-    subgraph SS["skills/  ·  单一事实源"]
-        CD["case-design/<br/>SKILL.md + references + scripts + config"]
-        RR["requirement-review/<br/>SKILL.md"]
-    end
-    SS -->|"运行时读取并执行 SKILL.md"| CC & CX & CU
-    subgraph CC["Claude Code 适配"]
-        CC1[".claude-plugin/<br/>plugin.json + marketplace.json"]
-        CC2["commands/<br/>/case-design · /requirement-review"]
-    end
-    subgraph CX["Codex 适配"]
-        CX1["AGENTS.md<br/>项目级指令，自动读取"]
-        CX2["codex/prompts/<br/>拷到 ~/.codex/prompts/"]
-    end
-    subgraph CU["Cursor 适配"]
-        CU1[".cursor/rules/*.mdc<br/>@ 引用，按需触发"]
-    end
+    U[用户 /case-design] --> CMD[commands/case-design.md]
+    CMD --> RT[runtime/qamaster_runtime.py<br/>Runtime Controller CLI]
+    RT --> SM[state_store.py<br/>原子 JSON 状态机<br/>case-design-out/.runtime/state.json]
+    RT --> PH[phases.py<br/>16 阶段注册表<br/>流程定义单一事实源]
+    RT -->|颁发契约卡| LLM[LLM Worker<br/>只做当前阶段的思考与产物]
+    LLM -->|gate| RT
+    RT -->|机器判定| GATE{Quality Gate}
+    GATE -->|verify_md/verify_cases/gen_excel| SCR[skills/case-design/scripts/]
+    GATE -->|人工门 Phase 1/14/15| USER[用户确认/审核/许可]
+    LLM -->|业务规范| SK[skills/case-design/SKILL.md + references/<br/>单一事实源·不变]
 ```
 
-**三条设计原则**：
+**三条设计原则**（在原有"单一事实源 + 薄引用"之上新增第 1 条）：
 
-- **单一事实源**：skill 正文只在 `skills/`，三平台不复制，零漂移。
-- **薄引用包装**：各平台适配文件只指引「读取并执行对应 SKILL.md」，不内嵌正文。
-- **skill 正文不改**：新增平台只在外围加适配，不碰 `skills/**` 内容。
+- **Runtime 控制流程**：`runtime/qamaster_runtime.py` 是唯一权威控制点。每阶段向模型颁发【RUNTIME CONTRACT 契约卡】（当前阶段/允许动作/禁止动作/产出物/出口门禁）；`gate` 由确定性检查 + skill 自带校验脚本判定，**禁止模型自证**；人工门（澄清/审核/Excel 许可）未确认前状态机不放行。
+- **单一事实源**：skill 正文仍只在 `skills/`，三平台不复制，零漂移。Runtime 只做流程控制，**不改变任何业务规则**（避坑红线/输入协议/运行模式/质量门禁仍以 SKILL.md + references/ 为唯一细则来源）。
+- **薄引用包装**：Claude Code 用 `commands/` 启动 Runtime；Codex/Cursor 无 Runtime 时退回 SKILL.md 的 15 阶段定义执行（行为一致，仅缺代码级强制）。
+
+**流程保障机制**：
+
+| 机制 | 实现 | 防什么 |
+|---|---|---|
+| 非法跳转拦截 | `next` 只允许 current+1（按深度裁剪序列），否则 RUNTIME_ERROR | 模型跳阶段/合并阶段 |
+| 机器质量门 | Phase 0（REQ+MANIFEST 落盘）、Phase 13（verify_md+verify_cases 回读）、Phase 15（gen_excel 生成+校验） | 产物缺失/不合格却自称完成 |
+| 人工确认门 | Phase 1 澄清 / Phase 14 审核 / Phase 15 Excel 许可；完整模式必须用户 confirm | 跳过澄清/默认审核通过/未经许可生成 Excel |
+| 断点续跑 | 状态落盘 `case-design-out/.runtime/state.json`；二次 `start` 恢复而非重置；上下文压缩后 `status` 恢复权威状态 | 长会话状态丢失、重复生成覆盖 |
+| 审核反馈回退 | `fail --to <阶段>` 回退到受影响最深阶段，从起点依次重走到 Phase 14 | 修改场景跳阶段 |
+| 自证测试 | `scripts/test_runtime.py`：57 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行 | Runtime 自身正确性 |
+
+> 设计方案见 [`qamaster-Agent-Runtime-Engineering-Refactor-Design-v1.0.0.md`](qamaster-Agent-Runtime-Engineering-Refactor-Design-v1.0.0.md)。
 
 ---
 
@@ -401,24 +410,29 @@ pip3 install openpyxl     # macOS / Linux
 
 ```
 .
-├─ skills/                          # 单一事实源（不随平台复制）
+├─ runtime/                         # ★ Agent Runtime（流程状态机，模型无关的流程强制）
+│  ├─ qamaster_runtime.py           # Runtime Controller CLI（start/status/next/gate/confirm/reject/fail/set/plan/verify）
+│  ├─ state_store.py                # 权威状态存储（原子 JSON 读写）
+│  └─ phases.py                     # 0-14(+Excel) 阶段注册表（流程定义单一事实源）
+├─ skills/                          # 业务规范单一事实源（不随平台复制）
 │  ├─ case-design/                  # 测试用例设计 skill
-│  │  ├─ SKILL.md                   # 常驻核心（frontmatter + 主流程 + ref 索引）
+│  │  ├─ SKILL.md                   # 常驻核心（frontmatter + Runtime 控制协议 + 主流程 + ref 索引）
 │  │  ├─ README.md                  # 详细使用说明
 │  │  ├─ 一分钟上手.md              # 极简上手卡片
 │  │  ├─ references/                # 各阶段细则（按需读取，不常驻）
-│  │  ├─ scripts/                   # 降本脚本（回读核对 / 知识综合，自动调用）
+│  │  ├─ scripts/                   # 降本脚本（回读核对 / 知识综合，Runtime 门禁复用）
 │  │  └─ config/                    # 校验规则 + 领域配置（单一事实源）
 │  └─ requirement-review/           # 需求评审 skill
 │     └─ SKILL.md
 ├─ .claude-plugin/                  # 平台一：Claude Code
 │  ├─ plugin.json
 │  └─ marketplace.json
-├─ commands/                        # Claude Code slash 命令
+├─ commands/                        # Claude Code slash 命令（case-design 启动 Runtime）
 ├─ AGENTS.md                        # 平台二：Codex 项目指令
 ├─ codex/prompts/                   # Codex 自定义 prompt（拷到 ~/.codex/prompts/）
 ├─ .cursor/rules/                   # 平台三：Cursor rule
-├─ scripts/check_plugin.py          # 插件结构自检
+├─ scripts/check_plugin.py          # 插件结构自检（含 Runtime 完整性校验）
+├─ scripts/test_runtime.py          # Runtime 自证测试（57 项断言，无 LLM）
 └─ .github/workflows/check-plugin.yml  # CI
 ```
 
@@ -426,20 +440,24 @@ pip3 install openpyxl     # macOS / Linux
 
 ## 🧪 开发与 CI
 
-本项目带一个结构自检脚本，CI 与本地均可运行：
+本项目带结构自检与 Runtime 自证测试，CI 与本地均可运行：
 
 ```bash
 python scripts/check_plugin.py
+python scripts/test_runtime.py
 ```
 
-该校验检查三平台适配层与 skills 结构完整性：`plugin.json` / `marketplace.json` 字段、各 `SKILL.md` frontmatter、`commands/` 与 `.cursor/rules/` frontmatter、Codex 适配必要文件、以及不应入库的 `__pycache__`/`.pyc`。CI 还会字节编译 skill 脚本做语法检查。
+`check_plugin.py` 校验三平台适配层、skills 结构与 **Runtime 完整性**：`plugin.json` / `marketplace.json` 字段、各 `SKILL.md` frontmatter、`commands/` 与 `.cursor/rules/` frontmatter、Codex 适配必要文件、`runtime/` 核心文件存在性 + 阶段注册表（编号 0-15 连续、人工门/许可门类型、引用细则存在）、以及不应入库的 `__pycache__`/`.pyc`。CI 还会字节编译 runtime 与 skill 脚本做语法检查。
+
+`test_runtime.py` 为 Runtime 自证测试（无 LLM，57 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪。
 
 本地运行完整检查：
 
 ```bash
-python scripts/check_plugin.py            # 插件结构自检
-python -m py_compile skills/case-design/scripts/*.py   # 脚本语法检查
-python skills/case-design/scripts/verify_cases.py --dump-rules   # 打印校验规则契约
+python scripts/check_plugin.py            # 插件结构自检（含 Runtime 完整性）
+python scripts/test_runtime.py            # Runtime 自证测试（57 项断言，无 LLM）
+python -m py_compile runtime/*.py skills/case-design/scripts/*.py   # 脚本语法检查
+python skills/case-design/scripts/verify_cases.py --dump-rules      # 打印校验规则契约
 ```
 
 ---

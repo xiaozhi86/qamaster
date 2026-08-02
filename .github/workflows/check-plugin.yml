@@ -16,8 +16,11 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: 插件结构自检（plugin.json / marketplace.json / skills / commands / rules）
+      - name: 插件结构自检（plugin.json / marketplace.json / skills / commands / rules / runtime）
         run: python scripts/check_plugin.py
 
-      - name: 字节编译 skill 脚本（语法检查）
-        run: python -m py_compile skills/case-design/scripts/*.py
+      - name: 字节编译 runtime 与 skill 脚本（语法检查）
+        run: python -m py_compile runtime/*.py skills/case-design/scripts/*.py scripts/test_runtime.py
+
+      - name: Runtime 自证测试（57 项断言，无 LLM）
+        run: python scripts/test_runtime.py
