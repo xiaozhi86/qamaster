@@ -27,6 +27,8 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RT = os.path.join(ROOT, "runtime", "qamaster_runtime.py")
 SKILL_SCRIPTS = os.path.join(ROOT, "skills", "case-design", "scripts")
+sys.path.insert(0, os.path.join(ROOT, "runtime"))
+import phases as _RT_PHASES  # noqa: E402
 
 REQ_ID = "自证需求-20260802"
 
@@ -308,6 +310,16 @@ def _run_suite(workdir):
     print("\n[9] 审核通过 → 知识沉淀后置动作 → Excel 许可门")
     r = run(workdir, "confirm", expect_rc=0)
     check("confirm 输出知识沉淀指引", "Knowledge_" in r.stdout and "MANIFEST" in r.stdout)
+    # 负路径1：未登记知识沉淀直接 next → 拒绝
+    r = run(workdir, "next", expect_rc=2)
+    check("未登记知识沉淀禁止进 Excel 门", "知识沉淀未完成" in r.stdout)
+    # 负路径2：知识总结结构不合格（缺维度）→ set --knowledge done 拒绝
+    bad_k = os.path.join(workdir, out, "Knowledge_%s.md" % REQ_ID)
+    w(workdir, os.path.join(out, "Knowledge_%s.md" % REQ_ID),
+      "# 知识总结\n\n---\n需求名称：x\n当前版本：v1.0\n首次生成：2026-08-02\n最近更新：2026-08-02\n来源统计：需求文档 1 条 / 澄清台账 1 条 / 测试用例 1 条\n---\n\n## 一、业务流程\n\nx\n")
+    r = run(workdir, "set", "--knowledge", "done", expect_rc=2)
+    check("知识总结缺维度时拒绝登记", "知识总结门禁未过" in r.stdout)
+    # 正路径：写合格知识总结 → 登记 → next
     w(workdir, os.path.join(out, "Knowledge_%s.md" % REQ_ID), KNOWLEDGE_MD)
     run(workdir, "set", "--knowledge", "done", expect_rc=0)
     r = run(workdir, "next", expect_rc=0)
@@ -380,6 +392,9 @@ def _run_suite(workdir):
         st = state_of(workdir3)
         check("放行后可推进（审计痕迹见 history auto_release）", st["status"] == "GATE_PASSED",
               "status=%s phase=%s" % (st["status"], st["current_phase"]))
+        # 知识沉淀后置动作（连跑模式同样强制）
+        w(workdir3, os.path.join(out, "Knowledge_%s.md" % REQ_ID), KNOWLEDGE_MD)
+        run(workdir3, "set", "--knowledge", "done", expect_rc=0)
         run(workdir3, "next", expect_rc=0)
         st = state_of(workdir3)
         check("自动放行后进入 Phase 15", st["current_phase"] == 15,
@@ -397,8 +412,59 @@ def _run_suite(workdir):
               and "Phase 4 " not in r.stdout, r.stdout)
         st = state_of(workdir4)
         check("skipped_phases=[3,4,10]", st["skipped_phases"] == [3, 4, 10])
+        # light 模式澄清门语义（仅 P0 阻断）：人工门默认 WAIT，confirm 后放行
+        w(workdir4, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
+        w(workdir4, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        run(workdir4, "gate", expect_rc=0)
+        run(workdir4, "next", expect_rc=0)          # Phase 1（light 裁不掉澄清）
+        st = state_of(workdir4)
+        check("light 模式 Phase 1 仍为人工确认门", P_gate_of(st) == "confirm")
+        r = run(workdir4, "gate", expect_rc=0)
+        check("light 澄清门未答复时 WAIT", "GATE RESULT: WAIT" in r.stdout)
+        run(workdir4, "confirm", expect_rc=0)       # 无 P0 缺口，用户确认
+        st = state_of(workdir4)
+        check("light 澄清门 confirm 后放行", st["status"] == "GATE_PASSED")
     finally:
         shutil.rmtree(workdir4, ignore_errors=True)
+
+    print("\n[15] Excel 许可门：连跑模式用户已声明要 Excel → 自动放行")
+    workdir5 = tempfile.mkdtemp(prefix="qamaster-rt-test5-")
+    try:
+        run(workdir5, "start", "--req-id", REQ_ID, "--mode", "auto", expect_rc=0)
+        w(workdir5, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
+        w(workdir5, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        run(workdir5, "set", "--excel", "asked_yes", expect_rc=0)   # 用户已声明要 Excel
+        run(workdir5, "gate", expect_rc=0)
+        run(workdir5, "next", expect_rc=0)
+        run(workdir5, "confirm", expect_rc=0)
+        run(workdir5, "next", expect_rc=0)
+        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
+            run(workdir5, "gate", expect_rc=0)
+            run(workdir5, "next", expect_rc=0)
+        w(workdir5, os.path.join(out, "TestCases_%s.md" % REQ_ID),
+          TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
+        run(workdir5, "gate", expect_rc=0)
+        run(workdir5, "next", expect_rc=0)          # Phase 14
+        run(workdir5, "gate", expect_rc=0)          # 连跑自动放行审核门
+        w(workdir5, os.path.join(out, "Knowledge_%s.md" % REQ_ID), KNOWLEDGE_MD)
+        run(workdir5, "set", "--knowledge", "done", expect_rc=0)
+        run(workdir5, "next", expect_rc=0)          # Phase 15
+        st = state_of(workdir5)
+        check("进入 Phase 15", st["current_phase"] == 15)
+        if openpyxl_available():
+            r = run(workdir5, "gate", expect_rc=0)  # 已声明要 Excel → 自动放行并生成
+            check("已声明 Excel 时许可门自动放行（直接生成）", "GATE RESULT: PASS" in r.stdout)
+            st = state_of(workdir5)
+            check("自动放行后流程 DONE", st["status"] == "DONE",
+                  "status=%s" % st["status"])
+        else:
+            print("  [SKIP] openpyxl 不可用，跳过自动放行生成路径")
+    finally:
+        shutil.rmtree(workdir5, ignore_errors=True)
+
+
+def P_gate_of(st):
+    return _RT_PHASES.get_phase(st["current_phase"])["gate"]
 
 
 if __name__ == "__main__":

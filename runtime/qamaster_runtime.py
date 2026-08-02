@@ -250,6 +250,11 @@ def cmd_next(a):
     nxt = P.next_phase_id(st["current_phase"], st.get("depth") or "heavy")
     if nxt is None:
         _die("已是最后阶段")
+    # Phase 14 → 15 前：知识沉淀后置动作必须已登记（强制，防跳过知识总结直接进 Excel）
+    if st["current_phase"] == 14 and nxt == 15 and st.get("knowledge") != "done":
+        _die("知识沉淀未完成（knowledge!=done）：审核通过后须先生成 case-design-out/Knowledge_<需求标识>.md "
+             "并执行 `set --knowledge done`（会跑 verify_knowledge.py 结构校验），再 `next` 进 Excel 许可门。"
+             "知识总结为强制后置动作，不可跳过（references/knowledge.md 31.1）")
     prev = st["current_phase"]
     if prev not in st["completed"]:
         st["completed"].append(prev)
@@ -274,6 +279,28 @@ def cmd_gate(a):
         for ln in decision["lines"]:
             print("  " + ln)
         if decision["pass"]:
+            if gkind == "license" and phase["id"] == P.LAST_PHASE:
+                # 许可门自动放行（连跑/轻量且用户已声明要 Excel）：直接执行生成门禁，与 confirm 路径等价
+                print("已声明要 Excel，自动放行 → 执行生成门禁...")
+                ok_all = True
+                for chk in phase.get("gate_checks", []):
+                    ok, detail = _run_check(chk, st)
+                    print(("  [PASS] " if ok else "  [FAIL] ") + detail)
+                    ok_all = ok_all and ok
+                if ok_all:
+                    if P.LAST_PHASE not in st["completed"]:
+                        st["completed"].append(P.LAST_PHASE)
+                    st["status"] = "DONE"
+                    st["excel"] = "generated"
+                    state_store.log_event(st, "gate_pass", phase=P.LAST_PHASE, detail="via=declared_auto")
+                    state_store.save(path, st)
+                    print("\nGATE RESULT: PASS — Excel 已生成并通过校验，流程 DONE")
+                else:
+                    st["failed_gates"][str(P.LAST_PHASE)] = {"at": state_store._now()}
+                    state_store.log_event(st, "excel_fail")
+                    state_store.save(path, st)
+                    print("\nGATE RESULT: FAIL — Excel 生成/校验未过，按 references/excel.md 生成失败处理")
+                return
             st["status"] = "GATE_PASSED"
             state_store.log_event(st, "human_gate_release", phase=phase["id"], detail=decision["via"] or "")
             state_store.save(path, st)
@@ -360,7 +387,7 @@ def cmd_confirm(a):
             "审核已通过。按顺序执行后置动作（review_gate.md/knowledge.md/phase0_manifest.md 时机四）：\n"
             "  1) 整表更新 MANIFEST：状态=已完成、更新时间、用例文件清单\n"
             "  2) 生成/更新知识总结 case-design-out/Knowledge_<需求标识>.md（13维度，project_cases.py 投影读用例）\n"
-            "  3) 执行: %s set --knowledge done\n"
+            "  3) 执行: %s set --knowledge done（此时会跑 verify_knowledge.py 结构校验，不过则拒绝登记）\n"
             "  4) 执行: %s next（进入 Excel 许可门）\n"
             "若知识总结已生成，直接执行第 3/4 步。" % (_rt_cmd(), _rt_cmd())
         )
@@ -437,6 +464,15 @@ def cmd_fail(a):
     print(_card(st, target))
 
 
+def _run_knowledge_gate(st):
+    """执行知识沉淀门禁（verify_knowledge.py 结构校验），返回 (ok, detail)。"""
+    for chk in P.KNOWLEDGE_GATE:
+        ok, detail = _run_check(chk, st)
+        if not ok:
+            return (False, detail)
+    return (True, "verify_knowledge 通过")
+
+
 def cmd_set(a):
     st, path = _load_or_die(a.workdir)
     changed = []
@@ -463,8 +499,19 @@ def cmd_set(a):
         st["run_mode"] = a.mode
         changed.append("run_mode=%s" % a.mode)
     if a.knowledge is not None:
-        st["knowledge"] = a.knowledge
-        changed.append("knowledge=%s" % a.knowledge)
+        if a.knowledge == "done":
+            # 知识沉淀门禁：登记前必须真实通过 verify_knowledge.py 结构校验（防口头登记）
+            ok, detail = _run_knowledge_gate(st)
+            if not ok:
+                _die("知识总结门禁未过，拒绝登记 knowledge=done：\n%s" % detail)
+            st["knowledge"] = "done"
+            changed.append("knowledge=done（verify_knowledge 通过）")
+        elif a.knowledge == "na":
+            # 知识沉淀为 Phase 14 审核通过后的强制后置动作，不允许声明"不适用"跳过
+            _die("knowledge 不支持 na：知识总结为审核通过后的强制后置动作（references/knowledge.md 31.1），"
+                 "须生成 case-design-out/Knowledge_<需求标识>.md 后登记 done")
+        else:
+            _die("knowledge 取值仅支持 done（na 不允许：知识沉淀不可跳过）")
     if a.excel is not None:
         st["excel"] = a.excel
         changed.append("excel=%s" % a.excel)
@@ -574,7 +621,7 @@ def main():
     sp.add_argument("--depth", default=None)
     sp.add_argument("--input-kind", default=None, choices=list(state_store.INPUT_KINDS))
     sp.add_argument("--mode", default=None)
-    sp.add_argument("--knowledge", default=None, choices=["done", "na"])
+    sp.add_argument("--knowledge", default=None, choices=["done"])
     sp.add_argument("--excel", default=None, choices=["asked_yes", "asked_no", "generated", "declined", "na"])
     _wd(sp)
     sp.set_defaults(fn=cmd_set)

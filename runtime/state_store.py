@@ -87,7 +87,7 @@ def load(path):
 
 
 def save(path, st):
-    """原子写入状态。"""
+    """原子写入状态（Windows 上 os.replace 偶发 PermissionError：杀毒/索引短暂锁定，有限重试）。"""
     st["updated_at"] = _now()
     d = os.path.dirname(path)
     if d and not os.path.isdir(d):
@@ -96,7 +96,15 @@ def save(path, st):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(st, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        last_err = None
+        for attempt in range(4):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as e:
+                last_err = e
+                time.sleep(0.1 * (2 ** attempt))
+        raise last_err
     except BaseException:
         try:
             os.unlink(tmp)
