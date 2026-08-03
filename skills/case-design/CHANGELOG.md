@@ -6,6 +6,45 @@
 
 # 发布说明（面向使用者）
 
+## v0.6.0（2026-08-03，覆盖塌方事故修复）
+
+**本次发布解决一个真实事故**：在一次 case-design 执行中，Runtime 因 Bash 分类器临时不可用而启动失败，模型退回"手动降级"并最终只交付 8 条用例（需求覆盖矩阵 16 条只覆盖 5 条、3 个接口只覆盖 1 个、4 个 P0 风险只覆盖 2 个），却在交付摘要里填写"脚本校验摘要：全部覆盖"。根因是**降级路径无门禁 + 覆盖底线全为软提示 + token 预算条款存在"缩减用例集"歧义**三者叠加。
+
+**核心修复：把覆盖底线从"软提示"升级为"机器硬门"**
+
+`verify_cases.py` 在原有软性提示之外新增三项覆盖硬门（违约即 `exit=1`），口径集中于 `config/validation_rules.json` 的 `coverage_gates`（单一事实源，`domain_config.json` 可覆盖）：
+
+| 硬门 | 口径 | 本次事故中本会拦下 |
+| -- | -- | -- |
+| #4-H 需求追溯 | REQ 可解析时，需求条目被用例"关联需求ID"列引用比例 ≥ `req_trace_min_ratio`（默认 1.0） | 16 条需求只覆盖 5 条 → FAIL |
+| #6-H 接口三类 | 变更影响清单每个接口的契约/规则/场景三类覆盖齐全 | API2/API3 零用例 → FAIL |
+| RK P0/P1 风险 | 风险清单全部 P0/P1 须被用例"关联规则"列引用 | 4 个 P0 只覆盖 2 个 → FAIL |
+
+`full`=硬门；`auto_light`=完整模式仍硬、连跑/轻量降为软告警（交付摘要须显式列缺口）；`off`=关闭。
+
+**反编造**：脚本输出末尾固定打印 `##VERIFY_SUMMARY## k=v;...` 机器摘要块，交付摘要与审核话术的"脚本校验摘要"五项**必须逐字段摘自该块**；脚本未运行时一律填"未执行"，填数值即视为声明脚本已运行，声明与实际不符 = 3.1 红线。
+
+**降级协议分两情形（闭合"Runtime 一次故障放大成全程失控"）**：
+- 情形A（Runtime 未安装，路径候选全未命中）→ 允许薄客户端降级，但须守"降级最低门禁清单"（降级声明 / verify_md+verify_cases 仍强制经 Bash 跑且 exit=0 / 阶段顺序自证 / 事后对账）；
+- 情形B（Runtime 存在但调用失败，如分类器故障）→ **禁止降级**，退避重试至多 3 次，仍失败则暂停流程、**禁止落盘 TestCases**。原则：流程控制可降级，质量门禁不可降级。
+
+**Runtime 侧加固**：`start` 新增"降级产物对账"——检测到 TestCases 存在但 state 缺失/阶段<13 时打印补验警告；`gate` FAIL 文案补"禁止以任何理由绕过本门禁交付（含'脚本暂未运行/先交付后补验/核心用例先行'）"；FAIL 行补捞逻辑保证覆盖硬门 `[FAIL]` 修复指令不被 stdout 尾部缓冲截断。
+
+**规范层闭环**：
+- `commands/case-design.md` 路径解析改为候选列表存在性探测（修 `$0` 推导在 marketplace 缓存安装下打错路径）。
+- `SKILL.md` token 预算条款补"预算只决定怎么写、永不决定写哪些"反缩减硬条款；交付摘要脚本校验五项加"未执行"合法取值；3.1 红线加"不允许缩减用例集凑 token / 不允许未运行脚本就填数值"。
+- `references/output_write.md` 错误做法表加"缩减用例凑预算"行；`dedup_coverage.md` 第18章停止条件加"机器可判前提（覆盖矩阵闭合 + 三硬门通过）"；`selfcheck.md` 检查2/8/16 关联到新硬门；`review_gate.md` 审核话术同步反编造口径；`clarification.md` 补降级模式 P2 未闭环须逐条列清单。
+
+**回归安全**：`test_runtime.py` 由 15 组扩为 17 组（76 项全过），新增 [16] 降级产物对账（3 情形）、[17] 覆盖硬门违约→Phase13 gate FAIL + 补齐后 PASS（证明不误伤全覆盖用例集）。文件入口 stdout 与退出码语义保持（仅在末尾追加覆盖硬门段 + VERIFY_SUMMARY 行；exit 码新增覆盖硬门违约条件）。
+
+**变更文件**（11 个）：`verify_cases.py`（coverage_gates 加载 + coverage_gate_failures + verify_summary_line + dump-rules 投影 + print_findings 末尾段）、`config/validation_rules.json`（+`coverage_gates`）、`runtime/qamaster_runtime.py`（降级对账 + FAIL 文案 + [FAIL] 补捞 + tail 放大）、`scripts/test_runtime.py`（+TC_MD 库存行 + [16][17]）、`commands/case-design.md`（路径候选）、`SKILL.md`、`references/{output_write,dedup_coverage,selfcheck,review_gate,clarification}.md`、本 CHANGELOG。
+
+**升级方式**：本地 `git pull` 后跑 `python scripts/test_runtime.py`（应 76/0 过）与 `python skills/case-design/scripts/verify_cases.py --dump-rules`（确认覆盖硬门段）。已有合规用例集不受影响（三硬门在全覆盖时 PASS）；仅"覆盖不足却自称全覆盖"的产出物会被新硬门拦下。
+
+---
+
+# 发布说明（面向使用者·历史）
+
 > 本节为每个已发布版本的用户视角摘要；下方各版本技术条目面向维护者。两节互补，不重复。
 
 ## v0.4.0（2026-07-24，含 v0.3.0 合并发布）

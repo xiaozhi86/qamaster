@@ -72,6 +72,7 @@ TC_MD = """# 测试用例 - {req}
 | {req}_CREATE_002 | 见需求文档订单创建 | TP1:数量边界 | 边界 | 边界验证 | 订单 | 【订单模块】【创建订单】【数量边界1与99】【创建成功】 | 用户已登录；购物车有商品A001 | 1.数量设为1提交；2.数量设为99提交 | 接口返回200且status=SUCCESS；订单创建成功；库存数量减少对应值 | STEP | AI | AI | P1 | Completed |
 | {req}_CREATE_003 | 见需求文档订单创建 | TP1:数量非法 | 异常 | 输入验证 | 订单 | 【订单模块】【创建订单】【数量0与100非法】【返回参数非法错误】 | 用户已登录 | 1.数量设为0提交；2.数量设为100提交 | 接口返回400且错误码=PARAM_INVALID；订单未创建；库存未扣减 | STEP | AI | AI | P2 | Completed |
 | {req}_CREATE_004 | 见需求文档订单创建 | R1:重复提交幂等 | 幂等 | 幂等验证 | 订单 | 【订单模块】【创建订单】【并发重复提交】【仅创建一个订单】 | 用户已登录；购物车有商品A001 | 1.同一请求连续提交两次 | 仅创建1个订单；库存仅扣减一次；无重复消息事件 | STEP | AI | AI | P1 | Completed |
+| {req}_STOCK_001 | 见需求文档库存扣减 | R1:扣减时机 | 功能 | 数据验证 | 库存 | 【库存模块】【库存扣减】【下单即扣】【扣减成功】 | 用户已登录；商品A001库存充足 | 提交订单 | 接口返回200且status=SUCCESS；库存数量减少对应值；记录库存变更日志 | STEP | AI | AI | P1 | Completed |
 """
 
 KNOWLEDGE_MD = """# 知识总结 - 自证需求
@@ -461,6 +462,106 @@ def _run_suite(workdir):
             print("  [SKIP] openpyxl 不可用，跳过自动放行生成路径")
     finally:
         shutil.rmtree(workdir5, ignore_errors=True)
+
+    print("\n[16] 降级产物对账（v0.6.0）：TestCases 先于 Phase 13 落盘 → start 打印补验警告")
+    workdir6 = tempfile.mkdtemp(prefix="qamaster-rt-test6-")
+    try:
+        # 情形 a：state 不存在但 TestCases 已落盘 → 首次 start 即应告警
+        w(workdir6, os.path.join(out, "TestCases_%s.md" % REQ_ID),
+          TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
+        r = run(workdir6, "start", "--req-id", REQ_ID, expect_rc=0)
+        check("无 state + 有 TestCases → 降级对账警告", "降级产物对账警告" in r.stdout,
+              r.stdout[:400])
+        check("警告含补验指令", "verify_cases.py" in r.stdout and "REQ_" in r.stdout)
+        # 情形 b：state 在 Phase 1，TestCases 已落盘 → 续跑 start 应告警
+        w(workdir6, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
+        w(workdir6, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        run(workdir6, "gate", expect_rc=0)
+        run(workdir6, "next", expect_rc=0)   # Phase 1
+        r = run(workdir6, "start", expect_rc=0)
+        check("Phase<13 + 有 TestCases → 续跑告警", "降级产物对账警告" in r.stdout)
+        # 情形 c：Phase>=13（用例正当落盘后）→ 不再告警
+        # （Phase 13 gate 会真实跑 verify_md/verify_cases 校验已落盘的合规 TC_MD；
+        #   落盘发生在 gate 之前，故 gate 重跑后应 PASS 并推进到 Phase 14）
+        w(workdir6, os.path.join(out, "Clarification_Ledger_%s.md" % REQ_ID), LEDGER_MD.format(req=REQ_ID))
+        run(workdir6, "confirm", expect_rc=0)
+        run(workdir6, "next", expect_rc=0)
+        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
+            run(workdir6, "gate", expect_rc=0)
+            run(workdir6, "next", expect_rc=0)
+        st = state_of(workdir6)
+        assert st["current_phase"] == 13, "expect phase 13, got %s" % st["current_phase"]
+        # Phase 13 写盘门：对已落盘的合规 TC_MD 跑 verify_md/verify_cases → 应 PASS（硬门不误伤）
+        r = run(workdir6, "gate", expect_rc=0)
+        assert "GATE RESULT: PASS" in r.stdout, "P13 gate not passed:\n" + r.stdout[-1500:]
+        run(workdir6, "next", expect_rc=0)   # Phase 14
+        st = state_of(workdir6)
+        assert st["current_phase"] == 14, "expect phase 14, got %s" % st["current_phase"]
+        r = run(workdir6, "start", expect_rc=0)
+        check("Phase>=13 正当落盘 → 无降级告警", "降级产物对账警告" not in r.stdout)
+    finally:
+        shutil.rmtree(workdir6, ignore_errors=True)
+
+    print("\n[17] 覆盖硬门（v0.6.0）：#4-H / #6-H / RK 违约 → verify_cases exit=1 → Phase 13 gate FAIL")
+    workdir7 = tempfile.mkdtemp(prefix="qamaster-rt-test7-")
+    try:
+        run(workdir7, "start", "--req-id", REQ_ID, expect_rc=0)
+        # REQ 有 2 个二级标题条目；构造只引用其中 1 条、P0 风险 R1 无引用的用例集
+        w(workdir7, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
+        w(workdir7, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        run(workdir7, "gate", expect_rc=0)
+        run(workdir7, "next", expect_rc=0)
+        w(workdir7, os.path.join(out, "Clarification_Ledger_%s.md" % REQ_ID), LEDGER_MD.format(req=REQ_ID))
+        run(workdir7, "confirm", expect_rc=0)
+        run(workdir7, "next", expect_rc=0)
+        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
+            run(workdir7, "gate", expect_rc=0)
+            run(workdir7, "next", expect_rc=0)
+        st = state_of(workdir7)
+        assert st["current_phase"] == 13, "expect phase 13, got %s" % st["current_phase"]
+        # 坏用例集：关联需求ID 填"见需求文档"（笼统占位 → 2 条 REQ 均未覆盖 → #4-H FAIL）；
+        # 关联规则不含 R1，且风险描述 token（资金/反向/操作/漏洞）刻意不与用例文本重叠
+        # （避免 risk_coverage 的 token 兜底误判为"已覆盖"），使 RK P0/P1 硬门真正触发。
+        BAD_TC = """# 测试用例 - {req}
+
+## 规则建模
+
+- **订单创建主流程** [来源:需求文档订单创建]
+
+## 风险清单
+
+| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |
+| -- | -- | -- | -- | -- |
+| R1 | P0 | 资金反向操作漏洞（负数金额绕过校验） | 支付 | 需求推导 |
+
+## 测试点清单
+
+| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |
+| -- | -- | -- | -- |
+| TP1 | 正常 | 创建订单扣库存 | 订单 |
+
+{header}
+{sep}
+| {req}_CREATE_001 | 见需求文档 | TP1:创建订单 | 功能 | 接口验证 | 订单 | 【订单模块】【创建订单】【库存充足】【创建成功】 | 用户已登录；购物车有商品 | 提交订单 | 接口返回200且status=SUCCESS；订单状态为待支付；库存数量减少 | STEP | AI | AI | P1 | Completed |
+"""
+        w(workdir7, os.path.join(out, "TestCases_%s.md" % REQ_ID),
+          BAD_TC.format(req=REQ_ID, header=HEADER, sep=SEP))
+        r = run(workdir7, "gate", expect_rc=0)
+        check("覆盖硬门违约 → Phase 13 gate FAIL", "GATE RESULT: FAIL" in r.stdout,
+              r.stdout[-1500:])
+        check("FAIL 含 #4-H 需求追溯硬门", "#4-H" in r.stdout, r.stdout[-1500:])
+        check("FAIL 含 RK P0/P1 风险硬门", "RK" in r.stdout and "风险硬门" in r.stdout)
+        check("FAIL 文案含防逃逸声明", "禁止以任何理由绕过本门禁交付" in r.stdout)
+        st = state_of(workdir7)
+        check("硬门 FAIL 后停留 Phase 13", st["current_phase"] == 13 and st["status"] == "RUNNING")
+        # 修复为合规用例集 → gate PASS（证明硬门不误伤全覆盖用例集）
+        w(workdir7, os.path.join(out, "TestCases_%s.md" % REQ_ID),
+          TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
+        r = run(workdir7, "gate", expect_rc=0)
+        check("补齐后 gate PASS（硬门不误伤）", "GATE RESULT: PASS" in r.stdout, r.stdout[-1200:])
+        check("回读输出含 ##VERIFY_SUMMARY## 机器摘要块", "##VERIFY_SUMMARY##" in r.stdout)
+    finally:
+        shutil.rmtree(workdir7, ignore_errors=True)
 
 
 def P_gate_of(st):

@@ -71,6 +71,47 @@ def _die(msg, rc=2):
     sys.exit(rc)
 
 
+def _audit_degraded_artifacts(workdir, st):
+    """降级产物对账（v0.6.0 事故修复）：检测『无 Runtime 裁决却已有用例落盘』的降级执行痕迹。
+
+    触发条件（任一）：
+      a) state.json 不存在（首次 start），但 case-design-out/ 下已有 TestCases_*.md
+         —— 用例是在无状态机裁决的情况下落盘的（手动降级或他处生成）；
+      b) state.json 存在，current_phase < 13，但 TestCases_*.md 已存在
+         —— 用例先于写盘门(Phase 13)落盘，未过 verify_md/verify_cases 机器校验。
+    处理：打印显式警告（不阻断、不删除产出物），要求先对这些文件补跑
+    verify_md.py + verify_cases.py（Phase 13 的 gate_checks 同口径），
+    通过后方可信任其覆盖结论；降级期间交付摘要中『脚本校验摘要』若填了数值，一律视为编造。
+    """
+    try:
+        tc_hits = sorted(glob.glob(os.path.join(workdir, "case-design-out", "TestCases_*.md")))
+    except Exception:
+        return []
+    tc_hits = [t for t in tc_hits if os.path.isfile(t)]
+    if not tc_hits:
+        return []
+    phase = (st or {}).get("current_phase", -1) if st else -1
+    degraded = (st is None) or (phase < 13)
+    if not degraded:
+        return []
+    names = [os.path.basename(t) for t in tc_hits]
+    print("!" * 64)
+    print("【降级产物对账警告】检测到未经 Runtime 裁决的用例产出物（v0.6.0 事故修复）：")
+    for n in names:
+        print("  ! case-design-out/%s" % n)
+    print("  原因: %s" % ("state.json 缺失——用例为无状态机裁决的降级执行产物" if st is None
+                       else "当前阶段=Phase %s(<13)——用例先于写盘门落盘，未过机器校验" % phase))
+    print("  处置（强制·先补验后信任）: 对每个文件补跑写盘门同口径校验——")
+    print("    python \"%s\" \"case-design-out/<文件>\"  （结构）" % os.path.join(SKILL_SCRIPTS, "verify_md.py"))
+    print("    python \"%s\" \"case-design-out/<文件>\" \"case-design-out/REQ_<需求标识>.md\"  （内容+覆盖硬门）" % os.path.join(SKILL_SCRIPTS, "verify_cases.py"))
+    print("  verify_cases.py 现含覆盖硬门（#4-H 需求引用率/#6-H 接口三类/RK P0-P1 风险），")
+    print("  exit=1 即覆盖不达标——须补齐用例后重写，禁止以『核心用例已交付』收尾。")
+    print("  降级期间该产出物的交付摘要若『脚本校验摘要』填了数值而非『未执行』，一律视为编造（SKILL.md 3.1 红线）。")
+    print("!" * 64)
+    print()
+    return names
+
+
 def _rt_cmd():
     return 'python "%s"' % os.path.abspath(__file__)
 
@@ -99,11 +140,23 @@ def _run_check(chk, st):
                                   encoding="utf-8", errors="replace", timeout=600)
         except Exception as e:
             return (False, "%s: 执行异常 %s" % (chk["label"], e))
-        tail = (proc.stdout or "").strip().splitlines()
-        tail = tail[-12:] if len(tail) > 12 else tail
+        all_lines = (proc.stdout or "").strip().splitlines()
+        tail = all_lines[-25:] if len(all_lines) > 25 else all_lines
         detail = "%s: exit=%d" % (chk["label"], proc.returncode)
-        if proc.returncode != 0 and tail:
-            detail += "\n----- 脚本输出(尾部) -----\n" + "\n".join(tail)
+        if proc.returncode != 0:
+            if tail:
+                detail += "\n----- 脚本输出(尾部) -----\n" + "\n".join(tail)
+            # [FAIL] 行是修复指令本体；软提示明细较长时可能被截断出 tail，须全量补捞，
+            # 否则模型拿不到可执行的修复目标（v0.6.0 事故修复·覆盖硬门）
+            fail_lines = [ln for ln in all_lines if ln.strip().startswith("[FAIL]")]
+            missing_fails = [ln for ln in fail_lines if not any(ln in t for t in tail)]
+            if missing_fails:
+                detail += "\n----- 硬门 FAIL 明细(补捞) -----\n" + "\n".join(missing_fails[:10])
+        else:
+            # 成功时保留摘要行（##VERIFY_SUMMARY##/结论行），供 gate 输出取证与交付摘要摘抄
+            keep = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##") or "结论" in ln or "硬门" in ln]
+            if keep:
+                detail += " | " + " ; ".join(keep)[:300]
         return (proc.returncode == 0, detail)
     return (False, "未知检查类型: %s" % kind)
 
@@ -198,6 +251,7 @@ def cmd_start(a):
     except state_store.StateCorruptError as e:
         _die(str(e) + "。请先人工检查/备份后删除该文件再 start")
     if existing and not a.fresh:
+        _audit_degraded_artifacts(workdir, existing)
         phase = P.get_phase(existing["current_phase"])
         print("检测到进行中的流程（断点续跑，禁止重新生成覆盖已落盘产物）:")
         print("  req_id=%s phase=%d(%s) status=%s" % (
@@ -206,6 +260,7 @@ def cmd_start(a):
         print()
         print(_card(existing, phase))
         return
+    _audit_degraded_artifacts(workdir, None)
     st = state_store.new_state("case-design", a.req_id or "", workdir)
     if a.mode:
         st["run_mode"] = a.mode
@@ -334,6 +389,8 @@ def cmd_gate(a):
         state_store.log_event(st, "gate_fail", detail="; ".join(d for ok, d in results if not ok))
         state_store.save(path, st)
         print("\nGATE RESULT: FAIL — 禁止进入下一阶段。请按上方 [FAIL] 项原地修复后重跑 `gate`。")
+        print("禁止以任何理由绕过本门禁交付（含『脚本暂未运行/先交付后补验/核心用例先行』）——")
+        print("脚本不可运行时按降级协议暂停等待（SKILL.md Runtime 控制协议·降级），不得产出用例文件。")
 
 
 def _human_gate_decision(st, phase):

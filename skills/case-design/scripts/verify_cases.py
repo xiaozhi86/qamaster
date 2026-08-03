@@ -186,6 +186,110 @@ if "exception_subtypes" in _DOMAIN_CFG:
 if "overdesign_exempt_types" in _DOMAIN_CFG:
     OVERDESIGN_EXEMPT_TYPES = set(_DOMAIN_CFG["overdesign_exempt_types"])
 
+# ===== 覆盖硬门（v0.6.0·事故修复）=====
+# 根因：降级/手动模式下"核心用例先交付、其余待后续轮次"的缩减行为无任何机器信号暴露，
+# #4 需求追溯/#6 接口三类/P0-P1 风险覆盖全为软提示，模型可在交付摘要里编造"全部覆盖"。
+# 本节把三项从软提示升级为可配置硬门（单一事实源 coverage_gates，domain_config 可覆盖）。
+# Runtime gate 调本脚本时，若硬门 FAIL 被 stdout 尾部缓冲截断，gate 侧另有 [FAIL] 行
+# 补捞逻辑（qamaster_runtime._run_check），保修复指令完整落进 gate 输出。
+_CG = dict(_RULES.get("coverage_gates", {}))
+_CG.update({k: v for k, v in _DOMAIN_CFG.get("coverage_gates", {}).items()})
+
+
+def _gate_mode(raw, default="full"):
+    """归一化硬门取值：full=硬门(exit=1) / auto_light=连跑轻量降级为软告警 / off=关闭。"""
+    v = str(raw if raw is not None else default).strip().lower()
+    if v in ("full", "hard", "on", "true"):
+        return "full"
+    if v in ("auto_light", "auto", "light", "soft"):
+        return "auto_light"
+    if v in ("off", "none", "false", "disabled"):
+        return "off"
+    return default
+
+
+COVERAGE_GATES = {
+    # #4-H：需求条目被用例"关联需求ID"列引用的最低比例（REQ 可解析时生效）
+    "req_trace_min_ratio": float(_CG.get("req_trace_min_ratio", 1.0)),
+    # #6-H：变更接口三类覆盖硬门（full/auto_light/off）
+    "interface_three_class": _gate_mode(_CG.get("interface_three_class")),
+    # RK：P0/P1 风险被用例关联规则列引用硬门（full/auto_light/off）
+    "risk_p0p1": _gate_mode(_CG.get("risk_p0p1")),
+}
+
+
+def coverage_gate_failures(findings, run_mode="full"):
+    """汇总三项覆盖硬门的违约列表。返回 [(门名, 明细), ...]；空列表=全过。
+
+    口径（与 print_findings 软提示共用同一份 traces 数据，判定不重复计算）：
+      #4-H  需求追溯：traces.requirement=[uncovered, total]，REQ 可解析(total>0)时
+            引用率须 >= req_trace_min_ratio；REQ 缺失/不可解析(None/0)不判（由 #4 显式强提示接管）。
+      #6-H  接口三类：traces.interface=[uncovered_list, api_total, ...]，api_total>0 时
+            uncovered_list 须为空。
+      RK    P0/P1 风险：traces.risk=[uncovered, p0p1, total]，p0p1>0 且 uncovered 非空即违约。
+
+    run_mode 语义：完整模式(full)一律按配置硬度判；连跑/轻量(auto/light)下
+    interface_three_class/risk_p0p1 配置为 auto_light 时降级为软告警（返回空，不进 exit=1）。
+    req_trace_min_ratio 不设模式豁免——完整/连跑/轻量均按同一比例硬判
+    （连跑/轻量允许未覆盖，但须由模型在交付摘要显式列出未覆盖清单，见 SKILL.md 交付摘要）。
+    """
+    fails = []
+    traces = findings.get("traces", {})
+    # #4-H 需求追溯硬门
+    unc_req, req_total = traces.get("requirement", [None, 0])
+    if unc_req is not None and req_total:
+        ratio = (req_total - len(unc_req)) / float(req_total)
+        if ratio < COVERAGE_GATES["req_trace_min_ratio"]:
+            fails.append(("#4-H 需求追溯硬门",
+                          "需求条目 %d 条、未被用例引用 %d 条（引用率 %.0f%% < 阈值 %.0f%%）：%s" % (
+                              req_total, len(unc_req), ratio * 100,
+                              COVERAGE_GATES["req_trace_min_ratio"] * 100,
+                              "、".join(str(u)[:40] for u in unc_req[:8]))))
+    # #6-H 变更接口三类硬门
+    unc_api, api_total, _ct = traces.get("interface", [[], 0, []])
+    if COVERAGE_GATES["interface_three_class"] != "off" and api_total and unc_api:
+        if not (COVERAGE_GATES["interface_three_class"] == "auto_light" and run_mode in ("auto", "light")):
+            fails.append(("#6-H 变更接口三类硬门",
+                          "变更接口 %d 个、缺契约/规则/场景三类覆盖 %d 个：%s" % (
+                              api_total, len(unc_api), "；".join(str(u)[:60] for u in unc_api[:5]))))
+    # RK P0/P1 风险硬门
+    unc_risk, p0p1, _rt = traces.get("risk", [None, 0, 0])
+    if COVERAGE_GATES["risk_p0p1"] != "off" and p0p1 and unc_risk:
+        if not (COVERAGE_GATES["risk_p0p1"] == "auto_light" and run_mode in ("auto", "light")):
+            fails.append(("RK P0/P1 风险硬门",
+                          "P0/P1 风险 %d 条、未被用例引用 %d 条：%s" % (
+                              p0p1, len(unc_risk), "；".join(str(u)[:60] for u in unc_risk[:5]))))
+    return fails
+
+
+def verify_summary_line(findings, hard_gate_fails=None):
+    """输出固定格式机器摘要行（##VERIFY_SUMMARY## ...），供交付摘要/审核话术逐字段摘抄。
+
+    反编造约束（SKILL.md 交付摘要）：五项脚本校验数值必须摘自本行，禁止凭印象手填；
+    未运行本脚本时五项一律填"未执行"，填数值即视为声明脚本已运行（声明与实际不符=输出不合格）。
+    hard_gate_fails：coverage_gate_failures 的返回（None=由本行按 full 模式自算）。"""
+    soft = findings["soft"]
+    traces = findings["traces"]
+    unc_req, req_total = traces["requirement"]
+    unc_api, api_total, _ct = traces["interface"]
+    unc_risk, p0p1, _rt = traces["risk"]
+    fields = {
+        "check13": soft["completeness"][0],
+        "check9_schema": ("skip" if soft["schema"][0] is None else soft["schema"][0]),
+        "risk_src_pending": len(findings["risk_source"][1]),
+        "req_total": (req_total if unc_req is not None else "na"),
+        "req_uncovered": (len(unc_req) if unc_req is not None else "na"),
+        "api_total": api_total,
+        "api_uncovered": len(unc_api),
+        "risk_p0p1": p0p1,
+        "risk_uncovered": (len(unc_risk) if unc_risk else 0),
+        "check15": soft["behavior"][0],
+        "hard_violations": len(findings["hard_violations"]),
+        "gate_fails": (len(hard_gate_fails) if hard_gate_fails is not None
+                       else len(coverage_gate_failures(findings))),
+    }
+    return "##VERIFY_SUMMARY## " + "; ".join("%s=%s" % (k, v) for k, v in fields.items())
+
 
 def split_row(line):
     s = line.strip()
@@ -1223,6 +1327,14 @@ def dump_rules():
     print("  场景类: H业务场景(主穿越/分支/异常/上下游) -> 追溯 SC<序号>")
     print("  收敛: 只对变更字段+受影响规则/场景；P0全量/P1全量或pairwise/P2P3采样；类别不同不合并")
     print("  #6 反向接口追溯: 每个变更接口须三类覆盖(契约presence+type+出参 / 规则R / 场景SC)；无受影响规则->跳规则类，无受影响场景->跳场景类")
+    cg = r.get("coverage_gates", {})
+    print()
+    print("【覆盖硬门（v0.6.0·不通过即 exit=1）】（config/validation_rules.json coverage_gates，domain_config 可覆盖）")
+    print("  #4-H 需求追溯: REQ 可解析时，需求条目被用例'关联需求ID'引用比例 >= %s（%s）" % (
+        cg.get("req_trace_min_ratio", 1.0), "REQ 缺失/不可解析不判，由 #4 显式强提示接管"))
+    print("  #6-H 接口三类: 每个变更接口三类覆盖齐全（缺类即 FAIL）；取值=%s" % cg.get("interface_three_class", "full"))
+    print("  RK   P0/P1 风险: 风险清单 P0/P1 均须被用例'关联规则'引用（未覆盖即 FAIL）；取值=%s" % cg.get("risk_p0p1", "full"))
+    print("  机器摘要块: 输出末尾打印 ##VERIFY_SUMMARY## k=v;... 行——交付摘要/审核话术的脚本校验数值必须逐字段摘自本行，禁止凭印象手填；未运行脚本一律填'未执行'")
     print()
     print("【软性检查（新增·不改变退出码）】")
     print("  检查13 断言完整性: 状态变更类用例(When含%s) Then 须含数据/状态副作用" % "/".join(["创建","支付","扣减","更新","删除","撤销","退款","发货"]))
@@ -1239,9 +1351,9 @@ def dump_rules():
 
 def print_findings(findings, basename, req_doc_lines=None):
     """打印 collect_all_findings 的结果（文件入口 Phase 13 回读用）。
-    输出与重构前 main() 内联打印字节级一致（回归安全）：同一份 .md 经
-    `python verify_cases.py <file>` 与重构前产出完全相同的 stdout。
-    内存内 gate 不调用本函数（gate 直接读 dict 做自修决策，不打 human-facing 报告）。"""
+    输出与重构前 main() 内联打印一致 + 末尾追加覆盖硬门结论与 ##VERIFY_SUMMARY## 机器摘要行。
+    内存内 gate 不调用本函数（gate 直接读 dict 做自修决策，不打 human-facing 报告）。
+    返回覆盖硬门违约列表（空=通过），供 main() 计入退出码。"""
     n = findings["n"]
     soft = findings["soft"]
     stats = findings["coverage"]
@@ -1462,7 +1574,23 @@ def print_findings(findings, basename, req_doc_lines=None):
     overall = "通过" if not hard_violations else "不通过"
     print("硬性校验结论: %s" % overall)
     print("（软性校验与覆盖统计不改变退出码，供模型 selfcheck 决策）")
+
+    # 覆盖硬门（v0.6.0）：#4-H 需求追溯 / #6-H 接口三类 / RK P0-P1 风险。
+    # 与上方软提示共用同一份 traces 数据；违约即 exit=1（配置见 config/validation_rules.json coverage_gates）。
+    gate_fails = coverage_gate_failures(findings, run_mode="full")
+    print("-" * 48)
+    print("【覆盖硬门·不通过即 exit=1】（coverage_gates: req_ratio=%.2f interface=%s risk=%s）" % (
+        COVERAGE_GATES["req_trace_min_ratio"], COVERAGE_GATES["interface_three_class"], COVERAGE_GATES["risk_p0p1"]))
+    if gate_fails:
+        for name, detail in gate_fails:
+            print("  [FAIL] %s: %s" % (name, detail))
+    else:
+        print("  全部通过（或无对应 section，由上方软提示接管）")
+
+    # 机器摘要块（反编造：交付摘要/审核话术的脚本校验数值必须逐字段摘自本行，禁止手填）
+    print(verify_summary_line(findings, hard_gate_fails=gate_fails))
     print("=" * 48)
+    return gate_fails
 
 
 def main():
@@ -1495,9 +1623,9 @@ def main():
     findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines)
     # 附 data_rows 供 print_findings 复算 id/field 分组（幂等，与原 main 调用次序一致）
     findings["_data_rows"] = data_rows
-    print_findings(findings, os.path.basename(path), req_doc_lines=req_doc_lines)
+    gate_fails = print_findings(findings, os.path.basename(path), req_doc_lines=req_doc_lines)
 
-    return 1 if findings["hard_violations"] else 0
+    return 1 if (findings["hard_violations"] or gate_fails) else 0
 
 
 if __name__ == "__main__":

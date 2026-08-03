@@ -7,14 +7,25 @@ argument-hint: "[可选：需求标识 / 需求文档 / 指令]"
 
 ## 路径解析（先做·一次）
 
-本命令文件位于 plugin 根目录的 `commands/` 下，Runtime 位于同级 `../runtime/`。用 Bash 定位 plugin 根并缓存：
+本命令文件位于 plugin 根目录的 `commands/` 下，Runtime 位于同级 `../runtime/`。**候选列表存在性探测**（v0.6.0 修复：单一 `$0` 推导在 marketplace 缓存安装下会打错路径）：
 
 ```bash
-PLUGIN_ROOT=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd); [ -f "$PLUGIN_ROOT/runtime/qamaster_runtime.py" ] || PLUGIN_ROOT="<本仓库实际安装路径>"
+# 有序候选：逐一 [ -f ] 探测，取第一个命中
+PLUGIN_ROOT=""
+for c in \
+  "$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)" \
+  "$HOME/.claude/plugins/qamaster" \
+  $(ls -d "$HOME"/.claude/plugins/cache/qamaster/qamaster/*/ 2>/dev/null | sort -V | tail -1) \
+  "D:/qamaster" \
+; do
+  [ -n "$c" ] && [ -f "${c%/}/runtime/qamaster_runtime.py" ] && PLUGIN_ROOT="${c%/}" && break
+done
 echo "PLUGIN_ROOT=$PLUGIN_ROOT"
 ```
 
-> 若 `$0` 不可用（多数 Claude Code 版本），直接用 plugin 实际路径替换（本地开发为仓库根，如 `D:/qamaster`；marketplace 安装为 `~/.claude/plugins/qamaster`）。Runtime 仅用 Python 标准库，需 Python 3.7+（Windows 用 `python`，macOS/Linux 可用 `python3`）。
+- 候选 4 为本地开发仓库路径，按实际克隆位置调整；候选 3 为 marketplace 缓存安装（glob 取版本号最大者）。
+- **全部候选未命中 → 判定"Runtime 未安装"**：允许进入薄客户端降级（SKILL.md Runtime 控制协议·情形A，带降级最低门禁）。
+- **候选命中但执行报错**（如 Bash 分类器暂不可用）→ 判定"Runtime 存在但调用失败"：**禁止降级**，按 SKILL.md 降级协议情形B 退避重试，仍失败则暂停流程、不得落盘 TestCases。
 
 ## 第一步：启动 Runtime（必须先做）
 
