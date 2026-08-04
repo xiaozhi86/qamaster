@@ -121,6 +121,69 @@ def _fmt_cmd(cmd, st):
     return cmd.replace("{skill_scripts}", SKILL_SCRIPTS).replace("{req_id}", req)
 
 
+def _backfill_artifacts(st, phase, checkpoint_path, stdout_lines=None):
+    """v0.7.0: gate PASS 时解析检查点产物，回填 state.json['artifacts'][<phase>]。
+
+    从 phase-gate stdout 的 ##PHASE_ARTIFACTS## 行解析各 prefix 的 ID 范围
+    （R/RK/TP/API/SC/A），写入 artifacts[<phase>]={"ids":{prefix:"1-24"},...,"passed":True}。
+    供契约卡 PRIOR_ARTIFACTS 渲染实际 ID 范围（不靠模型记忆）。stdout 无该行时退回标记。
+    """
+    if "artifacts" not in st or not isinstance(st.get("artifacts"), dict):
+        st["artifacts"] = {}
+    entry = {"checkpoint": os.path.basename(checkpoint_path), "passed": True, "ids": {}}
+    if stdout_lines:
+        for ln in stdout_lines:
+            s = ln.strip()
+            if s.startswith("##PHASE_ARTIFACTS##"):
+                # 格式: ##PHASE_ARTIFACTS## <phase>:R=1-24(24);RK=1-17(17);...
+                body = s[len("##PHASE_ARTIFACTS##"):].strip()
+                if ":" in body:
+                    segs = body.split(":", 1)[1]
+                    for seg in segs.split(";"):
+                        if "=" in seg:
+                            k, v = seg.split("=", 1)
+                            entry["ids"][k.strip()] = v.strip()
+                break
+    st["artifacts"][str(phase)] = entry
+
+
+def _prior_artifacts_block(st, phase):
+    """v0.7.0: 渲染契约卡的 PRIOR_ARTIFACTS 段——按当前阶段 consumes 注入上游制品 ID 范围。
+
+    不靠模型记忆：runtime 把已沉淀阶段的实际 ID 范围（R1-R24 / RK1-RK17 等）+ 台账/REQ
+    注入契约卡。模型无需读检查点文件即可知上游有哪些 ID 可引用。
+    """
+    consumes = phase.get("consumes", [])
+    if not consumes:
+        return ""
+    workdir = st.get("workdir", os.getcwd())
+    req_id = st.get("req_id", "")
+    out = os.path.join(workdir, "case-design-out")
+    artifacts = st.get("artifacts", {})
+    lines = ["PRIOR_ARTIFACTS（本阶段必须消费的上游制品·由 Runtime 注入，勿凭记忆）:"]
+    for c in consumes:
+        if c == "req":
+            p = os.path.join(out, ("REQ_%s.md" % req_id) if req_id else "REQ_<需求标识>.md")
+            lines.append("  需求文档: case-design-out/%s" % os.path.basename(p))
+        elif c == "ledger":
+            p = os.path.join(out, ("Clarification_Ledger_%s.md" % req_id) if req_id else "")
+            if p and os.path.exists(p):
+                lines.append("  澄清台账: case-design-out/%s（已解决/待确认/假设 见台账）" % os.path.basename(p))
+        elif c.isdigit():
+            art = artifacts.get(c, {})
+            ids = art.get("ids", {})
+            if ids:
+                id_desc = " | ".join("%s=%s" % (k, v) for k, v in ids.items())
+                lines.append("  Phase %s 制品: %s（已沉淀·ID 范围）" % (c, id_desc))
+            else:
+                cp = os.path.join(out, ".runtime", "checkpoint_%s.md" % c)
+                mark = "（已沉淀）" if os.path.exists(cp) else "（未沉淀·前置阶段未完成？）"
+                lines.append("  Phase %s 制品: case-design-out/.runtime/checkpoint_%s.md %s" % (c, c, mark))
+    lines.append("  消费约束: 关联规则列 R/RK/TP/API 须在上游清单内（悬空引用 exit=1）；用例等级须映射 RK 等级；")
+    lines.append("            台账'已解决'事实须落成断言；假设A<n> 须在台账假设清单内；台账'待确认'须闭环或转假设")
+    return "\n".join(lines)
+
+
 def _run_check(chk, st):
     """执行单条确定性检查，返回 (ok, detail)。"""
     workdir = st["workdir"]
@@ -133,6 +196,42 @@ def _run_check(chk, st):
         for pat in chk["patterns"]:
             hits.extend(glob.glob(os.path.join(workdir, pat)))
         return (bool(hits), "%s: %s" % (chk["label"], ("命中 %d 个" % len(hits)) if hits else "缺失"))
+    if kind == "phase_gate":
+        # v0.7.0: 阶段出口门禁——调 verify_cases.py --phase-gate <N> <checkpoint> --req .. --ledger ..
+        phase = chk.get("phase")
+        if phase is None:
+            return (False, "%s: phase_gate 缺 phase 参数" % chk["label"])
+        cp = os.path.join(workdir, "case-design-out", ".runtime", "checkpoint_%d.md" % phase)
+        req_path = os.path.join(workdir, "case-design-out",
+                                ("REQ_%s.md" % st.get("req_id", "")) if st.get("req_id") else "REQ_<需求标识>.md")
+        ledger_path = os.path.join(workdir, "case-design-out",
+                                  ("Clarification_Ledger_%s.md" % st.get("req_id", "")) if st.get("req_id") else None)
+        parts = ['python "%s" --phase-gate %d "%s"' % (os.path.join(SKILL_SCRIPTS, "verify_cases.py"), phase, cp)]
+        if os.path.exists(req_path):
+            parts.append('--req "%s"' % req_path)
+        if ledger_path and os.path.exists(ledger_path):
+            parts.append('--ledger "%s"' % ledger_path)
+        run_mode = st.get("run_mode", "full")
+        parts.append('--run-mode %s' % run_mode)
+        cmd = " ".join(parts)
+        try:
+            proc = subprocess.run(cmd, shell=True, cwd=workdir, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=600)
+        except Exception as e:
+            return (False, "%s: 执行异常 %s" % (chk["label"], e))
+        all_lines = (proc.stdout or "").strip().splitlines()
+        detail = "%s: exit=%d" % (chk["label"], proc.returncode)
+        fail_lines = [ln for ln in all_lines if ln.strip().startswith("[FAIL]")]
+        if proc.returncode != 0:
+            if fail_lines:
+                detail += "\n----- phase-gate FAIL 明细 -----\n" + "\n".join(fail_lines[:10])
+            elif all_lines:
+                detail += "\n----- 输出(尾部) -----\n" + "\n".join(all_lines[-15:])
+        # v0.7.0: gate PASS 时回填 artifacts（从 ##PHASE_ARTIFACTS## 行解析 ID 范围）+ 重置 gate_rounds
+        if proc.returncode == 0:
+            _backfill_artifacts(st, phase, cp, stdout_lines=all_lines)
+            st["gate_rounds"][str(phase)] = 0
+        return (proc.returncode == 0, detail)
     if kind == "script":
         cmd = _fmt_cmd(chk["cmd"], st)
         try:
@@ -216,6 +315,11 @@ def _card(st, phase, extra=""):
     lines.append("  2. 每次接到用户消息（澄清答复/审核反馈/Excel许可）后，先执行 `status` 或 `gate` 恢复权威状态再继续")
     lines.append("  3. 本阶段产物未过 gate，禁止进入下一阶段；模型无权自行宣布阶段完成")
     lines.append("  4. 产出物全部写入 <工作目录>/case-design-out/ 下；写盘约束见 output_write.md（单文件一次 Write，禁止 Edit 增量）")
+    # v0.7.0: 注入 PRIOR_ARTIFACTS（按当前阶段 consumes）
+    prior = _prior_artifacts_block(st, phase)
+    if prior:
+        lines.append("")
+        lines.append(prior)
     if extra:
         lines.append("")
         lines.append(extra)
@@ -381,16 +485,27 @@ def cmd_gate(a):
         print("  （本阶段无机器检查项，产物为内存产物/已由模型按契约完成；Runtime 记录通过）")
     if ok_all:
         st["status"] = "GATE_PASSED"
+        # v0.7.0: 有界返修——gate PASS 时重置 gate_rounds；FAIL 时计数（下方 else 分支）
+        if str(phase["id"]) in st.get("gate_rounds", {}):
+            st["gate_rounds"][str(phase["id"])] = 0
         state_store.log_event(st, "gate_pass", phase=phase["id"], detail="via=auto")
         state_store.save(path, st)
         print("\nGATE RESULT: PASS → 执行 `next` 查看下一阶段契约卡")
     else:
-        st["failed_gates"][str(phase["id"])] = {"at": state_store._now()}
+        # v0.7.0: 有界返修——auto 门 FAIL 计 gate_rounds，≥3 次强制人工提示（堵 silent infinite-retry）
+        st.setdefault("gate_rounds", {})
+        rounds = st["gate_rounds"].get(str(phase["id"]), 0) + 1
+        st["gate_rounds"][str(phase["id"])] = rounds
+        st["failed_gates"][str(phase["id"])] = {"at": state_store._now(), "rounds": rounds}
         state_store.log_event(st, "gate_fail", detail="; ".join(d for ok, d in results if not ok))
         state_store.save(path, st)
         print("\nGATE RESULT: FAIL — 禁止进入下一阶段。请按上方 [FAIL] 项原地修复后重跑 `gate`。")
-        print("禁止以任何理由绕过本门禁交付（含『脚本暂未运行/先交付后补验/核心用例先行』）——")
-        print("脚本不可运行时按降级协议暂停等待（SKILL.md Runtime 控制协议·降级），不得产出用例文件。")
+        if rounds >= 3:
+            print("【有界返修·v0.7.0】Phase %d 门禁连续失败 %d 次，疑似系统性问题：" % (phase["id"], rounds))
+            print("  请人工介入审查 [FAIL] 项，或执行 `fail --to <更早阶段> --reason \"...\"` 回退重走。")
+        else:
+            print("禁止以任何理由绕过本门禁交付（含『脚本暂未运行/先交付后补验/核心用例先行』）——")
+            print("脚本不可运行时按降级协议暂停等待（SKILL.md Runtime 控制协议·降级），不得产出用例文件。")
 
 
 def _human_gate_decision(st, phase):

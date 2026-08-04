@@ -51,14 +51,14 @@ TC_MD = """# 测试用例 - {req}
 
 ## 规则建模
 
-- **订单创建主流程** [来源:需求文档订单创建]
-- **库存扣减时机** [来源:需求文档库存扣减]
+- **R1 订单创建主流程** [来源:需求文档订单创建]
+- **R2 库存扣减时机** [来源:需求文档库存扣减]
 
 ## 风险清单
 
 | 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |
 | -- | -- | -- | -- | -- |
-| R1 | P0 | 库存超卖（并发扣减） | 订单 | 需求推导 |
+| RK1 | P0 | 库存超卖（并发扣减） | 订单 | 需求推导 |
 
 ## 测试点清单
 
@@ -68,11 +68,11 @@ TC_MD = """# 测试用例 - {req}
 
 {header}
 {sep}
-| {req}_CREATE_001 | 见需求文档订单创建 | R1:库存扣减、TP1:创建订单 | 功能 | 接口验证 | 订单 | 【订单模块】【创建订单】【库存充足】【创建成功】 | 用户已登录；购物车有商品A001数量2；库存充足 | 1.进入购物车点击提交订单；2.确认金额 | 接口返回200且status=SUCCESS；订单主存储中订单状态为待支付；库存数量减少2；发送订单创建消息事件 | STEP | AI | AI | P0 | Completed |
-| {req}_CREATE_002 | 见需求文档订单创建 | TP1:数量边界 | 边界 | 边界验证 | 订单 | 【订单模块】【创建订单】【数量边界1与99】【创建成功】 | 用户已登录；购物车有商品A001 | 1.数量设为1提交；2.数量设为99提交 | 接口返回200且status=SUCCESS；订单创建成功；库存数量减少对应值 | STEP | AI | AI | P1 | Completed |
-| {req}_CREATE_003 | 见需求文档订单创建 | TP1:数量非法 | 异常 | 输入验证 | 订单 | 【订单模块】【创建订单】【数量0与100非法】【返回参数非法错误】 | 用户已登录 | 1.数量设为0提交；2.数量设为100提交 | 接口返回400且错误码=PARAM_INVALID；订单未创建；库存未扣减 | STEP | AI | AI | P2 | Completed |
+| {req}_CREATE_001 | 见需求文档订单创建 | R1:订单创建、TP1:创建订单 | 功能 | 接口验证 | 订单 | 【订单模块】【创建订单】【库存充足】【创建成功】 | 用户已登录；购物车有商品A001数量2；库存充足 | 1.进入购物车点击提交订单；2.确认金额 | 接口返回200且status=SUCCESS；订单主存储中订单状态为待支付；库存数量减少2；发送订单创建消息事件 | STEP | AI | AI | P0 | Completed |
+| {req}_CREATE_002 | 见需求文档订单创建 | R1:数量边界、TP1:数量边界 | 边界 | 边界验证 | 订单 | 【订单模块】【创建订单】【数量边界1与99】【创建成功】 | 用户已登录；购物车有商品A001 | 1.数量设为1提交；2.数量设为99提交 | 接口返回200且status=SUCCESS；订单创建成功；库存数量减少对应值 | STEP | AI | AI | P1 | Completed |
+| {req}_CREATE_003 | 见需求文档订单创建 | R1:数量非法、TP1:数量非法 | 异常 | 输入验证 | 订单 | 【订单模块】【创建订单】【数量0与100非法】【返回参数非法错误】 | 用户已登录 | 1.数量设为0提交；2.数量设为100提交 | 接口返回400且错误码=PARAM_INVALID；订单未创建；库存未扣减 | STEP | AI | AI | P2 | Completed |
 | {req}_CREATE_004 | 见需求文档订单创建 | R1:重复提交幂等 | 幂等 | 幂等验证 | 订单 | 【订单模块】【创建订单】【并发重复提交】【仅创建一个订单】 | 用户已登录；购物车有商品A001 | 1.同一请求连续提交两次 | 仅创建1个订单；库存仅扣减一次；无重复消息事件 | STEP | AI | AI | P1 | Completed |
-| {req}_STOCK_001 | 见需求文档库存扣减 | R1:扣减时机 | 功能 | 数据验证 | 库存 | 【库存模块】【库存扣减】【下单即扣】【扣减成功】 | 用户已登录；商品A001库存充足 | 提交订单 | 接口返回200且status=SUCCESS；库存数量减少对应值；记录库存变更日志 | STEP | AI | AI | P1 | Completed |
+| {req}_STOCK_001 | 见需求文档库存扣减 | R2:扣减时机 | 功能 | 数据验证 | 库存 | 【库存模块】【库存扣减】【下单即扣】【扣减成功】 | 用户已登录；商品A001库存充足 | 提交订单 | 接口返回200且status=SUCCESS；库存数量减少对应值；记录库存变更日志 | STEP | AI | AI | P1 | Completed |
 """
 
 KNOWLEDGE_MD = """# 知识总结 - 自证需求
@@ -216,6 +216,35 @@ def openpyxl_available():
         return False
 
 
+def write_checkpoints(workdir, req_id):
+    """v0.7.0: Phase 3/5/7/8/10 现有 phase_gate 检查，需检查点占位文件。
+    Phase 8/10 用 TC_MD 内容（含用例表，使引用解析/覆盖校验有内容）。"""
+    out = "case-design-out"
+    cp_dir = os.path.join(workdir, out, ".runtime")
+    os.makedirs(cp_dir, exist_ok=True)
+    secs = {
+        3: "## 规则建模\n\n- **R1 订单创建主流程** [来源:需求文档]\n- **R2 库存扣减时机** [来源:需求文档]\n",
+        5: "## 风险清单\n\n| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |\n| -- | -- | -- | -- | -- |\n| RK1 | P0 | x | m | 需求推导 |\n",
+        7: "## 测试点清单\n\n| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |\n| -- | -- | -- | -- |\n| TP1 | 正常 | x | m |\n",
+        8: TC_MD.format(req=req_id, header=HEADER, sep=SEP),
+        10: TC_MD.format(req=req_id, header=HEADER, sep=SEP),
+    }
+    for pid, content in secs.items():
+        with open(os.path.join(cp_dir, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+            f.write(content)
+
+
+def advance_to_phase13(workdir):
+    """从 Phase 2（已 confirm 进入）推进到 Phase 13（写盘前）。
+    v0.7.0: Phase 3/5/7/8/10 有 phase_gate，需先写检查点。"""
+    run(workdir, "gate", expect_rc=0)  # Phase 2
+    write_checkpoints(workdir, REQ_ID)
+    for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
+        run(workdir, "next", expect_rc=0)
+        run(workdir, "gate", expect_rc=0)
+    run(workdir, "next", expect_rc=0)  # → Phase 13
+
+
 def main():
     print("== qamaster Runtime 自证测试 ==")
     workdir = tempfile.mkdtemp(prefix="qamaster-rt-test-")
@@ -270,13 +299,27 @@ def _run_suite(workdir):
 
     print("\n[5] Phase 2-12 自动门依序推进（验证严格顺序）")
     run(workdir, "set", "--depth", "heavy", expect_rc=0)
+    # v0.7.0: Phase 3/5/7/8/10 现在有 phase_gate 检查（需检查点文件）；
+    # test_runtime 验证状态机迁移而非真实内容校验，故用 run_debug（不 assert rc）跑 gate
+    # 并在需要的阶段补检查点占位文件，使 phase_gate PASS。
+    checkpoints = {3: "## 规则建模\n\n- **R1 订单创建主流程** [来源:需求文档]\n- **R2 库存扣减时机** [来源:需求文档]\n",
+                   5: "## 风险清单\n\n| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |\n| -- | -- | -- | -- | -- |\n| RK1 | P0 | x | m | 需求推导 |\n",
+                   7: "## 测试点清单\n\n| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |\n| -- | -- | -- | -- |\n| TP1 | 正常 | x | m |\n",
+                   8: TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP),
+                   10: TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP)}  # Phase 10 用含用例表的检查点（带 REQ 引用），使覆盖硬门 PASS
     expect_seq = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     for pid in expect_seq:
         r = run(workdir, "next", expect_rc=0)
         st = state_of(workdir)
         check("推进到 Phase %d" % pid, st["current_phase"] == pid)
+        # v0.7.0: 有 phase_gate 的阶段补检查点占位，使 gate PASS
+        if pid in checkpoints:
+            cp_dir = os.path.join(workdir, out, ".runtime")
+            os.makedirs(cp_dir, exist_ok=True)
+            with open(os.path.join(cp_dir, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+                f.write(checkpoints[pid])
         r = run(workdir, "gate", expect_rc=0)
-        check("Phase %d gate PASS" % pid, "GATE RESULT: PASS" in r.stdout)
+        check("Phase %d gate PASS" % pid, "GATE RESULT: PASS" in r.stdout, r.stdout[-400:])
     st = state_of(workdir)
     check("completed 连续 0-11", st["completed"] == list(range(0, 12)))
 
@@ -302,6 +345,13 @@ def _run_suite(workdir):
     st = state_of(workdir)
     check("回退到 Phase 8 且清除后续 completed", st["current_phase"] == 8 and st["completed"] == list(range(0, 8)))
     check("回退输出起点判定提示", "依次顺序执行至 Phase 14" in r.stdout)
+    # v0.7.0: 重走时 Phase 8/10 需补检查点占位（已在 [5] 写过 3/5/7；8 用 TestCases 内容、10 用覆盖率占位）
+    # [5] 已写 checkpoint_3/5/7/10；重走 8/10 时仍存在，phase_gate 应 PASS
+    # 但 [5] 的 checkpoint_8 未写（8 阶段当时靠空 gate_checks）。重走需补 8 检查点。
+    cp_dir = os.path.join(workdir, out, ".runtime")
+    os.makedirs(cp_dir, exist_ok=True)
+    with open(os.path.join(cp_dir, "checkpoint_8.md"), "w", encoding="utf-8") as f:
+        f.write(TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
     for pid in [9, 10, 11, 12, 13, 14]:
         run_debug(workdir, "gate")
         run_debug(workdir, "next")
@@ -373,12 +423,25 @@ def _run_suite(workdir):
         run(workdir3, "next", expect_rc=0)
         run(workdir3, "confirm", expect_rc=0)   # 澄清门确认 → Phase 1 GATE_PASSED
         run(workdir3, "next", expect_rc=0)      # 进入 Phase 2
-        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
-            run(workdir3, "gate", expect_rc=0)
+        run(workdir3, "gate", expect_rc=0)      # Phase 2 自动门 PASS（无机器检查）
+        # v0.7.0: Phase 3/5/7/8/10 需补检查点占位（与 [5] 同）
+        cp3 = {3: "## 规则建模\n\n- **R1 订单创建主流程** [来源:需求文档]\n- **R2 库存扣减时机** [来源:需求文档]\n",
+               5: "## 风险清单\n\n| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |\n| -- | -- | -- | -- | -- |\n| RK1 | P0 | x | m | 需求推导 |\n",
+               7: "## 测试点清单\n\n| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |\n| -- | -- | -- | -- |\n| TP1 | 正常 | x | m |\n",
+               8: TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP),
+               10: TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP)}
+        cp_dir3 = os.path.join(workdir3, out, ".runtime")
+        os.makedirs(cp_dir3, exist_ok=True)
+        for pid, content in cp3.items():
+            with open(os.path.join(cp_dir3, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+                f.write(content)
+        # Phase 2 已过 gate；3-12 next+gate（与 [5] 同：先 next 后 gate）
+        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
             run(workdir3, "next", expect_rc=0)
+            run(workdir3, "gate", expect_rc=0)
+        run(workdir3, "next", expect_rc=0)  # → Phase 13
         st = state_of(workdir3)
         assert st["current_phase"] == 13, "expect phase 13, got %s" % st["current_phase"]
-        # Phase 13 写盘门：先写盘再过门
         w(workdir3, os.path.join(out, "TestCases_%s.md" % REQ_ID),
           TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
         g13 = run(workdir3, "gate", expect_rc=0)
@@ -439,9 +502,23 @@ def _run_suite(workdir):
         run(workdir5, "next", expect_rc=0)
         run(workdir5, "confirm", expect_rc=0)
         run(workdir5, "next", expect_rc=0)
-        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
-            run(workdir5, "gate", expect_rc=0)
+        run(workdir5, "gate", expect_rc=0)          # Phase 2
+        # v0.7.0: Phase 3/5/7/8/10 需补检查点占位
+        cp5 = {3: "## 规则建模\n\n- **R1 订单创建主流程** [来源:需求文档]\n- **R2 库存扣减时机** [来源:需求文档]\n",
+               5: "## 风险清单\n\n| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |\n| -- | -- | -- | -- | -- |\n| RK1 | P0 | x | m | 需求推导 |\n",
+               7: "## 测试点清单\n\n| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |\n| -- | -- | -- | -- |\n| TP1 | 正常 | x | m |\n"}
+        cp_dir5 = os.path.join(workdir5, out, ".runtime")
+        os.makedirs(cp_dir5, exist_ok=True)
+        for pid, content in cp5.items():
+            with open(os.path.join(cp_dir5, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+                f.write(content)
+        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
+            if pid == 8 or pid == 10:
+                with open(os.path.join(cp_dir5, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+                    f.write(TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
             run(workdir5, "next", expect_rc=0)
+            run(workdir5, "gate", expect_rc=0)
+        run(workdir5, "next", expect_rc=0)          # → Phase 13
         w(workdir5, os.path.join(out, "TestCases_%s.md" % REQ_ID),
           TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
         run(workdir5, "gate", expect_rc=0)
@@ -486,9 +563,23 @@ def _run_suite(workdir):
         w(workdir6, os.path.join(out, "Clarification_Ledger_%s.md" % REQ_ID), LEDGER_MD.format(req=REQ_ID))
         run(workdir6, "confirm", expect_rc=0)
         run(workdir6, "next", expect_rc=0)
-        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
-            run(workdir6, "gate", expect_rc=0)
+        run(workdir6, "gate", expect_rc=0)  # Phase 2
+        # v0.7.0: Phase 3/5/7/8/10 需补检查点占位
+        cp6 = {3: "## 规则建模\n\n- **R1 订单创建主流程** [来源:需求文档]\n- **R2 库存扣减时机** [来源:需求文档]\n",
+               5: "## 风险清单\n\n| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |\n| -- | -- | -- | -- | -- |\n| RK1 | P0 | x | m | 需求推导 |\n",
+               7: "## 测试点清单\n\n| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |\n| -- | -- | -- | -- |\n| TP1 | 正常 | x | m |\n"}
+        cp_dir6 = os.path.join(workdir6, out, ".runtime")
+        os.makedirs(cp_dir6, exist_ok=True)
+        for pid, content in cp6.items():
+            with open(os.path.join(cp_dir6, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+                f.write(content)
+        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
+            if pid == 8 or pid == 10:
+                with open(os.path.join(cp_dir6, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+                    f.write(TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
             run(workdir6, "next", expect_rc=0)
+            run(workdir6, "gate", expect_rc=0)
+        run(workdir6, "next", expect_rc=0)  # → Phase 13
         st = state_of(workdir6)
         assert st["current_phase"] == 13, "expect phase 13, got %s" % st["current_phase"]
         # Phase 13 写盘门：对已落盘的合规 TC_MD 跑 verify_md/verify_cases → 应 PASS（硬门不误伤）
@@ -514,9 +605,7 @@ def _run_suite(workdir):
         w(workdir7, os.path.join(out, "Clarification_Ledger_%s.md" % REQ_ID), LEDGER_MD.format(req=REQ_ID))
         run(workdir7, "confirm", expect_rc=0)
         run(workdir7, "next", expect_rc=0)
-        for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
-            run(workdir7, "gate", expect_rc=0)
-            run(workdir7, "next", expect_rc=0)
+        advance_to_phase13(workdir7)
         st = state_of(workdir7)
         assert st["current_phase"] == 13, "expect phase 13, got %s" % st["current_phase"]
         # 坏用例集：关联需求ID 填"见需求文档"（笼统占位 → 2 条 REQ 均未覆盖 → #4-H FAIL）；

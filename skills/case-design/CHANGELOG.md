@@ -6,6 +6,39 @@
 
 # 发布说明（面向使用者）
 
+## v0.7.0（2026-08-04，阶段门禁前移 + 制品传递 + 反向引用/台账接入）
+
+**本次发布解决两个流程控制缺口**（设计依据 `skills/case-design/PHASE_GATE_DESIGN.md`）：
+1. **跨阶段制品靠模型记忆传递**——runtime 现携带制品注册表，契约卡注入 PRIOR_ARTIFACTS，上下文裁剪不丢；
+2. **中间阶段橡皮章 + 机器兜底集中在写盘后**——检查从 Phase 13 写盘后才跑，前移到 Phase 3/5/7/8/10 各阶段出口由 runtime 强制（`verify_cases.py --phase-gate <N>`）。
+
+**根因复盘（电销通话AI总结产物评审）**：D1 悬空引用(R26/R28)、D2 编号跳号(TP7)、C3 用例违背台账(Q4 放行 vs 丢弃)、C2 待确认项泄漏(Q5)、G3/G4/G8 台账事实未传成用例——全部"Phase 13 exit=0 通过"，因为 `verify_cases.py` 只查 section→case 不查 case→section、不读台账、不查编号连续性。
+
+**核心修复一：verify_cases.py 检查项加固**（exit=1 硬门 + 软探针）
+- **项1 反向引用完整性** `check_citation_resolution`：用例关联规则列引用的 R/RK/TP/API/SC 须在清单内真实存在（闭环 D1）。
+- **项2 section ID 连续性** `check_section_id_contiguity`：RK/TP/API/SC 编号无跳号（闭环 D2）。
+- **项3 假设标签对账** `check_assumption_resolution`：`假设A<n>` 须在假设清单内登记（闭环 RC7）。
+- **项4 台账接入** `parse_clarification_ledger` + `check_ledger_propagation`(5.5a 台账事实→用例覆盖) + `check_open_questions_gate`(5.5b 待确认门禁) + 一致性事实源(5.5c)：直击 RC0（校验器不读台账）。
+- **项5 行为一致性** `check_behavior_consistency`：用例断言与台账事实反义词矛盾嫌疑（闭环 C3·软）。
+- **项6 关键词覆盖探针** `keyword_coverage_probe`：非台账点(异步/脏payload/端点)覆盖（闭环 G5/G6/G7 + RC6）。
+- **项8 REQ 缺失门禁** `check_req_presence`：REQ 缺失/不可解析 exit=1（补 v0.6.0 拘留）。
+
+**核心修复二：门禁前移 + 制品传递（runtime）**
+- `state_store.py`：schema 1→2，增 `artifacts` 制品注册表 + `gate_rounds` 有界返修计数（schema=1 向后兼容）。
+- `phases.py`：各阶段增 `consumes` 依赖图；Phase 3/5/7/8/10 填 `gate_checks`（`phase_gate` kind，调 `verify_cases.py --phase-gate N`）；Phase 13 增 `--ledger` 参数。
+- `qamaster_runtime.py`：契约卡 `_card` 增 PRIOR_ARTIFACTS 段（按 consumes 注入上游制品指针）；`_run_check` 增 `phase_gate` kind + gate PASS 回填 artifacts；`cmd_gate` auto FAIL 计 `gate_rounds`，≥3 次强制人工提示（堵 silent infinite-retry）。
+- `verify_cases.py`：增 `--phase-gate <N> <checkpoint>` CLI 模式 + `run_phase_gate`，复用 `collect_all_findings` 保证写前/写后口径一致。
+
+**沉淀检查点机制**：Phase 3/5/7/8/10 结束写 `case-design-out/.runtime/checkpoint_<N>.md`（runtime 受控临时件，Phase 13 后清理），让沉淀机器可见，不违反"禁止增量写 TestCases.md"红线。
+
+**回归安全**：文件入口 `verify_cases.py <file> [req] [--ledger ..]` stdout/退出码字节级不变（新检查追加在 hard_violations/soft 桶，[FAIL] 行格式一致）；既有合规用例集在新门禁下仍 PASS（仅"覆盖不足/引用悬空/编号跳号/违背台账/待确认泄漏"被拦下）。`test_runtime.py` 由 17 组扩为 19 组（90+ 项全过），新增 [18] phase-gate 7 抓 TP7、[19] phase-gate 8 抓 R28 + 台账门禁抓 Q5。
+
+**变更文件**（8 个）：`verify_cases.py`（+collect_section_ids/检查项/phase-gate 模式）、`config/validation_rules.json`（+citation_resolution/section_contiguity/phase_gate_map/requirement_probe_keywords/source_scope/coverage_gates 扩/behavior_source.antonym_pairs）、`runtime/{state_store,phases,qamaster_runtime}.py`、`scripts/test_runtime.py`（+write_checkpoints/advance_to_phase13 辅助 + 检查点占位）、`SKILL.md`（阶段标注）、本 CHANGELOG、`PHASE_GATE_DESIGN.md`（设计文档）。
+
+**升级方式**：`git pull` 后跑 `python scripts/test_runtime.py`（应全过）与 `python skills/case-design/scripts/verify_cases.py --dump-rules`（确认 citation_resolution/section_contiguity 段）。已有 state.json（schema=1）自动兼容升级；已有合规用例集不受影响。
+
+---
+
 ## v0.6.0（2026-08-03，覆盖塌方事故修复）
 
 **本次发布解决一个真实事故**：在一次 case-design 执行中，Runtime 因 Bash 分类器临时不可用而启动失败，模型退回"手动降级"并最终只交付 8 条用例（需求覆盖矩阵 16 条只覆盖 5 条、3 个接口只覆盖 1 个、4 个 P0 风险只覆盖 2 个），却在交付摘要里填写"脚本校验摘要：全部覆盖"。根因是**降级路径无门禁 + 覆盖底线全为软提示 + token 预算条款存在"缩减用例集"歧义**三者叠加。

@@ -21,7 +21,7 @@ import os
 import tempfile
 import time
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # 运行模式与流程深度枚举（与 SKILL.md 6.5 / phase0_manifest.md 步骤五 一致）
 RUN_MODES = ("full", "auto", "light")          # full=完整(默认) / auto=连跑 / light=轻量
@@ -62,6 +62,8 @@ def new_state(workflow, req_id, workdir):
         "skipped_phases": [],                # 按 depth 裁剪的阶段
         "failed_gates": {},                  # {"<phase>": {"script":..,"rc":..,"at":..}} 审计痕迹
         "confirm_rounds": 0,                 # 当前 confirm 门禁的往返轮次（审核反馈修改次数）
+        "gate_rounds": {},                   # v0.7.0: {"<phase>": n} 自动门原地返修轮次（≥3 强制人工）
+        "artifacts": {},                     # v0.7.0: 制品注册表 {"req":.., "ledger":.., "3":{rule_ids}, "5":{risk_ids,levels}, "7":{tp_ids}, "8":{case_ids,rule_refs}}
         "history": [],                       # 阶段迁移审计日志 [{ts,event,phase,detail}]
         "created_at": _now(),
         "updated_at": _now(),
@@ -81,8 +83,16 @@ def load(path):
             st = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise StateCorruptError("state.json 损坏: %s (%s)" % (path, e))
-    if not isinstance(st, dict) or st.get("schema") != SCHEMA_VERSION:
-        raise StateCorruptError("state.json schema 不符: %s" % path)
+    if not isinstance(st, dict):
+        raise StateCorruptError("state.json 损坏: %s (非 dict)" % path)
+    schema = st.get("schema")
+    if schema not in (1, 2):
+        raise StateCorruptError("state.json schema 不符: %s (schema=%s)" % (path, schema))
+    # v0.7.0: schema=1 兼容——自动补 artifacts/gate_rounds，不报错
+    if schema == 1:
+        st["schema"] = 2
+        st.setdefault("artifacts", {})
+        st.setdefault("gate_rounds", {})
     return st
 
 

@@ -470,7 +470,12 @@
     "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列引用的最低比例（REQ 已落盘且可解析时生效；未落盘/不可解析时该门不判，由 #4 显式强提示接管）；interface_three_class=每个变更接口三类覆盖(契约presence+type+出参/规则/场景)硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（完整模式仍硬）；off=关闭（退回 v0.5.0 全软行为）。domain_config.json 同名字段可覆盖。",
     "req_trace_min_ratio": 1.0,
     "interface_three_class": "full",
-    "risk_p0p1": "full"
+    "risk_p0p1": "full",
+    "req_trace_presence": "full",
+    "ledger_propagation": "warn",
+    "open_questions": "full",
+    "keyword_coverage": "warn",
+    "assumption_resolution": "full"
   },
   "behavior_source": {
     "_doc": "检查15 业务行为来源追溯 + #5 反向行为来源追溯（dedup_coverage.md）。用例 Given/When/Then 断言的业务行为（状态流转目标/模态规则/约束值/异常机制）须有来源三选一：(a)行为 token 出现在需求文档/接口契约文档；(b)关联规则列引用 R<序号>/TP<序号>/API<序号>（规则建模/风险清单/变更影响清单已沉淀）；契约驱动分支下接口契约文档亦为合法来源；(c)关联规则或用例名称含假设标记 假设A<序号>/基于假设。三者皆无且行为信号不在需求文档->疑似无来源业务行为(脑补)，供 selfcheck 检查15 转问题(P0/P1)/假设(P2/P3)，不得静默保留。规则建模 section 每条规则项建议标 来源:需求文档<章节>/台账Q<序号>/假设A<序号>，无来源标记->疑似脑补规则(破 rule_coverage 自证洗白)。",
@@ -520,6 +525,64 @@
       "\\(假设"
     ],
     "citation_pattern": "(R|TP|API)\\d+",
-    "source_marker_pattern": "来源[:：]"
+    "source_marker_pattern": "来源[:：]",
+    "antonym_pairs": [
+      ["放行", "丢弃"],
+      ["放行", "阻断"],
+      ["禁止", "允许"],
+      ["不重试", "重试"],
+      ["升序", "降序"]
+    ]
+  },
+  "citation_resolution": {
+    "_doc": "反向引用完整性（v0.7.0·闭环 D1 悬空引用 + 台账Q悬空）。校验用例'关联规则'列引用的 R/RK/TP/API/SC/台账Q 是否在对应 section 清单内真实存在。仅校验 case->section 方向（section->case 由 risk/testpoint_coverage 已覆盖）。exit=1 硬门。external_citation_marker 为行级豁免标记（跨需求合法引用）。",
+    "citation_pattern": "(R|RK|TP|API|SC)(\\d+)",
+    "ledger_q_pattern": "台账Q(\\d+)",
+    "section_id_definitions": [
+      {"prefix": "R", "section": "规则建模", "kind": "prose"},
+      {"prefix": "RK", "section": "风险清单|风险分析|风险列表", "kind": "table", "id_col": 0},
+      {"prefix": "TP", "section": "测试点清单|测试点列表|测试点建模", "kind": "table", "id_col": 0},
+      {"prefix": "API", "section": "变更影响清单|接口契约模型|变更接口清单", "kind": "table", "id_col": 0},
+      {"prefix": "SC", "section": "场景清单|场景列表", "kind": "table", "id_col": 0},
+      {"prefix": "A", "section": "假设清单|假设登记|待确认问题与假设清单", "kind": "table", "id_col": 0}
+    ],
+    "external_citation_marker": "（外部引用）|（跨需求）|\\(外部引用\\)|\\(跨需求\\)"
+  },
+  "section_contiguity": {
+    "_doc": "section ID 编号连续性（v0.7.0·闭环 D2 跳号）。校验 R/RK/TP/API/SC 编号无跳号。check_ids 仅管用例 ID，本项管 section ID。R 按类目自由编号故 warn；RK/TP/API/SC 硬。取值 full=硬 exit=1 / warn=软提示 / off=关闭。domain_config 可覆盖。",
+    "R": "warn",
+    "RK": "full",
+    "TP": "full",
+    "API": "full",
+    "SC": "full"
+  },
+  "phase_gate_map": {
+    "_doc": "阶段出口门禁检查子集映射（v0.7.0·门禁前移）。声明每个阶段 --phase-gate 跑哪些检查，与 Phase 13 全量校验共用 collect_all_findings，避免重复或遗漏。runtime 在 Phase 3/5/7/8/10 gate 调用。",
+    "3": ["check_rule_source", "check_section_id_contiguity:R"],
+    "5": ["risk_source_report", "check_section_id_contiguity:RK"],
+    "7": ["testpoint_risk_linkage", "check_section_id_contiguity:TP"],
+    "8": ["collect_all_findings", "check_citation_resolution", "check_assumption_resolution", "check_ledger_propagation", "check_behavior_consistency", "check_section_id_contiguity:all"],
+    "10": ["coverage_gate_failures", "check_open_questions_gate", "check_ledger_propagation"],
+    "13": ["verify_md", "collect_all_findings", "coverage_gate_failures", "check_open_questions_gate"]
+  },
+  "requirement_probe_keywords": {
+    "_doc": "非台账点关键词覆盖探针（v0.7.0·闭环 G5/G6/G7/G8 + RC6）。每类分 surface（主题存在信号·出现在需求/台账即该主题存在）与 depth（深度测点·出现在用例才算该主题真正被测）。探针判定：surface 在源中且 depth 不在用例 -> 报覆盖缺口。闭合 G5-G8 假阴性（线程池命中≠trace传播已测）。旧格式（纯 list）兼容为 surface=depth=list。默认 warn。domain_config 可按域扩展。",
+    "categories": {
+      "可配置": {"surface": ["可配", "配置", "apollo", "动态"], "depth": ["配置后", "立即生效", "热更新", "热生效", "热刷新", "可设置", "配置即生效"]},
+      "重试退避": {"surface": ["重试", "退避"], "depth": ["指数退避", "max-attempts", "重试次数", "重试上限", "耗尽", "backoff"]},
+      "格式转换": {"surface": ["格式", "转换"], "depth": ["格式化", "yyyy-MM-dd", "BigDecimal", "类型转换", "转Integer", "转String"]},
+      "透传字段": {"surface": ["透传", "映射"], "depth": ["透传", "新增字段", "整体映射", "BeanCopy", "_id", "taskId", "taskName"]},
+      "异步上下文": {"surface": ["线程池", "异步", "提交"], "depth": ["TraceId", "MDC", "多租户", "上下文透传", "上下文传递", "链路", "traceId"]},
+      "异常输入": {"surface": ["报文", "payload", "输入"], "depth": ["非法JSON", "脏数据", "非JSON", "报文损坏", "malformed", "异型"]},
+      "端点可达": {"surface": ["HTTP端点", "端点", "POST"], "depth": ["可达", "可调", "实际调用", "返回200", "端点可调", "真实调用"]},
+      "消费组": {"surface": ["消费组", "消费", "offset"], "depth": ["独立消费组", "max-poll-records", "消费组隔离", "不阻塞主", "独立于主消费组"]},
+      "枚举完整性": {"surface": ["枚举", "标签"], "depth": ["枚举", "一级标签", "子标签", "完整", "未定义", "非0/1"]},
+      "幂等": {"surface": ["幂等", "重复"], "depth": ["幂等", "SETNX", "去重", "重复投递", "重复消费", "expire"]}
+    }
+  },
+  "source_scope": {
+    "_doc": "来源作用域（v0.7.0·闭环 D3 超需求）。从用例 G/W/T 抽字段/错误码 token，凡不在 REQ/DESIGN/假设 中即报疑似脑补。软判定。whitelist 为通用词豁免。",
+    "field_pattern": "\\b[a-z_]{4,}\\b",
+    "whitelist": ["code", "status", "data", "message", "result", "error", "success", "request", "response", "value", "type"]
   }
 }

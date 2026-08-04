@@ -205,14 +205,14 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 1. Requirement Analysis + Clarification（需求分析与澄清，落盘台账，问题按角色路由 @开发/@产品/@业务，详见 `references/clarification.md`）
 2. Test Requirement Analysis（测试需求分析，维度见 `references/coverage.md`）
-3. Rule Modeling（规则建模，详见 `references/modeling.md`；含**第3阶段出口机器 gate**——规则来源 check_rule_source，≤2轮内存自修）
+3. Rule Modeling（规则建模，详见 `references/modeling.md`；含**第3阶段出口机器 gate**——规则来源 check_rule_source + R 编号连续性，runtime 强制 `verify_cases.py --phase-gate 3`，检查点 `.runtime/checkpoint_3.md`）
 4. Specification Modeling（规格建模 SDD，State/Exception/契约标注事实来源由 @开发 校对，详见 `references/modeling.md`）
-5. Risk Analysis（风险分析，三源共验产出 P0-P3：需求推导+技术隐含@开发+业务领域@业务+缺陷反哺，详见 `references/risk.md`；含**第5阶段出口机器 gate**——风险来源 risk_source_report，≤2轮内存自修；含**第5阶段 critique 循环**——P0 漏标对抗式第二视角，≤2轮 critique 自修）
+5. Risk Analysis（风险分析，三源共验产出 P0-P3：需求推导+技术隐含@开发+业务领域@业务+缺陷反哺，详见 `references/risk.md`；含**第5阶段出口机器 gate**——风险来源 risk_source_report + RK 编号连续性，runtime 强制 `verify_cases.py --phase-gate 5`；含**第5阶段 critique 循环**——P0 漏标对抗式第二视角，≤2轮 critique 自修）
 6. Test Strategy Matching（测试策略匹配，决策表见 `references/methods.md`）
-7. Test Point Modeling（测试点建模，维度见 `references/coverage.md`）
-8. Test Case Generation（用例生成，Given/When/Then + AI友好 + 字段规范 + 断言完整性，详见 `references/modeling.md` 与 `references/quality_rules.md`；含**第8阶段出口机器 gate**——verify_cases.py run_inmemory 全量校验机器可判项，≤2轮内存自修，详见 `references/modeling.md` 15.7）
+7. Test Point Modeling（测试点建模，维度见 `references/coverage.md`；含**第7阶段出口机器 gate**——TP 编号连续性 + P0/P1 风险→≥1 TP，runtime 强制 `verify_cases.py --phase-gate 7`，检查点 `.runtime/checkpoint_7.md`）
+8. Test Case Generation（用例生成，Given/When/Then + AI友好 + 字段规范 + 断言完整性，详见 `references/modeling.md` 与 `references/quality_rules.md`；含**第8阶段出口机器 gate**——`verify_cases.py --phase-gate 8` 全量校验 + **反向引用完整性(D1) + 台账传递 + 行为一致性(C3) + 消费门禁**，runtime 强制；检查点 `.runtime/checkpoint_8.md`；详见 `references/modeling.md` 15.7）
 9. Duplicate Removal（去重，详见 `references/dedup_coverage.md`）
-10. Coverage Validation（覆盖率校验 + 反向需求追溯 #4 + 反向行为来源追溯 #5，详见 `references/dedup_coverage.md`）
+10. Coverage Validation（覆盖率校验 + 反向需求追溯 #4 + 反向行为来源追溯 #5 + **台账待确认门禁(C2) + 台账传递**，详见 `references/dedup_coverage.md`；含**第10阶段出口机器 gate**——runtime 强制 `verify_cases.py --phase-gate 10`，检查点 `.runtime/checkpoint_10.md`）
 11. Pre-Output Self-Check（输出前自查，15项：含检查13 断言完整性、检查14 对抗生成遍、检查15 业务行为来源追溯，详见 `references/selfcheck.md`，**内存内零文件操作**）
 12. Show Case Projection + Coverage in Chat（对话中展示用例紧凑投影+覆盖矩阵，只展示不写文件，明细见第13阶段文件）
 13. Final Output（一次性 Write .md，详见 `references/output_write.md`）
@@ -380,6 +380,36 @@ Excel 数据校验：未执行 / 七项全过 / 不通过(问题项及条数)
 `full`=硬门；`auto_light`=完整模式仍硬、连跑/轻量降为软告警（交付摘要须显式列缺口）；`off`=关闭。`domain_config.json` 的 `coverage_gates` 可按领域覆盖。输出末尾固定打印 `##VERIFY_SUMMARY## k=v;...` 机器摘要块——交付摘要与审核话术的脚本校验数值**必须逐字段摘自该块**（见交付摘要模板）。
 
 **agent 需要规则契约时**：运行 `python scripts/verify_cases.py --dump-rules`（经 Bash），即可拿到上述全部校验口径的紧凑投影（约 60 行），**无需读 `verify_cases.py` 源码**。设计用例前读这一份契约即可一次过校验，避免因漏读校验口径（枚举越界 / 断言无可观测锚点 / 存储杜撰 / section 格式不符 / 覆盖硬门违约）导致整文件重写。`references/*.md` 的散文规则与本清单冲突时，以本清单（机器判定）为准。
+
+---
+
+# 阶段门禁前移与制品传递（v0.7.0·模型无关·设计见 PHASE_GATE_DESIGN.md）
+
+> 闭合"中间阶段橡皮章 + 跨阶段制品靠模型记忆"两大流程控制缺口。Runtime 兑现"门禁以机器判定为准"的承诺，从首尾(0/13/15)扩展到中间 3/5/7/8/10。
+
+## 检查点机制（沉淀阶段）
+
+Phase 3/5/7/8/10 结束时，模型把**本阶段产物**写到 `case-design-out/.runtime/checkpoint_<阶段>.md`（每阶段一次性 Write，非 Edit；runtime 受控临时件，Phase 13 后清理）。runtime 的 gate 解析它 → 跑阶段专属检查 → 回填 `state.json` 制品注册表。**不违反"禁止增量写 TestCases.md"红线**——该红线针对最终 `TestCases_*.md`，检查点是 runtime 临时件。
+
+## 契约卡注入 PRIOR_ARTIFACTS
+
+Runtime 按**当前阶段 `consumes`** 从 `state.json.artifacts` 注入上游制品指针（不靠模型记忆）：
+- Phase 8 卡片注入：规则 R1-R24 / 风险 RK1-RKn(P0/P1 计数) / 测试点 TP1-TPn / 台账(已解决/待确认/假设) + 消费约束（关联规则列 R/RK/TP 须在清单内·悬空引用 exit=1；用例等级须映射 RK 等级；台账"已解决"事实须落成断言；假设A<n> 须在台账假设清单内；台账"待确认"须闭环或转假设）。
+- 上下文裁剪也不丢：制品注册表持久化在 state.json，契约卡每次按需渲染。
+
+## verify_cases.py 检查项加固（exit=1 硬门 + 软探针）
+
+- **项1 反向引用完整性**（D1）：用例关联规则列引用的 R/RK/TP/API/SC 须在清单内真实存在。
+- **项2 section ID 连续性**（D2）：RK/TP/API/SC 编号无跳号（R 为 warn，按类目自由编号）。
+- **项3 假设标签对账**（RC7）：`假设A<n>` 须在假设清单内登记。
+- **项4 台账接入**（C3/C2/G3-G8·直击 RC0）：`--ledger` 参数启用 `parse_clarification_ledger`，台账权威事实成为校验对照源（传递/待确认门禁/一致性）。
+- **项5 行为一致性**（C3·软）：用例断言与台账事实反义词矛盾嫌疑。
+- **项6 关键词覆盖探针**（G5/G6/G7 + RC6·软）：非台账点(异步/脏payload/端点/消费组)覆盖。
+- **项8 REQ 缺失门禁**：REQ 缺失/不可解析 exit=1（补 v0.6.0 拘留）。
+
+## 有界返修（堵 silent infinite-retry）
+
+`state.json.gate_rounds` 记自动门原地返修轮次；Phase N 门禁连续失败 ≥3 次 → runtime 强制输出"疑似系统性问题，请人工介入或 `fail --to <更早阶段>` 回退"，把"模型反复改不过"从静默变成可见停顿。
 
 ---
 
