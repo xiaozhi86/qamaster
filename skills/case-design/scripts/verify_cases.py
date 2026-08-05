@@ -247,7 +247,9 @@ def coverage_gate_failures(findings, run_mode="full"):
         ratio = (req_total - len(unc_req)) / float(req_total)
         if ratio < COVERAGE_GATES["req_trace_min_ratio"]:
             fails.append(("#4-H 需求追溯硬门",
-                          "需求条目 %d 条、未被用例引用 %d 条（引用率 %.0f%% < 阈值 %.0f%%）：%s" % (
+                          "需求条目 %d 条、未被用例引用 %d 条（引用率 %.0f%% < 阈值 %.0f%%）：%s。"
+                          "修复：补齐对应用例的'关联需求ID'列引用具体需求条目（如'见需求文档<二级标题>'），"
+                          "或确认该条目不在测试范围并登记假设" % (
                               req_total, len(unc_req), ratio * 100,
                               COVERAGE_GATES["req_trace_min_ratio"] * 100,
                               "、".join(str(u)[:40] for u in unc_req[:8]))))
@@ -937,16 +939,28 @@ def check_open_questions_gate(ledger, run_mode="full"):
 _ANTONYM_PAIRS = _RULES.get("behavior_source", {}).get("antonym_pairs", [])
 
 
+def _scenario_tokens(text):
+    """提取文本的场景 token：英文≥4 字符 + 中文 2-gram（用于场景相关性判定）。"""
+    toks = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", text))
+    for s in re.findall(r"[一-龥]+", text):
+        if len(s) >= 2:
+            for i in range(len(s) - 1):
+                toks.add(s[i:i + 2])
+    return toks
+
+
 def check_behavior_consistency(data_rows, lines, ledger=None):
     """用例↔台账/规则一致性检查（v0.7.0·闭环 C3·软判定）。
 
-    check_behavior_source 只查"行为有无来源"不查"是否一致"；本检查补该缺口：
-    当用例断言 token 与所引规则/台账事实互为反义（如用例写"丢弃"但台账 Q4 明确"放行"）-> 矛盾嫌疑。
+    check_behavior_source 只查"行为有无来源"不查"是否一致"；本检查补该缺口。
+    场景门控降噪：仅当用例 Then 断言单一结果 token，且某条台账事实【与该用例 Given/When
+    场景相关（共享场景 token）】明确含其反义词时，才判矛盾嫌疑。避免台账双向规则（如
+    Q4 放行 / conversation空丢弃）造成的全量噪声。SUM_005(丢弃,场景=recodeDuration缺失)
+    与 Q4(放行,场景=recodeDuration/SpEL) 场景相关且结果互斥 -> 精确命中。
     ledger: parse_clarification_ledger 返回的台账 dict（含权威事实集），可为 None（无台账时降级）。
     返回 (疑似条数, 疑似列表)。
     """
     suspects = []
-    # 构建反义词索引：token -> 其所有反义词集合
     antonym_map = {}
     for pair in _ANTONYM_PAIRS:
         if len(pair) == 2:
@@ -955,35 +969,41 @@ def check_behavior_consistency(data_rows, lines, ledger=None):
             antonym_map.setdefault(b, set()).add(a)
     if not antonym_map:
         return 0, []
-    # 台账权威事实摘要文本（用于一致性对照源）
-    ledger_text = ""
-    if ledger:
-        facts = ledger.get("facts", [])
-        ledger_text = " ".join(facts)
-    if not ledger_text:
-        return 0, []  # 无台账事实 -> 降级不判（避免误报）
+    facts = ledger.get("facts", []) if ledger else []
+    if not facts:
+        return 0, []  # 无台账事实 -> 降级不判
+    # 预计算每条 fact 的场景 token（用于场景相关性判定）
+    fact_scenes = [(f, _scenario_tokens(f)) for f in facts]
     for i, r in enumerate(data_rows, 1):
         if len(r) <= IDX_THEN:
             continue
         then = r[IDX_THEN] or ""
-        # 只看 Then（断言列），不看 Given/When（避免把场景描述当断言）
-        # 噪声抑制：Then 同时含反义词对的两者时跳过（多结果边界/正常异常对照测试，非矛盾）
+        scenario = " ".join(r[IDX_GIVEN:IDX_WHEN + 1]) if len(r) > IDX_WHEN else ""
+        case_scene = _scenario_tokens(scenario)
+        # 只看 Then（断言列）；Then 同时含反义词对两者 -> 多结果测试，跳过
         hit_tokens = []
         for tok in antonym_map:
             if tok in then:
-                antonyms_here = [a for a in antonym_map[tok] if a in then]
-                if antonyms_here:
-                    continue  # Then 同时含 token 与其反义词 -> 多结果测试，跳过
+                if any(a in then for a in antonym_map[tok]):
+                    continue  # Then 同时含 token 与反义词 -> 多结果，跳过
                 hit_tokens.append(tok)
         if not hit_tokens:
             continue
-        # 对照源：台账权威事实。Then 单一断言 token，台账含其反义词 -> 矛盾嫌疑
         for tok in hit_tokens:
             antonyms = antonym_map[tok]
-            contradicted = [a for a in antonyms if a in ledger_text]
-            if contradicted:
-                suspects.append("行%d: Then 断言'%s'，但台账事实含反义词'%s'（疑似矛盾·C3）"
-                                % (i, tok, "/".join(contradicted)))
+            for fact_text, fact_scene in fact_scenes:
+                if tok in fact_text:
+                    continue  # 该事实本身支持该结果，非矛盾
+                contra = [a for a in antonyms if a in fact_text]
+                if not contra:
+                    continue
+                # 场景门控：用例场景须与该事实场景相关（共享至少 1 个场景 token）
+                # 抑制"用例场景A的断言 vs 事实场景B的反义词"这种跨场景噪声
+                if not (case_scene & fact_scene):
+                    continue
+                suspects.append("行%d: Then 断言'%s'，但台账事实[%s]含反义词'%s'（场景相关·疑似矛盾·C3）"
+                                % (i, tok, fact_text[:30].replace("\n", " "), "/".join(contra)))
+                break  # 每条用例每 token 只报一条
     return len(suspects), suspects
 
 
@@ -2164,7 +2184,22 @@ def run_phase_gate(argv):
 
     parsed, err = parse_table_from_lines(lines)
     if parsed is None:
-        # 非用例表检查点（如 Phase 3/5/7 只有 section 无用例表）-> 跑 section 级检查
+        # v0.7.1: Phase 8/10 需要完整用例表；格式错（摘要文档）显式报，不静默 data_rows=[]
+        # 闭合执行日志暴露的"模型把 checkpoint_10 写成摘要 → #4-H 误报全未引用 → 反复改关联需求ID 格式"
+        if a.phase in (8, 10):
+            print("  [FAIL] 检查点格式不符: Phase %d 检查点必须含 15 列用例表（首列'用例ID'），"
+                  "当前无可解析用例表（%s）。请重写 checkpoint_%d.md 为完整用例表格式（复制 checkpoint_8.md 的用例表%s），"
+                  "而非摘要文档——此时应重写检查点格式，不要改用例内容或关联需求ID 格式。"
+                  % (a.phase, err or "未找到表头行", a.phase,
+                     "+ 追加覆盖分析" if a.phase == 10 else ""))
+            # 输出最小摘要块供 runtime 解析不崩
+            empty_findings = {"n": 0, "hard_violations": [], "soft": {}, "coverage": {},
+                              "traces": {"requirement": [None, 0]}, "risk_source": [{}, []],
+                              "section_ids": {}}
+            print(verify_summary_line(empty_findings, hard_gate_fails=[("检查点格式", "Phase %d 无用例表" % a.phase)]))
+            print("##PHASE_ARTIFACTS## %d:" % a.phase)
+            return 1
+        # Phase 3/5/7 无表正常（只含 section）
         data_rows = []
     else:
         _h, data_rows, _l = parsed

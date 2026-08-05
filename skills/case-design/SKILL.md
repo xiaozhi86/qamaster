@@ -391,6 +391,20 @@ Excel 数据校验：未执行 / 七项全过 / 不通过(问题项及条数)
 
 Phase 3/5/7/8/10 结束时，模型把**本阶段产物**写到 `case-design-out/.runtime/checkpoint_<阶段>.md`（每阶段一次性 Write，非 Edit；runtime 受控临时件，Phase 13 后清理）。runtime 的 gate 解析它 → 跑阶段专属检查 → 回填 `state.json` 制品注册表。**不违反"禁止增量写 TestCases.md"红线**——该红线针对最终 `TestCases_*.md`，检查点是 runtime 临时件。
 
+### 检查点格式契约（v0.7.1·强制）
+
+检查点必须含 runtime 可解析的产物，**不可只写摘要文档**，否则 phase-gate 报"检查点格式不符·无用例表"FAIL（须重写检查点，非改用例格式）：
+
+| 阶段 | 检查点必须含 | 可选共存 |
+|---|---|---|
+| Phase 3 规则建模 | `## 规则建模` section（粗体规则项，每项带 `[来源:...]`）| 摘要正文 |
+| Phase 5 风险分析 | `## 风险清单` section（表格：风险ID\|风险等级\|风险描述\|关联模块\|风险来源）| 摘要正文 |
+| Phase 7 测试点 | `## 测试点清单` section（表格：测试点ID\|场景类型\|测试点描述\|关联模块）| 摘要正文 |
+| **Phase 8 用例生成** | **完整 15 列用例表**（首列"用例ID"，与最终 TestCases.md 同结构；含追溯性 section 规则建模/风险清单/测试点清单）| 覆盖预检摘要 |
+| **Phase 10 覆盖率** | **复制 checkpoint_8.md 的完整 15 列用例表 + 追加覆盖分析**（不可只写"## 覆盖率 OK"摘要；#4-H 需求追溯校验用例表的"关联需求ID"列）| 覆盖缺口清单 |
+
+> **格式违反示例**（必 FAIL）：Phase 10 检查点只写 `## 覆盖率\n\nOK\n` → `parse_table_from_lines` 返回 None → `data_rows=[]` → #4-H 误报"全部未引用"。正确做法：检查点含用例表，让 #4-H 校验真实的"关联需求ID"列引用。
+
 ## 契约卡注入 PRIOR_ARTIFACTS
 
 Runtime 按**当前阶段 `consumes`** 从 `state.json.artifacts` 注入上游制品指针（不靠模型记忆）：

@@ -201,15 +201,22 @@ def _run_check(chk, st):
         phase = chk.get("phase")
         if phase is None:
             return (False, "%s: phase_gate 缺 phase 参数" % chk["label"])
+        # v0.7.1: 空 req_id 防护——不构造字面量 REQ_<需求标识>.md，显式报错阻断
+        # 闭合执行日志"Phase 3 首次 gate traceback + 静默省略 --req 致 #4-P 误报"
+        req_id = st.get("req_id", "")
+        if not req_id:
+            return (False, "%s: req_id 未设置（state.json req_id 为空）。"
+                    "须先执行 `set --req-id <需求标识>` 再 gate。Phase 0 步骤零应已落盘 REQ_<需求标识>.md。" % chk["label"])
         cp = os.path.join(workdir, "case-design-out", ".runtime", "checkpoint_%d.md" % phase)
-        req_path = os.path.join(workdir, "case-design-out",
-                                ("REQ_%s.md" % st.get("req_id", "")) if st.get("req_id") else "REQ_<需求标识>.md")
-        ledger_path = os.path.join(workdir, "case-design-out",
-                                  ("Clarification_Ledger_%s.md" % st.get("req_id", "")) if st.get("req_id") else None)
-        parts = ['python "%s" --phase-gate %d "%s"' % (os.path.join(SKILL_SCRIPTS, "verify_cases.py"), phase, cp)]
-        if os.path.exists(req_path):
-            parts.append('--req "%s"' % req_path)
-        if ledger_path and os.path.exists(ledger_path):
+        req_path = os.path.join(workdir, "case-design-out", "REQ_%s.md" % req_id)
+        if not os.path.exists(req_path):
+            return (False, "%s: REQ 文件不存在 %s。按 phase0_manifest.md 步骤零落盘 REQ_%s.md 后重试。"
+                    % (chk["label"], req_path, req_id))
+        ledger_path = os.path.join(workdir, "case-design-out", "Clarification_Ledger_%s.md" % req_id)
+        # REQ 为必需输入（phase_gate 校验 #4/#5 依赖它）；ledger 可选（不存在不阻断）
+        parts = ['python "%s" --phase-gate %d "%s" --req "%s"'
+                 % (os.path.join(SKILL_SCRIPTS, "verify_cases.py"), phase, cp, req_path)]
+        if os.path.exists(ledger_path):
             parts.append('--ledger "%s"' % ledger_path)
         run_mode = st.get("run_mode", "full")
         parts.append('--run-mode %s' % run_mode)

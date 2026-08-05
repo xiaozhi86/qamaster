@@ -316,6 +316,14 @@ When/Then 一律写入表格单元格，单元格内多步骤用 `；`/`步骤N�
 * 不新增 LLM 主观自判（复用已有机器信号，遵守 `references/review_gate.md`"声明≠核实"红线）
 * **被检查14 critique 回跑**：第11阶段检查14对抗遍补出的新用例须回跑本第8 gate（因新增用例可能触发枚举越界/重复/断言不可观测/来源缺失等机器缺陷）；此回跑计入第8 gate 的 ≤2 轮上限，若耗尽按升级机制处理，不回触检查14（见 `references/selfcheck.md` 检查14 衔接）
 
+### 检查点文件格式（v0.7.1·runtime 强制 gate 用）
+
+runtime 在 Phase 8 出口门禁调 `verify_cases.py --phase-gate 8 .runtime/checkpoint_8.md --req .. --ledger ..`。**检查点文件必须含完整 15 列用例表**（首列"用例ID"，与最终 TestCases.md 同结构），可共存追溯性 section（规则建模/风险清单/测试点清单）与覆盖预检摘要。
+
+**格式违反**（必 FAIL）：检查点只写摘要文档（如"## 用例生成完成\n\n22 条用例..."）而无用例表 → `parse_table_from_lines` 返回 None → phase-gate 报"[FAIL] 检查点格式不符: Phase 8 检查点必须含 15 列用例表"。此时须**重写检查点为用例表格式**，而非改用例内容或关联需求ID 格式。
+
+> 检查点是 runtime 受控临时件（非最终 TestCases.md），写它不违反"禁止增量写 TestCases.md"红线（见 `references/output_write.md` 临时文件清理节）。Phase 13 落盘 TestCases.md 时对照 artifacts 防漂移。
+
 ---
 
 # 20、字段规范（强制）
