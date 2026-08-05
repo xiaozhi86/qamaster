@@ -467,11 +467,16 @@
     "^无$"
   ],
   "coverage_gates": {
-    "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列引用的最低比例（REQ 已落盘且可解析时生效；未落盘/不可解析时该门不判，由 #4 显式强提示接管）；interface_three_class=每个变更接口三类覆盖(契约presence+type+出参/规则/场景)硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（完整模式仍硬）；off=关闭（退回 v0.5.0 全软行为）。domain_config.json 同名字段可覆盖。",
+    "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底；v0.8.0 补强：加测试点/设计文档/安全三门）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列引用的最低比例；tp_trace_min_ratio=#7-H 测试点清单每条 TP 被用例关联规则列引用的最低比例（v0.8.0）；design_doc_trace_min_ratio=#8-H 设计文档测试要点章节每条被用例覆盖的最低比例（v0.8.0，DESIGN 已落盘时生效，否则 SKIP）；interface_three_class=每个变更接口三类覆盖(契约presence+type+出参/规则/场景)硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门；testpoint_coverage=测试点清单 TP 覆盖硬门（v0.8.0，full=exit=1）；design_doc_testpoints_trace=设计文档测试要点追溯硬门（v0.8.0，DESIGN 无则 SKIP）；safety_coverage=涉敏感数据时安全类用例数>0 硬门（v0.8.0，触发条件见 sensitive_signals）。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（完整模式仍硬）；off=关闭。domain_config.json 同名字段可覆盖。",
     "req_trace_min_ratio": 1.0,
+    "tp_trace_min_ratio": 1.0,
+    "design_doc_trace_min_ratio": 1.0,
     "interface_three_class": "full",
     "risk_p0p1": "full",
     "req_trace_presence": "full",
+    "testpoint_coverage": "full",
+    "design_doc_testpoints_trace": "full",
+    "safety_coverage": "full",
     "ledger_propagation": "warn",
     "open_questions": "full",
     "keyword_coverage": "warn",
@@ -557,13 +562,13 @@
     "SC": "full"
   },
   "phase_gate_map": {
-    "_doc": "阶段出口门禁检查子集映射（v0.7.0·门禁前移）。声明每个阶段 --phase-gate 跑哪些检查，与 Phase 13 全量校验共用 collect_all_findings，避免重复或遗漏。runtime 在 Phase 3/5/7/8/10 gate 调用。",
+    "_doc": "阶段出口门禁检查子集映射（v0.7.0·门禁前移；v0.8.0 补 testpoint_coverage/design_doc_testpoints_trace/safety_coverage）。声明每个阶段 --phase-gate 跑哪些检查，与 Phase 13 全量校验共用 collect_all_findings，避免重复或遗漏。runtime 在 Phase 3/5/7/8/10 gate 调用。",
     "3": ["check_rule_source", "check_section_id_contiguity:R"],
     "5": ["risk_source_report", "check_section_id_contiguity:RK"],
     "7": ["testpoint_risk_linkage", "check_section_id_contiguity:TP"],
-    "8": ["collect_all_findings", "check_citation_resolution", "check_assumption_resolution", "check_ledger_propagation", "check_behavior_consistency", "check_section_id_contiguity:all"],
-    "10": ["coverage_gate_failures", "check_open_questions_gate", "check_ledger_propagation"],
-    "13": ["verify_md", "collect_all_findings", "coverage_gate_failures", "check_open_questions_gate"]
+    "8": ["collect_all_findings", "check_citation_resolution", "check_assumption_resolution", "check_ledger_propagation", "check_behavior_consistency", "check_section_id_contiguity:all", "testpoint_coverage"],
+    "10": ["coverage_gate_failures", "check_open_questions_gate", "check_ledger_propagation", "testpoint_coverage", "design_doc_testpoints_trace"],
+    "13": ["verify_md", "collect_all_findings", "coverage_gate_failures", "check_open_questions_gate", "testpoint_coverage", "design_doc_testpoints_trace", "safety_coverage"]
   },
   "requirement_probe_keywords": {
     "_doc": "非台账点关键词覆盖探针（v0.7.0·闭环 G5/G6/G7/G8 + RC6）。每类分 surface（主题存在信号·出现在需求/台账即该主题存在）与 depth（深度测点·出现在用例才算该主题真正被测）。探针判定：surface 在源中且 depth 不在用例 -> 报覆盖缺口。闭合 G5-G8 假阴性（线程池命中≠trace传播已测）。旧格式（纯 list）兼容为 surface=depth=list。默认 warn。domain_config 可按域扩展。",
@@ -584,5 +589,9 @@
     "_doc": "来源作用域（v0.7.0·闭环 D3 超需求）。从用例 G/W/T 抽字段/错误码 token，凡不在 REQ/DESIGN/假设 中即报疑似脑补。软判定。whitelist 为通用词豁免。",
     "field_pattern": "\\b[a-z_]{4,}\\b",
     "whitelist": ["code", "status", "data", "message", "result", "error", "success", "request", "response", "value", "type"]
+  },
+  "sensitive_signals": {
+    "_doc": "敏感数据信号词表（v0.8.0·safety_coverage 硬门触发条件）。REQ/DESIGN 含任一信号即触发安全覆盖硬门：须有 ≥1 条测试类型=安全的用例。词表可被 domain_config.json 同名字段覆盖/扩展。",
+    "patterns": ["手机号", "身份证", "银行卡", "财务", "脱敏", "敏感信息", "verifyAuth", "token", "密码", "custNo", "手机", "证件号", "卡号", "隐私", "明文", "加密", "Bearer"]
   }
 }

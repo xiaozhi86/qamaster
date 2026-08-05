@@ -55,7 +55,11 @@ PHASES = [
         "gate_checks": [
             {"kind": "exists_any", "patterns": ["case-design-out/REQ_*.md"], "label": "需求文档已落盘"},
             {"kind": "exists", "path": "case-design-out/MANIFEST.md", "label": "索引文件存在"},
+            # v0.8.0: 设计文档存在性校验（optional——仅当用户提供【设计文档】时才校验；
+            # runtime 探测 SKILL.md §5【设计文档】输入标记，无则 SKIP，不阻断纯需求驱动流程）
+            {"kind": "exists_any", "patterns": ["case-design-out/DESIGN_*.md"], "label": "设计文档已落盘（如提供·#8-H 追溯基准）", "optional": True},
         ],
+        "produces": ["case-design-out/REQ_<需求标识>.md", "case-design-out/DESIGN_<需求标识>.md（如提供）", "case-design-out/MANIFEST.md"],
     },
     {
         "id": 1, "name": "需求分析与澄清", "gate": "confirm",

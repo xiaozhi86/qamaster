@@ -5,7 +5,7 @@
     "email": "xiaozhi_86@163.com"
   },
   "plugins": [
-    {
+  {
       "name": "qamaster",
       "source": ".",
       "description": "企业级 QA 工具集：测试用例设计（case-design）+ 需求文档多角色评审（requirement-review）",

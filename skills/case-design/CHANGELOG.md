@@ -6,6 +6,42 @@
 
 # 发布说明（面向使用者）
 
+## v0.8.0（2026-08-05，覆盖率硬门加固 + 设计文档追溯源 + 契约驱动触发放宽）
+
+**本次发布解决覆盖率校验维度不足 + 设计文档非正式追溯源两大缺口**（设计依据 `COVERAGE_HARDENING_DESIGN-v1.0.0.md`）。v0.7.0 闭环了"引用悬空/编号跳号/台账传递/待确认泄漏"；v0.8.0 闭环 v0.7.0 未覆盖的三个缺口：**测试点级覆盖无硬门、设计文档测试要点非正式追溯源、critique 不扫安全/脱敏盲区**。
+
+**根因复盘（电销通话AI总结产物第二轮评审）**：36 个测试点只覆盖 30 条用例静默通过、设计文档 A §8（11 条测试要点）覆盖 82%、设计文档 B §6（24 条测试要点）只覆盖 54%、P0 安全脱敏 0 覆盖、接口 2/3 契约类因未启用契约驱动分支而失守——全部"Phase 13 exit=0 通过"，因为 `coverage_gates` 硬门清单只有 req_trace/interface_three_class/risk_p0p1 三项，**没有测试点覆盖/设计文档测试要点/安全覆盖**三门。
+
+**核心修复一：coverage_gates 三硬门扩展为六硬门**
+- **#7-H 测试点追溯硬门**（`testpoint_coverage`）：TP 清单每条须被用例关联规则列引用，比例 < `tp_trace_min_ratio`（默认 1.0）→ exit=1。闭合 36→30 压缩（`verify_cases.py::coverage_gate_failures` 加 TP 分支；既有 `testpoint_coverage()` 函数从软提示升硬门）。
+- **#8-H 设计文档测试要点追溯硬门**（`design_doc_testpoints_trace`）：DESIGN 文档"测试要点"章节每条须被用例"关联规则/用例名称"列覆盖 → exit=1。新增 `check_design_doc_testpoints`/`parse_design_testpoints`/`design_doc_testpoints_trace` 函数。
+- **safety_coverage 安全覆盖硬门**：涉敏感数据（REQ/DESIGN 含手机号/身份证/银行卡/财务/脱敏/verifyAuth/token 等信号）时须有 ≥1 条测试类型=安全的用例 → exit=1。新增 `safety_coverage_gate`/`involves_sensitive_data` 函数 + `sensitive_signals` 词表。
+
+**核心修复二：设计文档升级为正式追溯源**
+- SKILL.md §5 新增【设计文档】可选输入通道；phase0_manifest.md 步骤零落盘 `DESIGN_<需求标识>.md`；索引文件增"设计文档"列。
+- verify_cases.py 全入口（main/`--phase-gate`/`run_inmemory`/`collect_all_findings`）增 `--design`/`design_doc_lines` 参数链路。
+
+**核心修复三：契约驱动分支触发条件放宽**
+- phase0_manifest.md 步骤六：从"只认 Swagger/OpenAPI"放宽到"设计文档含接口描述（接口名/facade/方法签名/入参出参/错误码/@Service/@RestfulApi/Dubbo 方法）亦触发"。SKILL.md §159 同步。闭合 requirement 驱动下接口 2/3 契约类测试点失守。
+
+**核心修复四：Phase 8 出口 gate 也判覆盖硬门**
+- `verify_cases.py` run_phase_gate：覆盖硬门判定从 `Phase in (10,13)` 扩展到 `Phase in (8,10,13)`，写前 gate 即拦 TP/安全缺口。
+
+**verify_summary_line 新增字段**：`tp_total`/`tp_uncovered`/`design_total`/`design_uncovered`/`safety_fail`。
+
+**配置**：`config/validation_rules.json` `coverage_gates` 加 `tp_trace_min_ratio`/`design_doc_trace_min_ratio`/`testpoint_coverage`/`design_doc_testpoints_trace`/`safety_coverage`；`phase_gate_map` Phase 8/10/13 加对应检查子项；新增 `sensitive_signals` 词表。
+
+**与既有约束的相容性**：既有合规用例集（无 DESIGN 文件）在新门禁下 `design_doc_testpoints_trace` SKIP、`safety_coverage` 不触发敏感信号时 SKIP、`testpoint_coverage` 在 TP 全覆盖时 PASS——不误伤。
+
+**Phase B（P1·方法论补强·已落地）**：
+- `references/dedup_coverage.md`：§17 新增 #7 反向测试点追溯 + #8 反向设计文档测试要点追溯；#5 行为来源三选一升级四选一（加设计文档）；§18 停止条件机器前提加 #7-H/#8-H/safety_coverage。
+- `references/coverage.md`：§8 新增 8.11 设计文档测试要点覆盖；§8.9 安全场景补 safety_coverage 硬门说明；§15.2/15.3 维度列表加"设计文档测试要点"。
+- `references/risk.md`：P0 列表补"敏感信息脱敏"；§5 critique 高发漏标方向新增"安全/脱敏"+"设计文档测试要点"两个专项。
+- `references/selfcheck.md`：检查3 升级 TP 级 + 加契约/安全维度；检查8 P0 加"安全漏洞/敏感信息脱敏"；检查14 对抗生成五类盲区新增"安全风险遗漏"；新增检查17"设计文档测试要点覆盖率"；自查决策表加检查17。
+- `references/modeling.md`：规则建模来源三选一升级四选一（加设计文档）；SDD 事实来源加设计文档；接口契约模型触发放宽（设计文档含接口描述也触发）。
+
+---
+
 ## v0.7.0（2026-08-04，阶段门禁前移 + 制品传递 + 反向引用/台账接入）
 
 **本次发布解决两个流程控制缺口**（设计依据 `skills/case-design/PHASE_GATE_DESIGN.md`）：

@@ -211,11 +211,25 @@ def _gate_mode(raw, default="full"):
 COVERAGE_GATES = {
     # #4-H：需求条目被用例"关联需求ID"列引用的最低比例（REQ 可解析时生效）
     "req_trace_min_ratio": float(_CG.get("req_trace_min_ratio", 1.0)),
+    # #7-H：测试点清单每条 TP 被用例关联规则列引用的最低比例（v0.8.0）
+    "tp_trace_min_ratio": float(_CG.get("tp_trace_min_ratio", 1.0)),
+    # #8-H：设计文档测试要点章节每条被用例覆盖的最低比例（v0.8.0，DESIGN 落盘时生效）
+    "design_doc_trace_min_ratio": float(_CG.get("design_doc_trace_min_ratio", 1.0)),
     # #6-H：变更接口三类覆盖硬门（full/auto_light/off）
     "interface_three_class": _gate_mode(_CG.get("interface_three_class")),
     # RK：P0/P1 风险被用例关联规则列引用硬门（full/auto_light/off）
     "risk_p0p1": _gate_mode(_CG.get("risk_p0p1")),
+    # #7-H 测试点覆盖硬门（v0.8.0）：TP 清单每条须被用例引用
+    "testpoint_coverage": _gate_mode(_CG.get("testpoint_coverage")),
+    # #8-H 设计文档测试要点追溯硬门（v0.8.0）：DESIGN 测试要点每条须被覆盖
+    "design_doc_testpoints_trace": _gate_mode(_CG.get("design_doc_testpoints_trace")),
+    # 安全覆盖硬门（v0.8.0）：涉敏感数据时安全类用例数须 >0
+    "safety_coverage": _gate_mode(_CG.get("safety_coverage")),
 }
+
+# 敏感数据信号词表（v0.8.0·safety_coverage 硬门触发条件）
+_SENS = _RULES.get("sensitive_signals", {})
+SENSITIVE_SIGNALS = _SENS.get("patterns", []) if isinstance(_SENS, dict) else []
 
 
 def coverage_gate_failures(findings, run_mode="full"):
@@ -273,6 +287,35 @@ def coverage_gate_failures(findings, run_mode="full"):
             fails.append(("RK P0/P1 风险硬门",
                           "P0/P1 风险 %d 条、未被用例引用 %d 条：%s" % (
                               p0p1, len(unc_risk), "；".join(str(u)[:60] for u in unc_risk[:5]))))
+    # #7-H 测试点追溯硬门（v0.8.0·闭环 36→30 压缩）
+    # testpoint_coverage 已有 testpoint_coverage() 函数返回 (unc_tp, tp_total) 入 traces，
+    # 这里做硬门判定：TP 清单存在且未覆盖比例 < tp_trace_min_ratio -> exit=1
+    if COVERAGE_GATES["testpoint_coverage"] != "off":
+        unc_tp, tp_total = traces.get("testpoint", [None, 0])
+        if unc_tp is not None and tp_total:
+            ratio = (tp_total - len(unc_tp)) / float(tp_total)
+            if ratio < COVERAGE_GATES["tp_trace_min_ratio"]:
+                if not (COVERAGE_GATES["testpoint_coverage"] == "auto_light" and run_mode in ("auto", "light")):
+                    fails.append(("#7-H 测试点追溯硬门",
+                                  "测试点 %d 条、未被用例引用 %d 条（引用率 %.0f%% < 阈值 %.0f%%）：%s。"
+                                  "修复：补齐对应用例的'关联规则'列引用 TP<序号>，或确认该测试点不在范围并登记假设" % (
+                                      tp_total, len(unc_tp), ratio * 100,
+                                      COVERAGE_GATES["tp_trace_min_ratio"] * 100,
+                                      "、".join(str(u)[:40] for u in unc_tp[:8]))))
+    # #8-H 设计文档测试要点追溯硬门（v0.8.0）
+    if COVERAGE_GATES["design_doc_testpoints_trace"] != "off":
+        unc_dd, dd_total = traces.get("design_doc", [[], 0])
+        if dd_total and unc_dd:
+            if not (COVERAGE_GATES["design_doc_testpoints_trace"] == "auto_light" and run_mode in ("auto", "light")):
+                fails.append(("#8-H 设计文档测试要点追溯硬门",
+                              "DESIGN 测试要点 %d 条、未覆盖 %d 条：%s。"
+                              "修复：补齐对应用例覆盖设计文档测试要点，或登记假设'要点X不在测试范围'" % (
+                                  dd_total, len(unc_dd), "、".join(str(u)[:40] for u in unc_dd[:8]))))
+    # safety_coverage 安全覆盖硬门（v0.8.0）
+    if COVERAGE_GATES["safety_coverage"] != "off":
+        s_fails = findings.get("_safety_fails") or []
+        if s_fails and not (COVERAGE_GATES["safety_coverage"] == "auto_light" and run_mode in ("auto", "light")):
+            fails.extend(("#S-H 安全覆盖硬门", f) for f in s_fails)
     return fails
 
 
@@ -297,6 +340,11 @@ def verify_summary_line(findings, hard_gate_fails=None):
         "api_uncovered": len(unc_api),
         "risk_p0p1": p0p1,
         "risk_uncovered": (len(unc_risk) if unc_risk else 0),
+        "tp_total": (traces["testpoint"][1] if traces["testpoint"][0] is not None else "na"),
+        "tp_uncovered": (len(traces["testpoint"][0]) if traces["testpoint"][0] is not None else "na"),
+        "design_total": traces["design_doc"][1],
+        "design_uncovered": len(traces["design_doc"][0]),
+        "safety_fail": len(findings.get("_safety_fails") or []),
         "check15": soft["behavior"][0],
         "hard_violations": len(findings["hard_violations"]),
         "gate_fails": (len(hard_gate_fails) if hard_gate_fails is not None
@@ -1219,6 +1267,117 @@ def testpoint_coverage(data_rows, tp_rows):
     return uncovered, len(tp_rows)
 
 
+def parse_design_testpoints(design_lines):
+    """v0.8.0 #8-H：解析 DESIGN 文档的'测试要点'章节，返回测试要点条目列表。
+
+    识别章节标题：## 测试要点 / ### 测试要点 / ## 6. 测试要点 / ## 8. 测试要点 等。
+    章节内穿透 ### 子节（如 6.1/6.2/6.3），直至同级或上级 ## 标题才停止。
+    章节内按表格行或编号列表/段落切分条目。纯散文无章节标题时返回 []（SKIP）。
+    """
+    if not design_lines:
+        return []
+    items = []
+    in_section = False
+    section_level = 0  # 进入时的 # 数，遇到同级或更高级（# 数 <= section_level）则停
+    # 探测"测试要点"/"测试点"章节
+    section_re = re.compile(r"^(#+)\s*.*?(测试要点|测试点)", re.IGNORECASE)
+    heading_re = re.compile(r"^(#+)\s")
+    for ln in design_lines:
+        s = ln.strip()
+        hm = heading_re.match(s)
+        if hm:
+            lvl = len(hm.group(1))
+        if not in_section:
+            sm = section_re.match(s)
+            if sm:
+                in_section = True
+                section_level = len(sm.group(1))
+            continue
+        # in_section：遇到同级或更高级标题（# 数 <= section_level）且非测试要点子节 -> 停
+        if hm and lvl <= section_level and not section_re.match(s):
+            break
+        if hm:
+            # 子节标题（### 等），跳过行本身但继续在 section 内
+            continue
+        if s.startswith("|"):
+            cells = split_row(s)
+            if cells is None or is_separator(cells):
+                continue
+            if cells and cells[0].strip() == "用例ID":
+                break  # 撞到用例表，section 结束
+            # 跳过表头行（含"场景"/"#"等关键词的行视作表头）
+            joined = "".join(cells)
+            if any(kw in joined for kw in ("场景", "验证点", "预期结果")) and any(
+                    c.strip() in ("场景", "#", "序号", "编号") for c in cells):
+                continue
+            # 取首列+次列拼接为条目文本（首列常是编号"1"）
+            item = " ".join(c.strip() for c in cells[:3] if c.strip())
+            if item and not item.startswith("|"):
+                items.append(item)
+        else:
+            # 编号列表/段落（非表格）
+            if s and not s.startswith("#"):
+                m = re.match(r"^\s*(\d+)[\.、\)）]?\s*(.+)", s)
+                if m:
+                    items.append(m.group(2).strip())
+                elif len(s) > 8 and not s.startswith("-"):
+                    items.append(s)
+    return items
+
+
+def design_doc_testpoints_trace(data_rows, design_lines):
+    """v0.8.0 #8-H：反向设计文档测试要点追溯。
+
+    对 DESIGN 文档'测试要点'章节每条，查用例'关联规则'列或'用例名称'列是否覆盖
+    （显式追溯信号，不扫 G/W/T 全文——全文匹配通用词易误判覆盖）。
+    返回 (未覆盖列表, 总数)。design_lines 为空或无测试要点章节时返回 ([], 0)（SKIP）。
+    """
+    items = parse_design_testpoints(design_lines)
+    if not items:
+        return [], 0
+    # 只匹配显式追溯信号列：关联规则 + 用例名称（IDX_RULE/IDX_NAME）
+    case_trace_texts = []
+    for r in data_rows:
+        rule = r[IDX_RULE] if len(r) > IDX_RULE else ""
+        name = r[IDX_NAME] if len(r) > IDX_NAME else ""
+        case_trace_texts.append(rule + " " + name)
+    uncovered = []
+    for item in items:
+        toks = tokens_of(item)
+        # 至少一个 token 命中显式追溯列（关联规则/用例名称）
+        covered = any(any(tok in ct for tok in toks) for ct in case_trace_texts)
+        if not covered:
+            uncovered.append(item[:40])
+    return uncovered, len(items)
+
+
+def involves_sensitive_data(req_doc_lines, design_lines=None):
+    """v0.8.0 safety_coverage 硬门触发条件：REQ/DESIGN 含敏感信号词即触发。
+    返回命中的信号词列表（空=不涉敏感，SKIP）。"""
+    sources = []
+    if req_doc_lines:
+        sources.extend(req_doc_lines)
+    if design_lines:
+        sources.extend(design_lines)
+    if not sources:
+        return []
+    text = "".join(sources)
+    hit = [p for p in SENSITIVE_SIGNALS if p in text]
+    return hit
+
+
+def safety_coverage_gate(data_rows, req_doc_lines, design_lines=None):
+    """v0.8.0 safety_coverage 硬门：涉敏感数据时安全类用例数须 >0。
+    返回违约明细字符串列表（空=通过/SKIP）。"""
+    if not involves_sensitive_data(req_doc_lines, design_lines):
+        return []
+    safety_cases = [r for r in data_rows if len(r) > IDX_TYPE and r[IDX_TYPE] == "安全"]
+    if not safety_cases:
+        return ["#S-H 涉敏感数据但无安全类用例覆盖（触发信号：%s）" %
+                "、".join(involves_sensitive_data(req_doc_lines, design_lines)[:5])]
+    return []
+
+
 # ===== 新增软性检查（不改变退出码·供 selfcheck 决策）=====
 # 检查13 断言完整性 / 检查9增强 存储schema交叉 / 风险来源待确认 / #4 反向需求追溯
 
@@ -1616,7 +1775,7 @@ def reverse_requirement_trace_items(data_rows, req_items):
     return uncovered, len(req_items)
 
 
-def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None):
+def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, design_doc_lines=None):
     """把全部检查/统计/追溯一次性计算并聚合成结构化 dict（不打印）。
     供内存内 gate（Phase 8 出口 gate）与文件入口（Phase 13 回读）共用同一计算，
     保证"写前内存校验"与"写后回读校验"判定口径完全一致。
@@ -1627,6 +1786,8 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None):
       req_doc_lines: 可选，预读的需求文档行列表；非 None 且非空时启用 #4 反向需求追溯
                      + #5 业务行为 token 核对；为 None 时这两项跳过（与 Phase 13
                      "未传第2参数则跳过"语义一致）
+      design_doc_lines: 可选，预读的设计文档行列表（v0.8.0）；非空时启用 #8 反向设计文档
+                     测试要点追溯 + safety_coverage 硦感数据触发判定
 
     返回 dict：
       {n, hard_violations,
@@ -1637,7 +1798,8 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None):
        traces:{rule:[uncovered_or_None,total], risk:[uncovered_or_None,p0p1,total],
                testpoint:[uncovered_or_None,total],
                interface:[uncovered_list,api_total,ctype_issues],
-               requirement:[uncovered_or_None,total]},
+               requirement:[uncovered_or_None,total],
+               design_doc:[uncovered_list,total]},
        risk_source:[dist_dict,pending_list]}
 
     设计约束（不可违背）：
@@ -1707,6 +1869,10 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None):
     unc_api, api_total, ctype_issues = reverse_interface_trace(data_rows, lines)
     src_dist, src_pending = risk_source_report(risk_rows)
 
+    # v0.8.0 #8-H 设计文档测试要点追溯 + safety_coverage 触发判定
+    unc_dd, dd_total = design_doc_testpoints_trace(data_rows, design_doc_lines)
+    s_fails = safety_coverage_gate(data_rows, req_doc_lines or [], design_doc_lines or [])
+
     return {
         "n": len(data_rows),
         "hard_violations": hard_violations,
@@ -1730,20 +1896,23 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None):
             "testpoint": [unc_tp, tp_total],
             "interface": [unc_api, api_total, ctype_issues],
             "requirement": [unc_req, req_total],
+            "design_doc": [unc_dd, dd_total],
             "keyword_coverage": kw_probe,
         },
         "risk_source": [src_dist, src_pending],
         "section_ids": section_ids,
         "section_contiguity": {"warnings": contig_warnings},
         "assumption_resolution": {"warnings": assump_warnings},
+        "_safety_fails": s_fails,
     }
 
 
-def run_inmemory(lines, req_doc_lines=None, ledger=None):
+def run_inmemory(lines, req_doc_lines=None, ledger=None, design_doc_lines=None):
     """内存内全量校验入口（Phase 8 出口 gate 调用，零文件操作）。
     输入：lines=Write 即将落盘的完整 .md 文本（按行）；
           req_doc_lines=可选，预读的需求文档行列表（启用 #4/#5）；
-          ledger=可选，parse_clarification_ledger 返回的台账 dict（启用台账传递/一致性/待确认门禁）。
+          ledger=可选，parse_clarification_ledger 返回的台账 dict（启用台账传递/一致性/待确认门禁）；
+          design_doc_lines=可选，预读的设计文档行列表（v0.8.0·启用 #8 设计文档测试要点追溯+safety 触发）。
     输出：(parsed, findings_dict)：
       parsed=None 且 findings=None -> 表头解析失败（gate 须提示结构缺陷）；
       否则 findings=collect_all_findings 的 dict。
@@ -1753,7 +1922,8 @@ def run_inmemory(lines, req_doc_lines=None, ledger=None):
     if parsed is None:
         return None, None
     _header, data_rows, _lines = parsed
-    findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines, ledger=ledger)
+    findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines,
+                                    ledger=ledger, design_doc_lines=design_doc_lines)
     return parsed, findings
 
 
@@ -2162,6 +2332,7 @@ def run_phase_gate(argv):
     ap.add_argument("checkpoint")
     ap.add_argument("--req", default=None)
     ap.add_argument("--ledger", default=None)
+    ap.add_argument("--design", default=None)
     ap.add_argument("--run-mode", default="full")
     a = ap.parse_args(argv)
     if not os.path.exists(a.checkpoint):
@@ -2180,6 +2351,14 @@ def run_phase_gate(argv):
                 req_doc_lines = f.readlines()
         except Exception:
             req_doc_lines = None
+    # v0.8.0: 设计文档（#8-H 设计文档测试要点追溯 + safety_coverage 触发）
+    design_doc_lines = None
+    if a.design and os.path.exists(a.design):
+        try:
+            with open(a.design, "r", encoding="utf-8") as f:
+                design_doc_lines = f.readlines()
+        except Exception:
+            design_doc_lines = None
     ledger = parse_clarification_ledger(a.ledger) if a.ledger else None
 
     parsed, err = parse_table_from_lines(lines)
@@ -2203,7 +2382,8 @@ def run_phase_gate(argv):
         data_rows = []
     else:
         _h, data_rows, _l = parsed
-    findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines, ledger=ledger)
+    findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines,
+                                    ledger=ledger, design_doc_lines=design_doc_lines)
     findings["_ledger"] = ledger
 
     # 按 phase_gate_map 跑对应检查子集（简化：所有阶段都跑 collect_all_findings 已计算的硬违规）
@@ -2224,13 +2404,13 @@ def run_phase_gate(argv):
         phase_filtered = hard_violations
 
     gate_fails = coverage_gate_failures(findings, run_mode=a.run_mode)
-    # Phase 10 才启用覆盖硬门 + 待确认门禁；Phase 8 只报硬违规
-    if a.phase in (10, 13):
+    # v0.8.0: Phase 8/10/13 启用覆盖硬门（含 TP 追溯）；Phase 8 也判覆盖硬门（不再仅 10/13）
+    if a.phase in (8, 10, 13):
         if gate_fails:
             for name, detail in gate_fails:
                 print("  [FAIL] %s: %s" % (name, detail))
     else:
-        gate_fails = []  # 非 10/13 阶段不判覆盖硬门
+        gate_fails = []  # 非 8/10/13 阶段不判覆盖硬门
 
     ok = True
     if phase_filtered:
@@ -2262,22 +2442,27 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "--phase-gate":
         return run_phase_gate(sys.argv[2:])
     if len(sys.argv) < 2:
-        print("用法: python verify_cases.py <TC文件.md> [需求文档.md] [--ledger 台账.md]  |  --phase-gate <N> <checkpoint.md> [--req ..] [--ledger ..]  |  --dump-rules 查看规则契约")
+        print("用法: python verify_cases.py <TC文件.md> [需求文档.md] [--ledger 台账.md] [--design 设计文档.md]  |  --phase-gate <N> <checkpoint.md> [--req ..] [--ledger ..] [--design ..]  |  --dump-rules 查看规则契约")
         print("  第2参数：需求文档 case-design-out/REQ_<需求标识>.md（第0阶段步骤零已强制落盘），用于 #4 反向需求追溯 + #5 token 核对；缺失则 #4 产出显式强提示而非静默跳过")
         print("  --ledger：澄清台账 Clarification_Ledger_<需求标识>.md，启用台账传递/一致性/待确认门禁（v0.7.0）")
+        print("  --design：设计文档 DESIGN_<需求标识>.md，启用 #8-H 设计文档测试要点追溯 + safety_coverage 触发（v0.8.0）")
         print("  --phase-gate <N>：阶段出口门禁模式（runtime 在 Phase 3/5/7/8/10 gate 调用）")
         return 1
 
     path = sys.argv[1]
-    # 解析可选 --ledger 参数（位置参数：TC.md [REQ.md] [--ledger X]）
+    # 解析可选 --ledger/--design 参数（位置参数：TC.md [REQ.md] [--ledger X] [--design Y]）
     req_doc_path = None
     ledger_path = None
+    design_doc_path = None
     positional = []
     i = 2
     while i < len(sys.argv):
         a = sys.argv[i]
         if a == "--ledger" and i + 1 < len(sys.argv):
             ledger_path = sys.argv[i + 1]
+            i += 2
+        elif a == "--design" and i + 1 < len(sys.argv):
+            design_doc_path = sys.argv[i + 1]
             i += 2
         else:
             positional.append(a)
@@ -2299,10 +2484,20 @@ def main():
         except Exception:
             req_doc_lines = None
 
+    # 读设计文档行（供 #8 设计文档测试要点追溯 + safety_coverage 触发·v0.8.0）
+    design_doc_lines = None
+    if design_doc_path and os.path.exists(design_doc_path):
+        try:
+            with open(design_doc_path, "r", encoding="utf-8") as f:
+                design_doc_lines = f.readlines()
+        except Exception:
+            design_doc_lines = None
+
     # 读台账（供台账传递/一致性/待确认门禁·v0.7.0）
     ledger = parse_clarification_ledger(ledger_path) if ledger_path else None
 
-    findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines, ledger=ledger)
+    findings = collect_all_findings(data_rows, lines, req_doc_lines=req_doc_lines,
+                                   ledger=ledger, design_doc_lines=design_doc_lines)
     # 附 data_rows 供 print_findings 复算 id/field 分组（幂等，与原 main 调用次序一致）
     findings["_data_rows"] = data_rows
     findings["_ledger"] = ledger
