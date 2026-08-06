@@ -62,6 +62,7 @@ disable-model-invocation: true
 
 * **产出物范围**：索引 `MANIFEST.md`、需求文档 `REQ_<需求标识>.md`、澄清台账 `Clarification_Ledger_<需求标识>.md`、测试用例 `TestCases_<需求标识>.md` / `TestCases_<需求标识>.xlsx`、知识总结 `Knowledge_<需求标识>.md`——全部落盘到 `case-design-out/` 下
 * **需求文档强制落盘**：`REQ_<需求标识>.md` 在第0阶段步骤零强制落盘（用户内联提供或给路径的需求文档均落盘；纯散文/无标题者落盘前补 `## 二级标题` 分节），为 #4/#5 反向需求追溯提供唯一可靠基准——不落盘则"完整覆盖无遗漏"承诺失效（详见 `references/phase0_manifest.md` 步骤零）
+* **非 Markdown 文档经 `extract_doc.py` 落盘**（v0.9.0·根因5）：用户提供 .docx/.pdf/.pptx/.xlsx/.png 等非 .md 文件路径时，禁止用 Read 工具直读原文（丢页眉/文本框/OCR 顺序），必须运行 `python skills/case-design/scripts/extract_doc.py <文件> --kind req|design --req-id <需求标识> --out-dir case-design-out` 全文抽取落盘；解析降级（`[FAIL]`）即硬阻断请用户补 Markdown/纯文本，不得静默继续（详见 `references/phase0_manifest.md` 步骤零"非 Markdown 文档解析落盘"）
 * **读写统一前缀**：凡读写上述产出物，路径均为 `case-design-out/<文件名>`；索引表路径列填写相对 `case-design-out/` 的文件名（不含目录前缀）
 * **目录自动创建**：`case-design-out/` 不存在时按需创建（首次写入产出物前）
 * **临时文件**：Excel 生成/校验的 ad-hoc 脚本与中间产物（CSV/JSON/txt）同样置于 `case-design-out/` 下，用完即删（见 §临时文件清理 / `references/output_write.md` ch30）
@@ -176,10 +177,11 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 <<<设计文档开始>>>
 开发/架构设计文档（Markdown）。含技术方案、调用链路、字段映射、错误处理、测试要点章节。
 提供时：
-- 第0阶段把"测试要点/测试点"章节提取落盘为 case-design-out/DESIGN_<需求标识>.md（#8-H 反向设计文档测试要点追溯基准，见 references/phase0_manifest.md 步骤零）
+- 第0阶段把**设计文档整文**落盘为 case-design-out/DESIGN_<需求标识>.md（v0.9.0·根因2：全量落盘，不再只提取"测试要点"章节；#8-H 反向设计文档测试要点追溯基准，见 references/phase0_manifest.md 步骤零）。**非 .md 文件路径须经 `scripts/extract_doc.py --kind design` 落盘**（v0.9.0·根因5，降级即硬阻断）
+- 设计文档无任何可追溯章节（测试要点/验证点/验收标准/异常处理/错误码/边界约束 等）时（根因3）须从正文/字段映射/异常处理补建 `## 测试要点` 章节，不得 SKIP 了事
 - 第2阶段覆盖矩阵新增"8.11 设计文档测试要点覆盖"维度（见 references/coverage.md）
 - 第7阶段测试点建模须引用设计文档测试要点
-- 第10/13阶段 #8-H 硬门：DESIGN 测试要点每条须被用例"关联规则"列或"用例名称"列覆盖（scripts/verify_cases.py check_design_doc_testpoints）
+- 第8/10/13阶段 #8-H 硬门：DESIGN 可追溯章节每条须被用例"关联规则"列或"用例名称"列覆盖，未命中显式列时回退 Given/When/Then 全文补判（scripts/verify_cases.py design_doc_testpoints_trace；v0.9.0 runtime/Phase13 均传 `--design`）
 - safety_coverage 硬门触发条件：DESIGN 含敏感信号词（手机号/身份证/银行卡/财务/脱敏/verifyAuth/token 等）时须有 ≥1 条测试类型=安全的用例
 未提供时退回当前行为，不阻断（#8-H/SKIP）。
 <<<设计文档结束>>>
@@ -203,7 +205,7 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 需求标识来自用户输入或索引文件匹配（见第0阶段）。
 
-> **可选通道的流向**：技术实现摘要 → 第4阶段 SDD（State/Exception/契约事实校对）+ 第8阶段测试数据 + 检查9（存储可断言，见 references/selfcheck.md）；业务规则与历史缺陷 → 第3阶段规则建模 + 第5阶段业务领域风险；历史缺陷摘要 → 第5阶段缺陷种子测试点（强制覆盖）。三者均可选，未提供时 skill 退回当前"自然语言兜底+澄清提问"行为，不阻断。 接口契约文档 -> 第4阶段接口契约模型+变更影响清单 + 统一接口测试矩阵（契约/规则/场景三类）+ 检查16/#6 反向接口追溯；启用契约驱动分支（见 references/modeling.md 接口契约模型、references/dedup_coverage.md 契约驱动分支）。 设计文档 -> 第0阶段落盘 DESIGN_<需求标识>.md + 第2阶段覆盖矩阵 8.11 + 第7阶段测试点引用 + 第10/13阶段 #8-H 反向设计文档测试要点追溯 + safety_coverage 触发（v0.8.0，见 references/phase0_manifest.md 步骤零、references/coverage.md 8.11、references/dedup_coverage.md #8）。
+> **可选通道的流向**：技术实现摘要 → 第4阶段 SDD（State/Exception/契约事实校对）+ 第8阶段测试数据 + 检查9（存储可断言，见 references/selfcheck.md）；业务规则与历史缺陷 → 第3阶段规则建模 + 第5阶段业务领域风险；历史缺陷摘要 → 第5阶段缺陷种子测试点（强制覆盖）。三者均可选，未提供时 skill 退回当前"自然语言兜底+澄清提问"行为，不阻断。 接口契约文档 -> 第4阶段接口契约模型+变更影响清单 + 统一接口测试矩阵（契约/规则/场景三类）+ 检查16/#6 反向接口追溯；启用契约驱动分支（见 references/modeling.md 接口契约模型、references/dedup_coverage.md 契约驱动分支）。 设计文档 -> 第0阶段全量落盘 DESIGN_<需求标识>.md（v0.9.0 整文落盘）+ 第2阶段覆盖矩阵 8.11 + 第7阶段测试点引用 + 第8/10/13阶段 #8-H 反向设计文档测试要点追溯（runtime/Phase13 均传 `--design`）+ safety_coverage 触发（v0.8.0，见 references/phase0_manifest.md 步骤零、references/coverage.md 8.11、references/dedup_coverage.md #8）。
 
 ---
 

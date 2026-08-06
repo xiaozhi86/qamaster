@@ -467,7 +467,7 @@
     "^无$"
   ],
   "coverage_gates": {
-    "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底；v0.8.0 补强：加测试点/设计文档/安全三门）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列引用的最低比例；tp_trace_min_ratio=#7-H 测试点清单每条 TP 被用例关联规则列引用的最低比例（v0.8.0）；design_doc_trace_min_ratio=#8-H 设计文档测试要点章节每条被用例覆盖的最低比例（v0.8.0，DESIGN 已落盘时生效，否则 SKIP）；interface_three_class=每个变更接口三类覆盖(契约presence+type+出参/规则/场景)硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门；testpoint_coverage=测试点清单 TP 覆盖硬门（v0.8.0，full=exit=1）；design_doc_testpoints_trace=设计文档测试要点追溯硬门（v0.8.0，DESIGN 无则 SKIP）；safety_coverage=涉敏感数据时安全类用例数>0 硬门（v0.8.0，触发条件见 sensitive_signals）。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（完整模式仍硬）；off=关闭。domain_config.json 同名字段可覆盖。",
+    "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底；v0.8.0 补强：加测试点/设计文档/安全三门；v0.9.0 根因6：#7/#8/#S 不再随 auto_light 降级——文档覆盖门在连跑/轻量亦硬判）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列(回退G/W/T)引用的最低比例；tp_trace_min_ratio=#7-H 测试点清单每条 TP 被用例关联规则列引用的最低比例；design_doc_trace_min_ratio=#8-H 设计文档可追溯章节每条被用例覆盖(关联规则/用例名称,回退G/W/T)的最低比例（DESIGN 落盘时生效，否则 SKIP）；interface_three_class=每个变更接口三类覆盖硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门；testpoint_coverage=#7-H 测试点覆盖硬门（v0.9.0 不随 auto_light 降级）；design_doc_testpoints_trace=#8-H 设计文档测试要点追溯硬门（v0.9.0 不随 auto_light 降级，DESIGN 无则 SKIP）；safety_coverage=涉敏感数据时安全类用例数>0 硬门（v0.9.0 不随 auto_light 降级）。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（仅对 interface/risk 生效；#7/#8/#S v0.9.0 起无视模式恒硬）；off=关闭。domain_config.json 同名字段可覆盖。",
     "req_trace_min_ratio": 1.0,
     "tp_trace_min_ratio": 1.0,
     "design_doc_trace_min_ratio": 1.0,

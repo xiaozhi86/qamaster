@@ -294,31 +294,34 @@ def coverage_gate_failures(findings, run_mode="full"):
     # #7-H 测试点追溯硬门（v0.8.0·闭环 36→30 压缩）
     # testpoint_coverage 已有 testpoint_coverage() 函数返回 (unc_tp, tp_total) 入 traces，
     # 这里做硬门判定：TP 清单存在且未覆盖比例 < tp_trace_min_ratio -> exit=1
+    # v0.9.0·根因6 修复：#7 不再随 auto_light 降级——测试点追溯是"是否覆盖设计"的核心硬门，
+    # 连跑/轻量模式亦硬判（TP 清单不存在时 SKIP，不阻断）。仅 interface/risk 受 auto_light 降级。
     if COVERAGE_GATES["testpoint_coverage"] != "off":
         unc_tp, tp_total = traces.get("testpoint", [None, 0])
         if unc_tp is not None and tp_total:
             ratio = (tp_total - len(unc_tp)) / float(tp_total)
             if ratio < COVERAGE_GATES["tp_trace_min_ratio"]:
-                if not (COVERAGE_GATES["testpoint_coverage"] == "auto_light" and run_mode in ("auto", "light")):
-                    fails.append(("#7-H 测试点追溯硬门",
-                                  "测试点 %d 条、未被用例引用 %d 条（引用率 %.0f%% < 阈值 %.0f%%）：%s。"
-                                  "修复：补齐对应用例的'关联规则'列引用 TP<序号>，或确认该测试点不在范围并登记假设" % (
-                                      tp_total, len(unc_tp), ratio * 100,
-                                      COVERAGE_GATES["tp_trace_min_ratio"] * 100,
-                                      "、".join(str(u)[:40] for u in unc_tp[:8]))))
+                fails.append(("#7-H 测试点追溯硬门",
+                              "测试点 %d 条、未被用例引用 %d 条（引用率 %.0f%% < 阈值 %.0f%%）：%s。"
+                              "修复：补齐对应用例的'关联规则'列引用 TP<序号>，或确认该测试点不在范围并登记假设" % (
+                                  tp_total, len(unc_tp), ratio * 100,
+                                  COVERAGE_GATES["tp_trace_min_ratio"] * 100,
+                                  "、".join(str(u)[:40] for u in unc_tp[:8]))))
     # #8-H 设计文档测试要点追溯硬门（v0.8.0）
+    # v0.9.0·根因6 修复：#8 不再随 auto_light 降级——设计文档测试要点追溯直接对应"设计文档内容
+    # 是否被用例覆盖"，连跑/轻量亦硬判（DESIGN 无则 SKIP，不阻断）。
     if COVERAGE_GATES["design_doc_testpoints_trace"] != "off":
         unc_dd, dd_total = traces.get("design_doc", [[], 0])
         if dd_total and unc_dd:
-            if not (COVERAGE_GATES["design_doc_testpoints_trace"] == "auto_light" and run_mode in ("auto", "light")):
-                fails.append(("#8-H 设计文档测试要点追溯硬门",
-                              "DESIGN 测试要点 %d 条、未覆盖 %d 条：%s。"
-                              "修复：补齐对应用例覆盖设计文档测试要点，或登记假设'要点X不在测试范围'" % (
-                                  dd_total, len(unc_dd), "、".join(str(u)[:40] for u in unc_dd[:8]))))
+            fails.append(("#8-H 设计文档测试要点追溯硬门",
+                          "DESIGN 测试要点 %d 条、未覆盖 %d 条：%s。"
+                          "修复：补齐对应用例覆盖设计文档测试要点，或登记假设'要点X不在测试范围'" % (
+                              dd_total, len(unc_dd), "、".join(str(u)[:40] for u in unc_dd[:8]))))
     # safety_coverage 安全覆盖硬门（v0.8.0）
+    # v0.9.0·根因6 修复：#S 不再随 auto_light 降级——涉敏感数据须有安全用例，不因模式放宽。
     if COVERAGE_GATES["safety_coverage"] != "off":
         s_fails = findings.get("_safety_fails") or []
-        if s_fails and not (COVERAGE_GATES["safety_coverage"] == "auto_light" and run_mode in ("auto", "light")):
+        if s_fails:
             fails.extend(("#S-H 安全覆盖硬门", f) for f in s_fails)
     return fails
 
@@ -1369,19 +1372,22 @@ def check_risk_testpoint_linkage(risk_rows, tp_rows):
 
 
 def parse_design_testpoints(design_lines):
-    """v0.8.0 #8-H：解析 DESIGN 文档的'测试要点'章节，返回测试要点条目列表。
+    """v0.9.0 #8-H：解析 DESIGN 文档的可追溯测试要点条目列表（根因2 修复：多章节+全量落盘）。
 
-    识别章节标题：## 测试要点 / ### 测试要点 / ## 6. 测试要点 / ## 8. 测试要点 等。
-    章节内穿透 ### 子节（如 6.1/6.2/6.3），直至同级或上级 ## 标题才停止。
-    章节内按表格行或编号列表/段落切分条目。纯散文无章节标题时返回 []（SKIP）。
+    识别章节标题（拓宽，覆盖设计文档常见测试相关章节，避免"验证点/测试关注点/异常处理"
+    等用别的标题时返回 [] 静默 SKIP）：
+      测试要点 / 测试点 / 验证点 / 测试关注 / 验收标准 / 检查点 / 异常处理 / 错误码 / 异常分支 / 边界约束
+    支持多个同主题章节散布全文（v0.9.0：旧版只取首个匹配章节即 break，多章节丢失）。
+    章节内穿透子节，按表格行或编号列表/段落切分条目。纯散文无匹配章节时返回 []（SKIP）。
     """
     if not design_lines:
         return []
     items = []
     in_section = False
-    section_level = 0  # 进入时的 # 数，遇到同级或更高级（# 数 <= section_level）则停
-    # 探测"测试要点"/"测试点"章节
-    section_re = re.compile(r"^(#+)\s*.*?(测试要点|测试点)", re.IGNORECASE)
+    section_level = 0  # 进入时的 # 数，遇到同级或更高级（# 数 <= section_level）则出本节
+    section_re = re.compile(
+        r"^(#+)\s*.*?(测试要点|测试点|验证点|测试关注|验收标准|检查点|异常处理|错误码|异常分支|边界约束)",
+        re.IGNORECASE)
     heading_re = re.compile(r"^(#+)\s")
     for ln in design_lines:
         s = ln.strip()
@@ -1389,14 +1395,18 @@ def parse_design_testpoints(design_lines):
         if hm:
             lvl = len(hm.group(1))
         if not in_section:
-            sm = section_re.match(s)
-            if sm:
+            if hm and section_re.match(s):
                 in_section = True
-                section_level = len(sm.group(1))
+                section_level = lvl
             continue
-        # in_section：遇到同级或更高级标题（# 数 <= section_level）且非测试要点子节 -> 停
-        if hm and lvl <= section_level and not section_re.match(s):
-            break
+        # in_section：遇到同级或更高级标题则出本节
+        if hm and lvl <= section_level:
+            in_section = False
+            # 若该标题本身又是可追溯章节，则重新进入（支持多个同主题章节）
+            if section_re.match(s):
+                in_section = True
+                section_level = lvl
+            continue
         if hm:
             # 子节标题（### 等），跳过行本身但继续在 section 内
             continue
@@ -1416,37 +1426,68 @@ def parse_design_testpoints(design_lines):
             if item and not item.startswith("|"):
                 items.append(item)
         else:
-            # 编号列表/段落（非表格）
+            # 编号列表/项目符号/段落（非表格）
             if s and not s.startswith("#"):
                 m = re.match(r"^\s*(\d+)[\.、\)）]?\s*(.+)", s)
                 if m:
                     items.append(m.group(2).strip())
-                elif len(s) > 8 and not s.startswith("-"):
+                    continue
+                # 项目符号：- / * / • / ·（旧版用 not s.startswith("-") 误把整段 bullet 排除）
+                m = re.match(r"^[-*•·]\s+(.+)", s)
+                if m:
+                    items.append(m.group(1).strip())
+                    continue
+                # 段落：跳过纯分隔线（---/===），避免把分隔线当条目
+                if len(s) > 8 and not re.match(r"^[-=]{3,}$", s):
                     items.append(s)
     return items
 
 
 def design_doc_testpoints_trace(data_rows, design_lines):
-    """v0.8.0 #8-H：反向设计文档测试要点追溯。
+    """v0.9.0 #8-H：反向设计文档测试要点追溯（根因4 修复：追溯列 + G/W/T 联合判定）。
 
-    对 DESIGN 文档'测试要点'章节每条，查用例'关联规则'列或'用例名称'列是否覆盖
-    （显式追溯信号，不扫 G/W/T 全文——全文匹配通用词易误判覆盖）。
-    返回 (未覆盖列表, 总数)。design_lines 为空或无测试要点章节时返回 ([], 0)（SKIP）。
+    对 DESIGN 文档可追溯章节每条，查用例'关联规则'列或'用例名称'列是否覆盖（显式追溯信号）；
+    未命中显式列时回退 Given/When/Then 全文（row_text）补判——设计要点只体现在步骤正文
+    而未写进追溯列时，旧版判"未覆盖"（假阴性），现版回退命中即 covered。
+    返回 (未覆盖列表, 总数)。design_lines 为空或无可追溯章节时返回 ([], 0)（SKIP）。
     """
     items = parse_design_testpoints(design_lines)
     if not items:
         return [], 0
-    # 只匹配显式追溯信号列：关联规则 + 用例名称（IDX_RULE/IDX_NAME）
+    # 显式追溯信号列：关联规则 + 用例名称
     case_trace_texts = []
+    case_full_texts = []
     for r in data_rows:
         rule = r[IDX_RULE] if len(r) > IDX_RULE else ""
         name = r[IDX_NAME] if len(r) > IDX_NAME else ""
         case_trace_texts.append(rule + " " + name)
+        case_full_texts.append(row_text(r))
+
+    def _covered(texts, toks, threshold):
+        if not toks:
+            return False
+        for ct in texts:
+            if sum(1 for t in toks if t and t in ct) >= threshold:
+                return True
+        return False
+
     uncovered = []
     for item in items:
         toks = tokens_of(item)
-        # 至少一个 token 命中显式追溯列（关联规则/用例名称）
-        covered = any(any(tok in ct for tok in toks) for ct in case_trace_texts)
+        # 主判：显式追溯列——≥5 token 时阈值 3（须近显式引用），3-4 token 阈值 2，余 1。
+        # 提高 trace 列阈值避免"支付""拦截"等通用词在无关用例名称里造成假阳性。
+        if len(toks) >= 5:
+            trace_thr = 3
+        elif len(toks) >= 3:
+            trace_thr = 2
+        else:
+            trace_thr = 1
+        covered = _covered(case_trace_texts, toks, trace_thr)
+        # 回退：G/W/T 全文，用多数 token 阈值（ceil(len/2)）——仅在步骤正文大量复述设计要点
+        # 词汇时才判覆盖，避免"支付""拦截"等通用词在无关用例里造成假阳性
+        if not covered:
+            gwt_thr = (len(toks) + 1) // 2 if len(toks) >= 2 else 1
+            covered = _covered(case_full_texts, toks, gwt_thr)
         if not covered:
             uncovered.append(item[:40])
     return uncovered, len(items)
@@ -1768,28 +1809,126 @@ def risk_source_report(risk_rows):
     return dist, pending
 
 
+# 行为信号词表（RC6 修复·需求点语义分解）：用于把标题下的散文正文切分为可追溯子条目。
+# 契约/接口定义型需求里"可配置/热生效/格式转换/透传/异步/校验/限流"等测点常藏在正文非标题，
+# 旧版按 ## 标题粗切（1 个标题=1 条目）致 10 条子规则只算 1 条、用例引用该标题即判整块覆盖。
+_REQ_BEHAVIOR_SIGNALS = (
+    "必须", "不得", "不可", "禁止", "允许", "应当", "应该", "需要", "需为",
+    "上限", "下限", "最多", "最少", "不超过", "至少", "超过", "限额", "阈值",
+    "当", "若", "如果", "否则", "除非", "只有", "仅当",
+    "校验", "校对", "验证", "拦截", "拒绝", "放行", "触发", "回调",
+    "异步", "同步", "重试", "幂等", "透传", "脱敏", "热更新", "热生效", "热刷新", "可配置",
+    "默认", "异常", "超时", "失败", "刷新", "缓存", "限流", "熔断", "降级",
+)
+
+
+def _split_prose_sentences(text):
+    """把中英文散文切分为句（按 。；;！？!？ 与换行），返回非空 trimmed 片段。"""
+    parts = re.split(r"[。；;！？!?]", text)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _decompose_heading_body(title, body_lines):
+    """把一个标题章节的正文分解为可追溯子条目（RC6 修复）。
+
+    提取：编号列表项（1./1、/(1)/①）、项目符号项（-/*/•/·）、含行为信号词的散文句。
+    返回 [(子条目标识, 原行)]；无可分解内容时返回 []（由调用方回退为标题本身 1 条目）。
+    子条目标识形如 "要点:<父标题> > <内容>"，使 #4 反向追溯能定位到正文埋点而非仅标题。
+    """
+    subs = []
+    text_body = []
+    for raw in body_lines:
+        s = raw.strip()
+        if not s:
+            continue
+        # 跳过 markdown 表格行（表格由别处处理）
+        if s.startswith("|"):
+            continue
+        # 编号列表：1. / 1、 / (1) / 1) / ① 等
+        m = re.match(r"^(?:\d+|[①②③④⑤⑥⑦⑧⑨⑩])[.、\)）]?\s*(.+)", s)
+        if m:
+            content = m.group(1).strip().rstrip("。；;").strip()
+            if content:
+                subs.append(("要点:%s > %s" % (title, content), s))
+                continue
+        # 项目符号列表：- / * / • / ·
+        m = re.match(r"^[-*•·]\s+(.+)", s)
+        if m:
+            content = m.group(1).strip().rstrip("。；;").strip()
+            if content:
+                subs.append(("要点:%s > %s" % (title, content), s))
+                continue
+        text_body.append(s)
+    # 散文句含行为信号词 → 切为子条目
+    prose = " ".join(text_body)
+    for sent in _split_prose_sentences(prose):
+        if len(sent) >= 4 and any(sig in sent for sig in _REQ_BEHAVIOR_SIGNALS):
+            subs.append(("要点:%s > %s" % (title, sent), sent))
+    # 按标识去重保序
+    seen = set()
+    out = []
+    for sid, line in subs:
+        if sid not in seen:
+            seen.add(sid)
+            out.append((sid, line))
+    return out
+
+
 def parse_requirement_items_from_lines(rlines):
-    """从已读入的需求文档行列表提取需求条目（标题行 # + 显式编号 REQ-xxx / 需求N）。
-    返回 [(条目标识, 原行)]。空列表返回 []。parse_requirement_items(req_doc_path)
-    读盘后委托本函数；供内存内 gate 调用（#4 反向需求追溯无需落盘需求文档）。"""
+    """从已读入的需求文档行列表提取需求条目（v0.9.0·RC6 修复：标题+正文语义分解）。
+
+    旧版仅按 ##/### 标题 + REQ-xxx/需求N 编号行粗切，1 个标题=1 条目，导致标题下
+    10 条散文子规则只算 1 条、用例引用该标题即判整块覆盖（"覆盖不全"总破口）。
+    现版对每个二级及以下标题章节，把正文分解为编号项/项目符号项/含行为信号词的散文句
+    作为独立子条目（"要点:<标题> > <内容>"）；章节无可分解正文时回退为标题本身 1 条目。
+    # 一级文档根标题不计入。显式 REQ-xxx/需求N 编号行仍为独立条目。返回 [(条目标识, 原行)]。
+    """
     items = []
-    heading_level = 99
+    cur_title = None
+    cur_body = []
+    root_title = None  # # 一级文档根标题，纯散文无 ## 标题时作为合成节标题兜底
+    heading_re = re.compile(r"^(#{1,4})\s+(.+)")
+
+    def flush():
+        # cur_title 为 None 但正文非空：整文档无 ## 标题的纯散文，用根标题兜底分解
+        title = cur_title if cur_title is not None else (root_title or "需求正文")
+        if cur_title is None and not cur_body:
+            return
+        subs = _decompose_heading_body(title, cur_body)
+        if subs:
+            items.extend(subs)
+        elif cur_title is not None:
+            items.append(("标题:%s" % cur_title, "## %s" % cur_title))
+
     for ln in rlines:
         s = ln.strip()
-        m = re.match(r"^(#{1,4})\s+(.+)", s)
+        m = heading_re.match(s)
         if m:
             lvl = len(m.group(1))
             title = m.group(2).strip()
-            # 跳过文档根标题（# 一级），只取二级及以下章节为需求条目
+            # 文档根标题（# 一级）：先 flush 上一节，记录根标题（纯散文兜底用），跳过根标题本身
             if lvl == 1:
+                flush()
+                root_title = title
+                cur_title = None
+                cur_body = []
                 continue
-            if lvl < heading_level:
-                heading_level = lvl
-            items.append(("标题:%s" % title, s))
+            # 新标题：flush 上一节，开启新节
+            flush()
+            cur_title = title
+            cur_body = []
             continue
-        m = re.match(r"^(REQ[-_]?[A-Za-z0-9\-_]+|需求\s*\d+)[.、:：\s]", s)
-        if m:
-            items.append((m.group(1).strip(), s))
+        # 显式 REQ-xxx / 需求N 编号行：独立条目（先 flush 当前节）
+        m2 = re.match(r"^(REQ[-_]?[A-Za-z0-9\-_]+|需求\s*\d+)[.、:：\s]", s)
+        if m2:
+            flush()
+            cur_title = None
+            cur_body = []
+            items.append((m2.group(1).strip(), s))
+            continue
+        # 累积正文（cur_title 为 None 时也累积——纯散文无标题文档由 flush 用根标题兜底）
+        cur_body.append(s)
+    flush()
     return items
 
 
@@ -1808,12 +1947,12 @@ def parse_requirement_items(req_doc_path):
 
 def _req_item_tokens(item_id):
     """从需求条目标识抽取匹配 token（供 #4 反向需求追溯的宽松匹配）。
-    标题条目（"标题:xxx"）切为：英文/数字≥2 连续段 + 中文 2-gram 滑动窗。
+    标题/要点条目（"标题:xxx"/"要点:xxx"）切为：英文/数字≥2 连续段 + 中文 2-gram 滑动窗。
     用 2-gram 滑动窗而非整段 CJK run，使 20.2 推荐的短写法（如"见需求文档3.2订单创建"）
     能命中长标题（如"3.2 订单创建功能"）——整段 run "订单创建功能"无法成为短写法的子串，
     而 2-gram "订单""创建"等可命中。数字/章节号单独成 token 以支持"3.2"定位。
-    非"标题:"条目（REQ-xxx/需求N）返回原 item_id，由调用方做精确子串匹配。"""
-    body = item_id[3:] if item_id.startswith("标题:") else item_id
+    非"标题:"/"要点:"条目（REQ-xxx/需求N）返回原 item_id，由调用方做精确子串匹配。"""
+    body = item_id[3:] if item_id.startswith("标题:") or item_id.startswith("要点:") else item_id
     toks = []
     # 英文≥2 连续段（含点号，如 "REQ-ORD" / "API1"）
     for m in re.findall(r"[A-Za-z][A-Za-z0-9_\-]{1,}", body):
@@ -1835,26 +1974,61 @@ def _req_item_tokens(item_id):
         if t and t not in seen:
             seen.add(t)
             uniq.append(t)
-    return uniq[:6]
+    return uniq[:10]
+
+
+def _item_token_covered(item_id, texts):
+    """token 级覆盖判定（v0.9.0·根因4 修复）：跨 texts 逐串统计命中 token 数。
+
+    为降假阳性（短/泛标题被相似名称误命中），当 item 可切出 ≥3 token 时要求单串内
+    命中 ≥2 token；token<3 时按 ≥1 命中（与旧逻辑一致）。调用方先用关联需求ID列，
+    再回退 Given/When/Then 全文（row_text），覆盖即判 covered，避免"要点只在步骤正文
+    而未写进追溯列"被误判未覆盖的假阴性。
+    """
+    toks = _req_item_tokens(item_id)
+    if not toks:
+        return False
+    threshold = 2 if len(toks) >= 3 else 1
+    for ct in texts:
+        hits = sum(1 for t in toks if t and t in ct)
+        if hits >= threshold:
+            return True
+    return False
+
+
+def _reverse_req_trace_core(data_rows, items):
+    """#4 反向需求追溯核心（v0.9.0·根因4 修复：追溯列 + G/W/T 联合判定）。
+
+    主判：关联需求ID列（显式追溯信号）。回退：Given/When/Then 全文（row_text）——
+    要点只体现在步骤正文而未写进追溯列时，旧版判"未覆盖"（假阴性），现版回退命中即 covered。
+    标题/要点条目走 _item_token_covered（多 token 要求降假阳性）；REQ-xxx/需求N 走精确子串。
+    返回 (未覆盖列表, 总条目数)。"""
+    req_ids = [r[IDX_REQ].strip() if len(r) > IDX_REQ else "" for r in data_rows]
+    case_texts = [row_text(r) for r in data_rows]
+    uncovered = []
+    for item_id, _ in items:
+        if item_id.startswith("标题:") or item_id.startswith("要点:"):
+            if _item_token_covered(item_id, req_ids):
+                continue
+            if _item_token_covered(item_id, case_texts):
+                continue  # G/W/T 命中 → 实际已覆盖，仅未写追溯列
+            uncovered.append(item_id)
+        else:
+            if any(item_id in rid for rid in req_ids):
+                continue
+            if any(item_id in ct for ct in case_texts):
+                continue  # G/W/T 命中 → 已覆盖
+            uncovered.append(item_id)
+    return uncovered, len(items)
 
 
 def reverse_requirement_trace(data_rows, req_doc_path):
-    """#4 反向需求追溯（软判定）：需求文档每条条目须有≥1用例引用（关联需求ID列）。
-    未被引用的条目列为'未覆盖需求'。无需求文档（未传第2参数）则跳过，返回 (None, 0)。"""
+    """#4 反向需求追溯（软判定）：需求文档每条条目须有≥1用例引用（关联需求ID列，
+    回退 G/W/T 全文）。未被引用的条目列为'未覆盖需求'。无需求文档则跳过，返回 (None, 0)。"""
     items = parse_requirement_items(req_doc_path)
     if not items:
         return None, 0
-    req_ids = [r[IDX_REQ].strip() if len(r) > IDX_REQ else "" for r in data_rows]
-    uncovered = []
-    for item_id, _ in items:
-        if item_id.startswith("标题:"):
-            toks = _req_item_tokens(item_id)
-            if toks and not any(any(tok in rid for tok in toks) for rid in req_ids):
-                uncovered.append(item_id)
-        else:
-            if not any(item_id in rid for rid in req_ids):
-                uncovered.append(item_id)
-    return uncovered, len(items)
+    return _reverse_req_trace_core(data_rows, items)
 
 
 def reverse_requirement_trace_items(data_rows, req_items):
@@ -1863,17 +2037,7 @@ def reverse_requirement_trace_items(data_rows, req_items):
     无条目则跳过，返回 (None, 0)。"""
     if not req_items:
         return None, 0
-    req_ids = [r[IDX_REQ].strip() if len(r) > IDX_REQ else "" for r in data_rows]
-    uncovered = []
-    for item_id, _ in req_items:
-        if item_id.startswith("标题:"):
-            toks = _req_item_tokens(item_id)
-            if toks and not any(any(tok in rid for tok in toks) for rid in req_ids):
-                uncovered.append(item_id)
-        else:
-            if not any(item_id in rid for rid in req_ids):
-                uncovered.append(item_id)
-    return uncovered, len(req_items)
+    return _reverse_req_trace_core(data_rows, req_items)
 
 
 def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, design_doc_lines=None):

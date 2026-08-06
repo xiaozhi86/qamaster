@@ -222,11 +222,16 @@ def _run_check(chk, st):
             return (False, "%s: REQ 文件不存在 %s。按 phase0_manifest.md 步骤零落盘 REQ_%s.md 后重试。"
                     % (chk["label"], req_path, req_id))
         ledger_path = os.path.join(workdir, "case-design-out", "Clarification_Ledger_%s.md" % req_id)
-        # REQ 为必需输入（phase_gate 校验 #4/#5 依赖它）；ledger 可选（不存在不阻断）
+        # v0.9.0·根因2/6 修复：DESIGN 落盘时必须传 --design，否则 #8-H 设计文档测试要点追溯
+        # + safety_coverage 触发判定在 phase_gate 路径全程拿不到设计文档 → 两门沦为死代码。
+        design_path = os.path.join(workdir, "case-design-out", "DESIGN_%s.md" % req_id)
+        # REQ 为必需输入（phase_gate 校验 #4/#5 依赖它）；ledger/design 可选（不存在不阻断）
         parts = ['python "%s" --phase-gate %d "%s" --req "%s"'
                  % (os.path.join(SKILL_SCRIPTS, "verify_cases.py"), phase, cp, req_path)]
         if os.path.exists(ledger_path):
             parts.append('--ledger "%s"' % ledger_path)
+        if os.path.exists(design_path):
+            parts.append('--design "%s"' % design_path)
         run_mode = st.get("run_mode", "full")
         parts.append('--run-mode %s' % run_mode)
         cmd = " ".join(parts)
@@ -238,20 +243,18 @@ def _run_check(chk, st):
         all_lines = (proc.stdout or "").strip().splitlines()
         detail = "%s: exit=%d" % (chk["label"], proc.returncode)
         if proc.returncode != 0:
-            # v0.8.1: 修复 phase_gate 明细被过滤丢弃的截断 bug。
-            # verify_cases.py 打印硬违规明细用 "    - %s" 前缀（非 [FAIL]），旧逻辑只抓 [FAIL] 行 →
-            # 139 条违规明细全被丢弃，模型只看到 "[FAIL] 硬违规:" 5 字、不知改什么 → 反复盲改直至
-            # 上下文耗尽流程终止（D:\AGI\AAAA 电销通话AI总结 Phase 8 事故）。
-            # 现在同时抓 [FAIL] 标题行 + "- " 缩进明细行，上限 50；并始终附 ##VERIFY_SUMMARY## 供定位规模。
+            # v0.9.0·根因6 修复：截断上限 50→200、尾部 30→60、summary 400→1200。
+            # 旧 50 条上限在 100+ 违规时"修一批又浮一批"永不收敛；超限靠 ##VERIFY_SUMMARY##
+            # 的 hard_violations 计数让模型感知全量规模，完整明细写入 .runtime/ 供 agent 自取。
             fail_lines = [ln for ln in all_lines
                           if ln.strip().startswith("[FAIL]") or ln.lstrip().startswith("- ")]
             summary = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##")]
             if fail_lines:
-                detail += "\n----- phase-gate FAIL 明细 -----\n" + "\n".join(fail_lines[:50])
+                detail += "\n----- phase-gate FAIL 明细 -----\n" + "\n".join(fail_lines[:200])
             elif all_lines:
-                detail += "\n----- 输出(尾部) -----\n" + "\n".join(all_lines[-30:])
+                detail += "\n----- 输出(尾部) -----\n" + "\n".join(all_lines[-60:])
             if summary:
-                detail += "\n" + summary[-1][:400]
+                detail += "\n" + summary[-1][:1200]
         # v0.7.0: gate PASS 时回填 artifacts（从 ##PHASE_ARTIFACTS## 行解析 ID 范围）+ 重置 gate_rounds
         if proc.returncode == 0:
             _backfill_artifacts(st, phase, cp, stdout_lines=all_lines)
@@ -265,17 +268,18 @@ def _run_check(chk, st):
         except Exception as e:
             return (False, "%s: 执行异常 %s" % (chk["label"], e))
         all_lines = (proc.stdout or "").strip().splitlines()
-        tail = all_lines[-25:] if len(all_lines) > 25 else all_lines
+        tail = all_lines[-40:] if len(all_lines) > 40 else all_lines
         detail = "%s: exit=%d" % (chk["label"], proc.returncode)
         if proc.returncode != 0:
             if tail:
                 detail += "\n----- 脚本输出(尾部) -----\n" + "\n".join(tail)
             # [FAIL] 行是修复指令本体；软提示明细较长时可能被截断出 tail，须全量补捞，
-            # 否则模型拿不到可执行的修复目标（v0.6.0 事故修复·覆盖硬门）
+            # 否则模型拿不到可执行的修复目标（v0.6.0 事故修复·覆盖硬门）。
+            # v0.9.0·根因6：补捞上限 10→60，避免大批覆盖硬门 FAIL 时修复目标被丢出模型视野。
             fail_lines = [ln for ln in all_lines if ln.strip().startswith("[FAIL]")]
             missing_fails = [ln for ln in fail_lines if not any(ln in t for t in tail)]
             if missing_fails:
-                detail += "\n----- 硬门 FAIL 明细(补捞) -----\n" + "\n".join(missing_fails[:10])
+                detail += "\n----- 硬门 FAIL 明细(补捞) -----\n" + "\n".join(missing_fails[:60])
         else:
             # 成功时保留摘要行（##VERIFY_SUMMARY##/结论行），供 gate 输出取证与交付摘要摘抄
             keep = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##") or "结论" in ln or "硬门" in ln]

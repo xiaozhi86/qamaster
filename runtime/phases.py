@@ -32,7 +32,7 @@ gate 取值：
 裁剪（与 phase0_manifest.md 步骤五 / dedup_coverage.md ch26 一致）：
   heavy  — 全阶段
   medium — 合并建模（裁剪 phase 4）
-  light  — 裁剪 phase 3/4/10（保留澄清/用例/自查/审核门禁；P0 风险强制 heavy 由模型在 Phase0 判定）
+  light  — 裁剪 phase 3/4（v0.9.0：不再裁剪 phase 10，覆盖率校验在轻量模式仍跑；P0 风险强制 heavy）
 """
 from state_store import PHASE_KINDS  # noqa: F401  (re-export, 供调用方校验)
 
@@ -222,7 +222,9 @@ PHASES = [
         "exit_condition": "verify_md.py 结构通过 + verify_cases.py 硬性校验通过（exit=0）",
         "gate_checks": [
             {"kind": "script", "cmd": "python \"{skill_scripts}/verify_md.py\" \"case-design-out/TestCases_{req_id}.md\"", "label": "结构回读(verify_md)"},
-            {"kind": "script", "cmd": "python \"{skill_scripts}/verify_cases.py\" \"case-design-out/TestCases_{req_id}.md\" \"case-design-out/REQ_{req_id}.md\" --ledger \"case-design-out/Clarification_Ledger_{req_id}.md\"", "label": "内容回读(verify_cases+台账)"},
+            # v0.9.0·根因2/6 修复：传 --design，否则 #8-H 设计文档测试要点追溯 + safety_coverage
+            # 在 Phase 13 回读全程拿不到设计文档 → 两门沦为死代码（DESIGN 不存在时脚本安全跳过）
+            {"kind": "script", "cmd": "python \"{skill_scripts}/verify_cases.py\" \"case-design-out/TestCases_{req_id}.md\" \"case-design-out/REQ_{req_id}.md\" --ledger \"case-design-out/Clarification_Ledger_{req_id}.md\" --design \"case-design-out/DESIGN_{req_id}.md\"", "label": "内容回读(verify_cases+台账+设计文档)"},
             {"kind": "exists", "path": "case-design-out/MANIFEST.md", "label": "索引已更新"},
         ],
         "consumes": ["3", "5", "7", "8", "ledger", "req"],
@@ -269,10 +271,12 @@ PHASE_BY_ID = {p["id"]: p for p in PHASES}
 LAST_PHASE = PHASES[-1]["id"]
 
 # 流程深度裁剪表（被裁掉的阶段号）
+# v0.9.0·根因6 修复：light 不再裁剪 Phase 10（覆盖率校验+反向追溯）——旧版 light 跳过
+# Phase 10 致覆盖校验在生成期缺席，"覆盖不全"在轻量模式无人知晓。Phase 13 回读仍跑同一 gate。
 DEPTH_SKIPS = {
     "heavy": [],
     "medium": [4],
-    "light": [3, 4, 10],
+    "light": [3, 4],
 }
 
 
