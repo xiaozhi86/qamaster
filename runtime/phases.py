@@ -85,6 +85,7 @@ PHASES = [
         "produces": [],
         "exit_condition": "测试需求维度分析完成（与台账/需求一致），Runtime 记录通过",
         "gate_checks": [],
+        "consumes": ["req", "ledger"],
     },
     {
         "id": 3, "name": "规则建模", "gate": "auto",
@@ -193,6 +194,7 @@ PHASES = [
         "produces": [],
         "exit_condition": "自查全部通过 + 写前规模评估完成（单文件/拆PART决策）",
         "gate_checks": [],
+        "consumes": ["8", "3", "5", "7", "ledger", "req"],
     },
     {
         "id": 12, "name": "对话展示投影", "gate": "auto",
@@ -203,6 +205,7 @@ PHASES = [
         "produces": [],
         "exit_condition": "投影与覆盖矩阵已展示",
         "gate_checks": [],
+        "consumes": ["8", "5", "7"],
     },
     {
         "id": 13, "name": "写盘与脚本回读", "gate": "auto",
@@ -237,6 +240,7 @@ PHASES = [
         "produces": ["case-design-out/Knowledge_<需求标识>.md"],
         "exit_condition": "完整模式：用户 confirm；连跑/轻量：标注待审核自动放行（REVIEW_PENDING）",
         "gate_checks": [],
+        "consumes": ["8", "10", "ledger", "req"],
     },
     {
         "id": 15, "name": "Excel 生成", "gate": "license",

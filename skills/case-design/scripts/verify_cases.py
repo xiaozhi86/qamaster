@@ -225,6 +225,10 @@ COVERAGE_GATES = {
     "design_doc_testpoints_trace": _gate_mode(_CG.get("design_doc_testpoints_trace")),
     # 安全覆盖硬门（v0.8.0）：涉敏感数据时安全类用例数须 >0
     "safety_coverage": _gate_mode(_CG.get("safety_coverage")),
+    # v0.8.1 Gap3：规则来源标记硬门（full 模式无来源标记即 exit=1；auto_light 软告警）
+    "rule_source_hard": _gate_mode(_CG.get("rule_source_hard")),
+    # v0.8.1 Gap3：风险来源待确认硬门（full 模式风险来源未确认即 exit=1；auto_light 软告警）
+    "risk_source_hard": _gate_mode(_CG.get("risk_source_hard")),
 }
 
 # 敏感数据信号词表（v0.8.0·safety_coverage 硬门触发条件）
@@ -784,6 +788,62 @@ def check_citation_resolution(data_rows, section_ids):
     return violations
 
 
+# ===== 项 1b：追溯性 section 内联实体校验【闭环 D1 自证循环·v0.8.1】=====
+def check_traceback_section_inlined(lines, section_ids):
+    """v0.8.1: 闭合 D1 自证循环。追溯性 section（规则建模/风险清单/测试点清单）存在但
+    collect_section_ids 解析出 0 个 ID → 疑似'见 Phase N'指针式引用 → check_citation_resolution
+    因 section_ids[prefix]["ids"] 为空而 continue 静默跳过（L769-770）→ D1 悬空引用门禁被
+    空指针绕过，用例关联规则列引用 R26/R28 等全部误判为"判过"。
+
+    Phase 8/10 检查点必须内联 R/RK/TP 实体内容（从 checkpoint_3/5/7 复制条目），非写指针。
+    无对应 section 标题则不判（允许 Phase 3 检查点无'风险清单'等）。"""
+    violations = []
+    # 指针式引用标记（"见 Phase N"/"见 checkpoint"/"参见"等）——真实内联 section 不会含这些
+    _POINTER_PAT = re.compile(r"(见\s*Phase|见.*checkpoint|参见.*Phase|同\s*Phase|详见.*Phase)")
+    # (section 名正则, 对应 ID 前缀) —— section 名与 collect_section_ids 的 _CR_SECTION_DEFS 对齐
+    pairs = [("规则建模", "R"),
+             ("风险清单|风险分析|风险列表", "RK"),
+             ("测试点清单|测试点列表|测试点建模", "TP")]
+    for sec_name, prefix in pairs:
+        has_heading = False
+        section_body = []
+        in_sec = False
+        for ln in lines:
+            if re.match(r"^#+\s.*(" + sec_name + ")", ln):
+                has_heading = True
+                in_sec = True
+                continue
+            if in_sec:
+                # 遇同级/上级新标题则结束本 section 采集
+                if re.match(r"^#+\s", ln):
+                    in_sec = False
+                    continue
+                section_body.append(ln)
+        ids = section_ids.get(prefix, {}).get("ids", set())
+        if not has_heading:
+            continue
+        body_text = "".join(section_body)
+        has_pointer = bool(_POINTER_PAT.search(body_text))
+        # 真实内联条目数：prose `**R<n>` 加粗项 或 表格首列 R<n>
+        real_items = len(re.findall(r"\*\*%s\d" % prefix, body_text))
+        real_items += sum(1 for ln in section_body
+                           if ln.strip().startswith("|")
+                           and re.match(r"\|?\s*%s\d" % prefix, ln.strip()))
+        # 触发条件：标题存在 但 (ID 注册表为空 或 含指针标记文本)
+        # 含指针标记即判违规——指针文本里的 R1/R32 会被 collect_section_ids 误解析为真实条目，
+        # 伪造注册表满足 D1，实际 R2-R31 全缺，D1 悬空引用门禁被绕过（v0.8.1 事故根因）
+        if not ids or has_pointer:
+            if has_pointer:
+                why = "含指针式引用'见 Phase N'（指针文本里的 ID 被误解析为真实条目，伪造注册表）"
+            else:
+                why = "无可解析 %s ID" % prefix
+            violations.append("追溯性 section [%s] 存在但%s，D1 悬空引用门禁被绕过。"
+                              "须内联 %s 实体内容（从 checkpoint_3/5/7 复制规则/风险/测试点条目，"
+                              "含 **%s<n>** 加粗项或表格首列 %s<n>），非写指针" % (
+                                  sec_name.split("|")[0], why, prefix, prefix, prefix))
+    return violations
+
+
 # ===== 项 2：section ID 编号连续性【闭环 D2】=====
 def check_section_id_contiguity(section_ids, scope="all"):
     """校验 R/RK/TP/API/SC 编号无跳号。镜像 check_ids 逻辑。
@@ -1265,6 +1325,47 @@ def testpoint_coverage(data_rows, tp_rows):
         if not token_covered:
             uncovered.append("%s %s" % (tpid, desc[:24]))
     return uncovered, len(tp_rows)
+
+
+def check_risk_testpoint_linkage(risk_rows, tp_rows):
+    """v0.8.1: Phase 7 硬门——每条 P0/P1 风险须有 ≥1 测试点覆盖。
+    闭合 phase_gate_map[7] 声明 testpoint_risk_linkage 但函数不存在 + run_phase_gate
+    phase_filtered 把它过滤掉的缺口。匹配口径与 risk_coverage 一致：模块命中 或 描述 token 命中。
+    risk_rows: [[风险ID, 风险等级, 风险描述, 关联模块, ...], ...]
+    tp_rows: [[测试点ID, 场景类型, 测试点描述, 关联模块, ...], ...]
+    无风险/无 TP 清单时不判（collect_all_findings 已有连续性检查 + #7-H 反向兜底）。"""
+    if not risk_rows or not tp_rows:
+        return []
+    violations = []
+    tp_modules = set()
+    tp_text_parts = []
+    for tr in tp_rows:
+        if len(tr) > 3:
+            m = tr[3].strip()
+            if m:
+                tp_modules.add(m)
+        if len(tr) > 2:
+            tp_text_parts.append(tr[2].strip() if tr[2] else "")
+        elif len(tr) > 1:
+            tp_text_parts.append(tr[1].strip() if tr[1] else "")
+    tp_text = " ".join(tp_text_parts)
+    for rr in risk_rows:
+        rk_id = rr[0].strip() if (rr and len(rr) > 0) else ""
+        level = rr[1].strip() if len(rr) > 1 else ""
+        if level not in ("P0", "P1"):
+            continue
+        desc = rr[2].strip() if len(rr) > 2 else ""
+        mod = rr[3].strip() if len(rr) > 3 else ""
+        # 模块命中
+        if mod and mod in tp_modules:
+            continue
+        # 描述 token 命中（与 risk_coverage 同 tokens_of 口径）
+        if desc:
+            toks = [t for t in tokens_of(desc) if len(t) > 1]
+            if any(t in tp_text for t in toks):
+                continue
+        violations.append("%s(%s) 无对应测试点覆盖（P0/P1 风险→≥1 TP 硬门）" % (rk_id or "未知", level))
+    return violations
 
 
 def parse_design_testpoints(design_lines):
@@ -1810,14 +1911,21 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
     # 硬性校验
     id_violations = check_ids(data_rows)
     field_violations = check_fields(data_rows)
-    hard_violations = id_violations + field_violations
 
     # section ID 注册表（v0.7.0·反向引用/连续性/假设对账公共依赖）
     section_ids = collect_section_ids(lines)
 
     # 项 1 反向引用完整性【闭环 D1】（硬·exit=1）
     citation_violations = check_citation_resolution(data_rows, section_ids)
-    hard_violations = hard_violations + citation_violations
+
+    # 项 1b 追溯性 section 内联实体【闭环 D1 自证循环·v0.8.1】（硬·exit=1）
+    # section 标题存在但解析出 0 个 ID → 指针式引用 → D1 被空注册表绕过。Phase 8/10 必须内联。
+    traceback_violations = check_traceback_section_inlined(lines, section_ids)
+
+    # v0.8.1: 结构性违规（追溯 section/悬空引用）排在逐行字段违规之前——
+    # run_phase_gate 的 phase_filtered[:50] 打印上限下，让"先修结构、再修字段"的
+    # 修复优先序前置，避免模型被 100+ 条枚举越界淹没而漏掉追溯性 section 这类根因。
+    hard_violations = traceback_violations + citation_violations + id_violations + field_violations
 
     # 项 2 section ID 连续性【闭环 D2】（RK/TP/API/SC=full 硬，R=warn 软）
     contig_violations, contig_warnings = check_section_id_contiguity(section_ids, scope="all")
@@ -1847,6 +1955,15 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
         unc_req, req_total = None, 0
     rulesrc_n, rulesrc_list = check_rule_source(lines)
 
+    # v0.8.1 Gap3：规则来源标记硬门（full 模式无来源标记即 exit=1；auto_light 软告警）
+    # 闭合 phases.py 契约"每条规则项标注来源"——旧逻辑 check_rule_source 仅进 soft.rule_source
+    # 不进 hard_violations，有无来源都不阻断。
+    rule_src_hard_violations = []
+    rule_src_mode = COVERAGE_GATES.get("rule_source_hard", "full")
+    if rule_src_mode == "full" and rulesrc_list:
+        rule_src_hard_violations = list(rulesrc_list)
+    hard_violations = hard_violations + rule_src_hard_violations
+
     # 项 5 用例↔台账/规则一致性【闭环 C3】（软判定）
     consist_n, consist_list = check_behavior_consistency(data_rows, lines, ledger=ledger)
 
@@ -1868,6 +1985,20 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
     unc_tp, tp_total = testpoint_coverage(data_rows, tp_rows)
     unc_api, api_total, ctype_issues = reverse_interface_trace(data_rows, lines)
     src_dist, src_pending = risk_source_report(risk_rows)
+
+    # v0.8.1: Phase 7 硬门——P0/P1 风险须被 ≥1 测试点覆盖（正向 risk→TP）
+    # 闭合 phase_gate_map[7] 声明 testpoint_risk_linkage 但函数不存在 + 被过滤的缺口
+    risk_tp_linkage_violations = check_risk_testpoint_linkage(risk_rows, tp_rows)
+    hard_violations = hard_violations + risk_tp_linkage_violations
+
+    # v0.8.1 Gap3：风险来源待确认硬门（full 模式 P0/P1 风险来源∈ROLE_SOURCES 须台账确认；
+    # 未确认即 exit=1；auto_light 软告警）。闭合 phases.py 契约"风险清单每条须标注风险来源"——
+    # 旧 risk_source_report 仅软提示，待确认项不阻断。
+    risk_src_hard_violations = []
+    risk_src_mode = COVERAGE_GATES.get("risk_source_hard", "full")
+    if risk_src_mode == "full" and src_pending:
+        risk_src_hard_violations = list(src_pending)
+    hard_violations = hard_violations + risk_src_hard_violations
 
     # v0.8.0 #8-H 设计文档测试要点追溯 + safety_coverage 触发判定
     unc_dd, dd_total = design_doc_testpoints_trace(data_rows, design_doc_lines)
@@ -2395,11 +2526,17 @@ def run_phase_gate(argv):
     # 阶段过滤：Phase 3 只报规则来源+R连续性；Phase 5 只报风险来源+RK连续性；余类推
     phase_filtered = []
     if a.phase == 3:
-        phase_filtered = [v for v in hard_violations if "序号跳号" in v and "R清单" in v]
+        # v0.8.1 Gap3: 保留 R 跳号 + 规则来源标记硬门（rule_source_hard=full 时）
+        phase_filtered = [v for v in hard_violations
+                          if ("序号跳号" in v and "R清单" in v) or "无来源标记" in v]
     elif a.phase == 5:
-        phase_filtered = [v for v in hard_violations if "序号跳号" in v and "RK清单" in v]
+        # v0.8.1 Gap3: 保留 RK 跳号 + 风险来源待确认硬门（risk_source_hard=full 时）
+        phase_filtered = [v for v in hard_violations
+                          if ("序号跳号" in v and "RK清单" in v) or "需在台账确认" in v]
     elif a.phase == 7:
-        phase_filtered = [v for v in hard_violations if "序号跳号" in v and "TP清单" in v]
+        # v0.8.1: 保留 TP 跳号 + P0/P1 风险→≥1 TP 硬门（check_risk_testpoint_linkage）
+        phase_filtered = [v for v in hard_violations
+                          if ("序号跳号" in v and "TP清单" in v) or "无对应测试点覆盖" in v]
     else:
         phase_filtered = hard_violations
 
@@ -2416,7 +2553,10 @@ def run_phase_gate(argv):
     if phase_filtered:
         ok = False
         print("  [FAIL] 硬违规:")
-        for v in phase_filtered[:20]:
+        # v0.8.1: 上限 20→50。runtime phase_gate 回传上限已同步抬到 50；旧 20 条在 100+ 违规时
+        # 会"修一批又浮一批"永不收敛（D:\AGI\AAAA Phase 8 事故）。仍超 50 时靠 ##VERIFY_SUMMARY##
+        # 的 hard_violations 计数让模型感知全量规模。
+        for v in phase_filtered[:50]:
             print("    - %s" % v)
     else:
         print("  [PASS] 阶段检查子集通过")

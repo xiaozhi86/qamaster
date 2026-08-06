@@ -35,6 +35,15 @@ disable-model-invocation: true
 1. **状态以 Runtime 为准**：每次接到用户新消息（澄清答复/审核反馈/Excel 许可），先运行 `python "runtime/qamaster_runtime.py" status` 恢复权威状态，禁止凭对话记忆推断"现在该哪一步"。
 2. **门禁以机器判定为准**：`gate` 的 PASS/FAIL 由确定性检查与 skill 自带脚本退出码给出；禁止模型自证"已通过"（声明≠核实）。
 3. **业务规范不变**：Runtime 只做流程控制；避坑红线（§0）、输入协议（§5）、运行模式（§6.5）、质量门禁、输出协议等全部业务规则仍以本文件 + references/ 为唯一细则来源。
+4. **gate FAIL 明细自查通道（v0.8.1·截断兜底）**：`gate` 回传给模型的 `detail` 有上限（`fail_lines[:50]` + 尾部 30 行 + `##VERIFY_SUMMARY##` 摘要行）。若 `detail` 末尾被截断、或 `[FAIL] 硬违规:` 后跟的明细不足以定位修复点，模型**必须**直接跑 verify_cases.py 拿全量 stdout 自查，**不要凭空猜测改法盲改**：
+
+   ```
+   python "<PLUGIN_ROOT>/skills/case-design/scripts/verify_cases.py" --phase-gate <N> "<工作目录>/case-design-out/.runtime/checkpoint_<N>.md" --req "<工作目录>/case-design-out/REQ_<需求标识>.md" --ledger "<工作目录>/case-design-out/Clarification_Ledger_<需求标识>.md" --run-mode full
+   ```
+
+   - `<PLUGIN_ROOT>` 与 `<工作目录>` 用 runtime 已解析的绝对路径（见 `start`/`gate` 输出的 PLUGIN_ROOT 行），**不要猜 `0.7.1/scripts/` 这类相对路径**（旧事故里模型猜错路径致 `No such file or directory`，自查通道也断）。
+   - 看全量 stdout 的 `    - 行X: 测试类型越界『...』` 等明细行逐条修，而非只盯 `##VERIFY_SUMMARY##` 的计数。
+   - 修完重写检查点后重跑 `gate`；连续 ≥3 次 FAIL runtime 会强制提示人工介入，此时勿再盲试。
 
 > **Runtime 降级协议（v0.6.0·事故修复·强制区分两情形）**："未安装 Runtime"仅指 `commands/case-design.md` 路径解析的全部候选均未命中的**情形A**——此时允许退回本文件 §6 的 15 阶段流程定义执行，但**必须遵守下方"降级最低门禁清单"**（业务规则与阶段顺序不变，Runtime 是执行保障，不是规则来源）。若 Runtime 文件**存在但调用失败**（Bash 分类器故障/临时错误，**情形B**）——**禁止降级跑全程**：退避重试至多 3 次（间隔 1-2 分钟）；仍失败则**停在当前阶段、显式告知用户"Runtime 暂时不可用，流程暂停"**，只允许完成纯思考类不落盘的产物（如澄清问题清单草稿），**禁止落盘 `TestCases_*.md`**。核心原则：**流程控制可降级，质量门禁不可降级**。
 

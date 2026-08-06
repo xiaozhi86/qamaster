@@ -177,8 +177,17 @@ def _prior_artifacts_block(st, phase):
                 lines.append("  Phase %s 制品: %s（已沉淀·ID 范围）" % (c, id_desc))
             else:
                 cp = os.path.join(out, ".runtime", "checkpoint_%s.md" % c)
-                mark = "（已沉淀）" if os.path.exists(cp) else "（未沉淀·前置阶段未完成？）"
-                lines.append("  Phase %s 制品: case-design-out/.runtime/checkpoint_%s.md %s" % (c, c, mark))
+                # v0.8.1 Gap4: 区分"无 phase_gate 的内存阶段"与"真未完成"，消除"未沉淀"误导
+                # Phase 2/4/6/9/11/12 无 phase_gate，artifacts 永不回填，旧文案"未沉淀·前置阶段未完成？"
+                # 误导模型以为前置阶段没做。实际已 PASS，只是无 phase_gate 触发回填。
+                src_phase = P.get_phase(int(c)) if c.isdigit() else None
+                has_gate = bool(src_phase and src_phase.get("gate_checks"))
+                if has_gate:
+                    mark = "（已沉淀）" if os.path.exists(cp) else "（未沉淀·前置阶段未完成？）"
+                    lines.append("  Phase %s 制品: case-design-out/.runtime/checkpoint_%s.md %s" % (c, c, mark))
+                else:
+                    # 无 phase_gate 的纯内存阶段：不写检查点，靠下游 Phase 8/10/13 gate 校验追溯性 section
+                    lines.append("  Phase %s 制品: （内存产物·无 phase_gate·由下游 gate 校验追溯性 section）" % c)
     lines.append("  消费约束: 关联规则列 R/RK/TP/API 须在上游清单内（悬空引用 exit=1）；用例等级须映射 RK 等级；")
     lines.append("            台账'已解决'事实须落成断言；假设A<n> 须在台账假设清单内；台账'待确认'须闭环或转假设")
     return "\n".join(lines)
@@ -228,12 +237,21 @@ def _run_check(chk, st):
             return (False, "%s: 执行异常 %s" % (chk["label"], e))
         all_lines = (proc.stdout or "").strip().splitlines()
         detail = "%s: exit=%d" % (chk["label"], proc.returncode)
-        fail_lines = [ln for ln in all_lines if ln.strip().startswith("[FAIL]")]
         if proc.returncode != 0:
+            # v0.8.1: 修复 phase_gate 明细被过滤丢弃的截断 bug。
+            # verify_cases.py 打印硬违规明细用 "    - %s" 前缀（非 [FAIL]），旧逻辑只抓 [FAIL] 行 →
+            # 139 条违规明细全被丢弃，模型只看到 "[FAIL] 硬违规:" 5 字、不知改什么 → 反复盲改直至
+            # 上下文耗尽流程终止（D:\AGI\AAAA 电销通话AI总结 Phase 8 事故）。
+            # 现在同时抓 [FAIL] 标题行 + "- " 缩进明细行，上限 50；并始终附 ##VERIFY_SUMMARY## 供定位规模。
+            fail_lines = [ln for ln in all_lines
+                          if ln.strip().startswith("[FAIL]") or ln.lstrip().startswith("- ")]
+            summary = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##")]
             if fail_lines:
-                detail += "\n----- phase-gate FAIL 明细 -----\n" + "\n".join(fail_lines[:10])
+                detail += "\n----- phase-gate FAIL 明细 -----\n" + "\n".join(fail_lines[:50])
             elif all_lines:
-                detail += "\n----- 输出(尾部) -----\n" + "\n".join(all_lines[-15:])
+                detail += "\n----- 输出(尾部) -----\n" + "\n".join(all_lines[-30:])
+            if summary:
+                detail += "\n" + summary[-1][:400]
         # v0.7.0: gate PASS 时回填 artifacts（从 ##PHASE_ARTIFACTS## 行解析 ID 范围）+ 重置 gate_rounds
         if proc.returncode == 0:
             _backfill_artifacts(st, phase, cp, stdout_lines=all_lines)
@@ -322,6 +340,18 @@ def _card(st, phase, extra=""):
     lines.append("  2. 每次接到用户消息（澄清答复/审核反馈/Excel许可）后，先执行 `status` 或 `gate` 恢复权威状态再继续")
     lines.append("  3. 本阶段产物未过 gate，禁止进入下一阶段；模型无权自行宣布阶段完成")
     lines.append("  4. 产出物全部写入 <工作目录>/case-design-out/ 下；写盘约束见 output_write.md（单文件一次 Write，禁止 Edit 增量）")
+    # v0.8.1: Phase 8/10 检查点含 15 列用例表时，check_fields 逐行校验枚举契约，
+    # 违约即 exit=1。旧事故里模型按"宽松心智"写"功能测试/正常场景/1段名称" → 105+ 硬违规，
+    # 又因 gate 明细被截断看不到原因而反复盲改。此处把硬契约塞进契约卡，从源头预防。
+    if phase["id"] in (8, 10) and phase.get("gate_checks"):
+        lines.append("")
+        lines.append("字段硬约束（check_fields 逐行校验，违约即 exit=1；枚举以 config/validation_rules.json 为准）:")
+        lines.append("  测试类型∈{兼容性,功能,可靠性,契约,安全,幂等,并发,异常,权限,状态迁移,边界,集成}（无\"测试\"后缀）")
+        lines.append("  测试维度∈{兼容性验证,安全验证,幂等验证,并发验证,接口验证,数据验证,权限验证,状态验证,输入验证,边界验证,集成验证,风险验证,界面验证}（无\"场景/异常\"后缀）")
+        lines.append("  用例名称=4段【模块】【功能】【场景】【预期】（name_segments=4）")
+        lines.append("  固定列: 编辑模式=STEP 标签=AI 责任人=AI 用例状态=Completed")
+        lines.append("  用例等级∈{P0,P1,P2,P3}；用例ID=<需求标识>_<功能缩写>_<序号>（全局唯一、连续不跳号）")
+        lines.append("  追溯性 section 须内联 R/RK/TP 实体内容（非\"见 Phase N\"指针），否则 D1悬空引用/D2跳号/coverage 静默失效")
     # v0.7.0: 注入 PRIOR_ARTIFACTS（按当前阶段 consumes）
     prior = _prior_artifacts_block(st, phase)
     if prior:

@@ -480,7 +480,9 @@
     "ledger_propagation": "warn",
     "open_questions": "full",
     "keyword_coverage": "warn",
-    "assumption_resolution": "full"
+    "assumption_resolution": "full",
+    "rule_source_hard": "full",
+    "risk_source_hard": "full"
   },
   "behavior_source": {
     "_doc": "检查15 业务行为来源追溯 + #5 反向行为来源追溯（dedup_coverage.md）。用例 Given/When/Then 断言的业务行为（状态流转目标/模态规则/约束值/异常机制）须有来源三选一：(a)行为 token 出现在需求文档/接口契约文档；(b)关联规则列引用 R<序号>/TP<序号>/API<序号>（规则建模/风险清单/变更影响清单已沉淀）；契约驱动分支下接口契约文档亦为合法来源；(c)关联规则或用例名称含假设标记 假设A<序号>/基于假设。三者皆无且行为信号不在需求文档->疑似无来源业务行为(脑补)，供 selfcheck 检查15 转问题(P0/P1)/假设(P2/P3)，不得静默保留。规则建模 section 每条规则项建议标 来源:需求文档<章节>/台账Q<序号>/假设A<序号>，无来源标记->疑似脑补规则(破 rule_coverage 自证洗白)。",
@@ -565,7 +567,7 @@
     "_doc": "阶段出口门禁检查子集映射（v0.7.0·门禁前移；v0.8.0 补 testpoint_coverage/design_doc_testpoints_trace/safety_coverage）。声明每个阶段 --phase-gate 跑哪些检查，与 Phase 13 全量校验共用 collect_all_findings，避免重复或遗漏。runtime 在 Phase 3/5/7/8/10 gate 调用。",
     "3": ["check_rule_source", "check_section_id_contiguity:R"],
     "5": ["risk_source_report", "check_section_id_contiguity:RK"],
-    "7": ["testpoint_risk_linkage", "check_section_id_contiguity:TP"],
+    "7": ["check_risk_testpoint_linkage", "check_section_id_contiguity:TP"],
     "8": ["collect_all_findings", "check_citation_resolution", "check_assumption_resolution", "check_ledger_propagation", "check_behavior_consistency", "check_section_id_contiguity:all", "testpoint_coverage"],
     "10": ["coverage_gate_failures", "check_open_questions_gate", "check_ledger_propagation", "testpoint_coverage", "design_doc_testpoints_trace"],
     "13": ["verify_md", "collect_all_findings", "coverage_gate_failures", "check_open_questions_gate", "testpoint_coverage", "design_doc_testpoints_trace", "safety_coverage"]
