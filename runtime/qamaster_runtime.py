@@ -207,6 +207,37 @@ def _backfill_artifacts(st, phase, checkpoint_path, stdout_lines=None):
     st["artifacts"][str(phase)] = entry
 
 
+def _maybe_upgrade_depth_on_p0(st, phase, stdout_lines):
+    """P0-1 修复·两段式规模升级：Phase 5 gate PASS 后，若风险清单含 P0/P1 风险且
+    state.depth != heavy → 自动升级 depth=heavy 并补跑被裁剪阶段。
+
+    破"P0 风险循环依赖"：第0阶段按 P0 域信号初判规模（可能判中型/轻型裁剪了 phase 3/4/10），
+    第5阶段实测产出 P0/P1 风险时由 Runtime 兜底升级——两道闸（域信号初判 + 风险实测）都过才
+    放行中型/轻型。VERIFY_SUMMARY 的 risk_p0p1 字段为风险实测信号（>0 即存在 P0/P1）。
+    """
+    if phase != 5:
+        return False
+    cur_depth = (st.get("depth") or "heavy")
+    if cur_depth == "heavy":
+        return False
+    import re
+    p0p1 = 0
+    for ln in stdout_lines or []:
+        s = ln.strip()
+        if s.startswith("##VERIFY_SUMMARY##"):
+            m = re.search(r"risk_p0p1=(\d+)", s)
+            if m:
+                p0p1 = int(m.group(1))
+            break
+    if p0p1 > 0:
+        st["depth"] = "heavy"
+        state_store.log_event(st, "depth_upgrade",
+                              detail="phase5 P0/P1 风险实测 %d 条 → depth %s→heavy（补跑被裁剪阶段）"
+                              % (p0p1, cur_depth))
+        return True
+    return False
+
+
 def _prior_artifacts_block(st, phase, spec):
     """v0.7.0: 渲染契约卡的 PRIOR_ARTIFACTS 段——按当前阶段 consumes 注入上游制品 ID 范围。
 
@@ -316,6 +347,9 @@ def _run_check(chk, st, spec):
         if proc.returncode == 0:
             _backfill_artifacts(st, phase, cp, stdout_lines=all_lines)
             st["gate_rounds"][str(phase)] = 0
+            # P0-1 修复：Phase 5 gate PASS 后按 P0/P1 风险实测升级 depth→heavy
+            if _maybe_upgrade_depth_on_p0(st, phase, all_lines):
+                detail += " | depth→heavy（Phase5 P0/P1 风险实测触发两段式升级）"
         return (proc.returncode == 0, detail)
     if kind == "script":
         cmd = _fmt_cmd(chk["cmd"], st, spec)
@@ -423,6 +457,16 @@ def _card(st, phase, spec, extra=""):
     if prior:
         lines.append("")
         lines.append(prior)
+    # G-FB1 修复：注入 PATCH_FEEDBACK（增量反哺指令，不回退阶段，模型就地修正前置产物切片）
+    directives = st.get("patch_directives") or []
+    if directives:
+        lines.append("")
+        lines.append("##PATCH_FEEDBACK##（后续阶段对前置产物的修正意见·就地修正，不回退重跑）")
+        for d in directives:
+            lines.append("  - [→ Phase %d %s] %s" % (d.get("target_phase"), d.get("target_name", ""), d.get("reason", "")))
+        lines.append("  修复要求：在当前阶段产物中就地修正上述前置产物切片（如补漏标的风险/规则/测试点），")
+        lines.append("  并在重写本阶段产物时把修正同步进来；修正完成后执行 `patch --clear` 清除指令。")
+        lines.append("  与 fail --to 区别：patch 不回退 current_phase，避免整阶段重跑；仅当前阶段产物会重写。")
     if extra:
         lines.append("")
         lines.append(extra)
@@ -468,7 +512,7 @@ def _manifest_side_effect(st, phase, spec, workdir):
         return
     mp = _manifest_path(workdir, spec)
     try:
-        with locking.FileLock(mp, timeout=10):
+        with locking.FileLock(mp, timeout=30):  # P2 修复：锁超时统一为 30s（与 cmd_manifest/reconcile 一致，旧 10s 在并发多需求下偏短）
             if pid == 0:
                 manifest.add(mp, req_id, workdir=workdir, output_dir=spec.output_dir)
             elif pid == 1:
@@ -482,6 +526,21 @@ def _manifest_side_effect(st, phase, spec, workdir):
                     manifest.update(mp, req_id, testcase_files=files)
             elif pid == 14:
                 manifest.complete(mp, req_id)
+                # G-2 修复：Phase 14 完成后清理中间检查点（checkpoint_N.md），
+                # 终态产物 TestCases_<id>.md 已含全部追溯性 section，检查点冗余。
+                # 保留 state.json 作为完成记录；失败不阻断（审计可重建）。
+                try:
+                    cp_dir = os.path.dirname(_checkpoint_path(workdir, spec, req_id, 0))
+                    removed = 0
+                    for f in glob.glob(os.path.join(cp_dir, "checkpoint_*.md")):
+                        os.remove(f)
+                        removed += 1
+                    if removed:
+                        print("  [INFO] 已清理 %d 个中间检查点（Phase 14 完成；终态产物 TestCases_%s*.md 已含全部内容）"
+                              % (removed, req_id))
+                except Exception as ce:
+                    print("  [WARN] 检查点清理失败（不阻断完成；可手动删除 .qamaster/%s/%s/checkpoint_*.md）: %s"
+                          % (spec.name, req_id, ce))
     except Exception as e:
         print("  [WARN] MANIFEST 副作用失败（不阻断 gate；可执行 `manifest reconcile --req-id %s` 修复）: %s"
               % (req_id, e))
@@ -933,6 +992,53 @@ def cmd_fail(a):
     print(_card(st, target, spec))
 
 
+def cmd_patch(a):
+    """G-FB1 修复·增量反哺回路：patch --to <phase> --reason <text>。
+
+    与 fail --to（粗粒度回退重走整阶段）互补：patch 不改 current_phase/completed，
+    只把"后续阶段对前置产物的修正意见"登记为 patch_directives，由当前阶段契约卡
+    的 ##PATCH_FEEDBACK## 段注入模型上下文——模型在当前阶段就地修正前置产物切片
+    （如 Phase 8 发现 Phase 5 漏标 RK3，不回退重跑 Phase 5，而在 Phase 8 就地补 RK3
+    后重写本阶段产物）。--clear 清除已消化的指令。
+
+    闭合 G-FB1：旧版只有 fail --to 粗粒度回退，"前置小修也要整阶段重跑"代价过高致
+    模型倾向于"硬扛不修"；patch 提供轻量增量通道，让后续阶段发现的前置问题能精准反哺。
+    """
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, path = _load_or_die(a.workdir, a.workflow, req_id)
+    if a.clear:
+        cleared = len(st.get("patch_directives", []))
+        st["patch_directives"] = []
+        if cleared:
+            state_store.log_event(st, "patch_clear", phase=st["current_phase"],
+                                  detail="清除 %d 条已消化 patch 指令" % cleared)
+        state_store.save(path, st)
+        print("PATCH CLEAR: 已清除 %d 条 patch 指令" % cleared)
+        return
+    target = spec.find_phase_by_name(a.to)
+    if target is None:
+        _die("无法解析 patch 目标阶段: %s（可用阶段号或名称关键词）" % a.to)
+    cur = st["current_phase"]
+    if target["id"] > cur:
+        _die("patch --to 仅支持反哺前置阶段（目标 Phase %d > 当前 Phase %d）。"
+             "前进式修正用 set/next，不属 patch 语义。" % (target["id"], cur))
+    if not a.reason:
+        _die("patch --reason 必填：说明后续阶段发现的前置产物问题（供模型就地修正）")
+    st.setdefault("patch_directives", [])
+    directive = {"target_phase": target["id"], "target_name": target["name"],
+                 "from_phase": cur, "reason": a.reason}
+    st["patch_directives"].append(directive)
+    state_store.log_event(st, "patch", phase=cur,
+                          detail="→ Phase %d %s：%s" % (target["id"], target["name"], a.reason[:80]))
+    state_store.save(path, st)
+    print("PATCH: 已登记增量反哺指令 → Phase %d (%s)" % (target["id"], target["name"]))
+    print("  原因: %s" % a.reason)
+    print("  (不回退 current_phase=%d；指令将由当前/后续阶段契约卡的 ##PATCH_FEEDBACK## 段注入)" % cur)
+    print()
+    print(_card(st, spec.get_phase(cur), spec))
+
+
 def _run_knowledge_gate(st, spec):
     """执行知识沉淀门禁（verify_knowledge.py 结构校验），返回 (ok, detail)。"""
     for chk in spec.knowledge_gate:
@@ -1185,6 +1291,15 @@ def main():
     _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_fail)
+
+    sp = sub.add_parser("patch", help="增量反哺（G-FB1：不回退，登记前置产物修正指令注入当前阶段）")
+    sp.add_argument("--to", default=None, help="前置目标阶段（阶段号或名称关键词）")
+    sp.add_argument("--reason", default="")
+    sp.add_argument("--clear", action="store_true", help="清除已消化的 patch 指令")
+    _ri(sp)
+    _wf(sp)
+    _wd(sp)
+    sp.set_defaults(fn=cmd_patch)
 
     sp = sub.add_parser("set", help="登记判定结果/用户意图（depth/input-kind/mode/knowledge/excel）")
     sp.add_argument("--depth", default=None)

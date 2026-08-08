@@ -87,6 +87,7 @@ def new_state(workflow, req_id, workdir):
         "confirm_rounds": 0,                 # 当前 confirm 门禁的往返轮次（审核反馈修改次数）
         "gate_rounds": {},                   # v0.7.0: {"<phase>": n} 自动门原地返修轮次（≥3 强制人工）
         "artifacts": {},                     # v0.7.0: 制品注册表 {"req":.., "ledger":.., "3":{rule_ids}, "5":{risk_ids,levels}, "7":{tp_ids}, "8":{case_ids,rule_refs}}
+        "patch_directives": [],              # G-FB1: 增量反哺指令 [{target_phase,target_name,from_phase,reason}]
         "history": [],                       # 阶段迁移审计日志 [{ts,event,phase,detail}]
         "created_at": _now(),
         "updated_at": _now(),

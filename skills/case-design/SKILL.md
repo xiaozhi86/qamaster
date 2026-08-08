@@ -37,6 +37,7 @@ disable-model-invocation: true
        FAIL → 按修复指令原地修复，重跑 gate（禁止跳阶段）
   → 人工门（Phase 1/14/15）：输出确认请求后停止等待用户；
      用户答复后先落盘再 gate；确认用 confirm --req-id <id> / 拒绝用 reject / 反馈问题用 fail --to <阶段> --req-id <id> --reason "..."
+  → 增量反哺（G-FB1）：后续阶段发现前置产物有小问题（如漏标风险/规则），用 `patch --to <前置阶段> --reason "..." --req-id <id>` 登记修正指令——不回退重跑整阶段，指令注入当前阶段契约卡 ##PATCH_FEEDBACK## 段，模型就地修正前置产物切片后重写本阶段产物，修正完成 `patch --clear --req-id <id>` 清除。整阶段结构性问题仍用 fail --to 回退重走。
 ```
 
 ## 五条铁律（违反即判定执行缺陷）

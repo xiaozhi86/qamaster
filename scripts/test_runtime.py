@@ -29,6 +29,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RT = os.path.join(ROOT, "runtime", "qamaster_runtime.py")
 SKILL_SCRIPTS = os.path.join(ROOT, "skills", "case-design", "scripts")
 sys.path.insert(0, os.path.join(ROOT, "runtime"))
+sys.path.insert(0, SKILL_SCRIPTS)  # 供直接 import verify_cases 做探针单测（P3-1/P1-1）
 import phases as _RT_PHASES  # noqa: E402
 import manifest as _MANIFEST  # noqa: E402
 import state_store as _STATE  # noqa: E402
@@ -268,6 +269,151 @@ def advance_to_phase13(workdir, req_id=REQ_ID):
     run(workdir, "next", expect_rc=0, req_id=req_id)  # → Phase 13
 
 
+def test_probe_p3_p1():
+    """P3-1（规则来源假标注核对）+ P1-1（澄清完整性探针）+ P2-1（组合/判定表覆盖探针）软探针单测。
+
+    直接调用 verify_cases 的探针函数，正/反/降级三路覆盖，确认：
+      - 软探针不新增硬违规（不改硬门行为）；
+      - 假标注/漏问/组合漏测命中，真实标注/已澄清/已覆盖不误报；
+      - 无 REQ / 无台账 / 无用例等边界降级跳过（不误伤）。
+    """
+    print("\n[new] P3-1 规则来源假标注 + P1-1 澄清完整性 + P2-1 组合覆盖（软探针·直接函数单测）")
+    import verify_cases as vc
+
+    # ---- P3-1：check_rule_source ----
+    REQ_2CH = ["# 需求", "## 订单创建", "用户下单，库存扣减。",
+               "## 订单退款", "用户申请退款，资金原路返回。"]
+    # 正例：声称章节不存在 → 假标注命中（软）
+    n, sus, fake = vc.check_rule_source(
+        ["## 规则建模", "- **订单规则** [来源:需求文档<瞎编章节>]", "| 用例ID | x |"],
+        req_doc_lines=REQ_2CH)
+    check("P3-1 假标注命中", len(fake) == 1 and len(sus) == 0, "fake=%d sus=%d" % (len(fake), len(sus)))
+    check("P3-1 假标注文案含失实提示", fake and "来源标注疑似失实" in fake[0])
+    # 反例：声称章节真实存在 → 不误报
+    n, sus, fake = vc.check_rule_source(
+        ["## 规则建模", "- **订单规则** [来源:需求文档<订单创建>]", "| 用例ID | x |"],
+        req_doc_lines=REQ_2CH)
+    check("P3-1 真实章节不误报", len(fake) == 0 and len(sus) == 0, "fake=%d" % len(fake))
+    # 降级：无 REQ → 假标注核对跳过
+    n, sus, fake = vc.check_rule_source(
+        ["## 规则建模", "- **订单规则** [来源:需求文档<瞎编章节>]", "| 用例ID | x |"],
+        req_doc_lines=None)
+    check("P3-1 无REQ降级跳过", len(fake) == 0, "fake=%d" % len(fake))
+    # 行为不变：无来源标记 → 仍进 suspects（rule_source_hard 硬门路径），假标注空
+    n, sus, fake = vc.check_rule_source(
+        ["## 规则建模", "- **订单规则** 无来源描述", "| 用例ID | x |"],
+        req_doc_lines=REQ_2CH)
+    check("P3-1 无来源标记仍进硬门 suspects", len(sus) == 1 and len(fake) == 0,
+          "sus=%d fake=%d" % (len(sus), len(fake)))
+
+    # ---- P1-1：check_clarification_completeness ----
+    REQ_SM = ["# 需求", "## 订单", "订单状态流转涉及多步迁移，状态变更为终态。"]
+    LED_NO_SM = {"facts": ["金额字段必填"], "question_text": ["金额格式是什么"],
+                 "open": [], "resolved": ["Q1"], "assumptions": []}
+    LED_SM = {"facts": ["订单流转为已支付"], "question_text": [],
+              "open": [], "resolved": ["Q1"], "assumptions": []}
+    # 正例：REQ 含状态机信号但台账无 → 漏问命中
+    gn, gl = vc.check_clarification_completeness(REQ_SM, LED_NO_SM)
+    check("P1-1 漏问命中", gn == 1, "gaps=%d %s" % (gn, gl))
+    check("P1-1 漏问文案含状态机类", gl and "状态机流转" in gl[0])
+    # 反例：台账已含状态机 token → 不误报
+    gn, gl = vc.check_clarification_completeness(REQ_SM, LED_SM)
+    check("P1-1 台账已澄清不误报", gn == 0, "gaps=%d" % gn)
+    # 降级：无台账 → 跳过
+    gn, gl = vc.check_clarification_completeness(REQ_SM, None)
+    check("P1-1 无台账降级跳过", gn == 0, "gaps=%d" % gn)
+    # 降级：无 REQ → 跳过
+    gn, gl = vc.check_clarification_completeness([], LED_NO_SM)
+    check("P1-1 无REQ降级跳过", gn == 0, "gaps=%d" % gn)
+    # R2 评审 MED 修复验证：裸权限概念词（权限/鉴权/授权）须能命中"权限与敏感数据"类
+    REQ_PERM = ["# 需求", "## 功能", "本功能涉及权限校验与鉴权逻辑，需登录态。"]
+    gn, gl = vc.check_clarification_completeness(REQ_PERM, LED_NO_SM)
+    check("P1-1 裸权限词命中权限类(R2 MED修复)", gn >= 1 and any("权限" in g for g in gl),
+          "gaps=%d %s" % (gn, gl))
+    gn, gl = vc.check_clarification_completeness(REQ_PERM, {"facts": ["权限校验仅管理员可操作"],
+                                                             "question_text": [], "open": [],
+                                                             "resolved": [], "assumptions": []})
+    check("P1-1 台账已澄清权限不误报", gn == 0, "gaps=%d" % gn)
+
+    # parse_clarification_ledger 收集 question_text（与 facts 分离，不污染 check_ledger_propagation）
+    ledger_md = ("# 澄清台账 Clarification_Ledger - X\n\n## 问题清单\n\n"
+                 "| 问题ID | 类型 | 原问题 | 用户答复 | 状态 | 建议回答角色 | 登记轮次 |\n"
+                 "| -- | -- | -- | -- | -- | -- | -- |\n"
+                 "| Q1 | 状态规则 | 订单状态流转规则？ | 待支付流转为已支付 | 已解决 | @开发 | 创建 |\n\n"
+                 "## 权威事实\n- 金额字段必填\n")
+    fd, lpath = tempfile.mkstemp(suffix=".md")
+    os.close(fd)
+    try:
+        with open(lpath, "w", encoding="utf-8") as f:
+            f.write(ledger_md)
+        led = vc.parse_clarification_ledger(lpath)
+        check("台账解析收集 question_text", led.get("question_text") == ["订单状态流转规则？"],
+              "question_text=%s" % led.get("question_text"))
+        # facts 含解答 + 权威事实，但不含问题原文（避免污染 token 提取）
+        check("台账 facts 不含问题原文", all("状态流转规则" not in x for x in led.get("facts", [])),
+              "facts=%s" % led.get("facts"))
+    finally:
+        os.remove(lpath)
+
+    # VERIFY_SUMMARY 契约含两个新软字段
+    sm = vc.verify_summary_line({"soft": {"completeness": [0], "schema": [None], "behavior": [0]},
+                                 "traces": {"requirement": [[], 0], "interface": [[], 0, 0],
+                                            "risk": [[], 0, 0], "testpoint": [[], 0],
+                                            "design_doc": [[], 0]},
+                                 "risk_source": [{}, []], "hard_violations": []})
+    check("VERIFY_SUMMARY 含 rule_source_fake 字段", "rule_source_fake=0" in sm, sm)
+    check("VERIFY_SUMMARY 含 clarification_gaps 字段", "clarification_gaps=0" in sm, sm)
+    check("VERIFY_SUMMARY 含 combination_gaps 字段", "combination_gaps=0" in sm, sm)
+
+    # ---- P2-1：check_combination_coverage（组合/判定表覆盖探针）----
+    def _row(ctype="功能", cdim="正常", name="用例", given="G", when="W"):
+        return ["ID1", "REQ", "R1", ctype, cdim, "模块", name, given, when, "T",
+                "STEP", "AI", "AI", "P1", "Completed"]
+    REQ_COMBO = ["# 需求", "## 优惠", "满100减20，叠加优惠券，优惠互斥时取最大。"]
+    REQ_PLAIN = ["# 需求", "## 订单", "创建订单扣库存"]
+    # 正例：REQ 含组合信号但无用例覆盖组合维度 → 命中
+    cn, cl = vc.check_combination_coverage(REQ_COMBO, ["# 测试用例"], [_row()])
+    check("P2-1 组合漏测命中", cn == 1, "combo=%d %s" % (cn, cl))
+    check("P2-1 命中文案含 bug 高发区", cl and "组合" in cl[0] and "bug 高发区" in cl[0])
+    # 反例：有用例 测试类型=判定表 → 不误报
+    cn, cl = vc.check_combination_coverage(REQ_COMBO, ["# 测试用例"], [_row(ctype="判定表", cdim="组合")])
+    check("P2-1 判定表用例已覆盖不误报", cn == 0, "combo=%d" % cn)
+    # 反例：用例文本含 正交 → 不误报
+    cn, cl = vc.check_combination_coverage(REQ_COMBO, ["# 测试用例"], [_row(name="正交实验覆盖组合分支")])
+    check("P2-1 用例文本含正交不误报", cn == 0, "combo=%d" % cn)
+    # 无信号：REQ 不含组合词 → 跳过
+    cn, cl = vc.check_combination_coverage(REQ_PLAIN, ["# 测试用例"], [_row()])
+    check("P2-1 无组合信号跳过", cn == 0, "combo=%d" % cn)
+    # 降级：无用例 → 跳过
+    cn, cl = vc.check_combination_coverage(REQ_COMBO, ["# 测试用例"], [])
+    check("P2-1 无用例降级跳过", cn == 0, "combo=%d" % cn)
+    # lines 侧规则 section 含组合（即使无 REQ）→ 命中
+    lines_rule = ["# TC", "## 规则建模", "- **优惠规则** 多条件组合判定", "| 用例ID | x |"]
+    cn, cl = vc.check_combination_coverage(None, lines_rule, [_row()])
+    check("P2-1 规则section组合信号命中", cn == 1, "combo=%d" % cn)
+
+    # ---- P9-1：check_duplicates 边界点/场景变体保护 ----
+    def _drow(given="G", when="W"):
+        # 规则/断言/维度/类型/等级 固定全同，仅 Given/When 可变
+        return ["ID", "REQ", "R1", "边界", "金额校验", "模块", "名", given, when,
+                "断言模板", "STEP", "AI", "AI", "P1", "Done"]
+    # 危险近重复：五者全同但 Given 不同（金额=0 vs 金额=最大值）→ 升级告警
+    dn, dl = vc.check_duplicates([_drow(given="金额=0"), _drow(given="金额=最大值")])
+    check("P9-1 边界点近重复命中", dn == 1 and "边界点" in dl[0], "dups=%d %s" % (dn, dl))
+    # When 不同同样触发
+    dn, dl = vc.check_duplicates([_drow(when="点单"), _drow(when="改单")])
+    check("P9-1 When不同近重复命中", dn == 1 and "边界点" in dl[0], "dups=%d %s" % (dn, dl))
+    # 真重复：Given/When 完全相同 → 普通疑似重复告警（不含边界点字样）
+    dn, dl = vc.check_duplicates([_drow(given="X", when="Y"), _drow(given="X", when="Y")])
+    check("P9-1 真重复普通告警", dn == 1 and "边界点" not in dl[0] and "疑似重复" in dl[0],
+          "dups=%d %s" % (dn, dl))
+    # 不同规则/断言 → 不报重复（key 不同）
+    dn, dl = vc.check_duplicates([_drow(), ["ID", "REQ", "R2", "边界", "金额校验",
+                                            "模块", "名", "G", "W", "断言模板", "STEP",
+                                            "AI", "AI", "P1", "Done"]])
+    check("P9-1 不同规则不误报", dn == 0, "dups=%d" % dn)
+
+
 def main():
     print("== qamaster Runtime 自证测试 ==")
     workdir = tempfile.mkdtemp(prefix="qamaster-rt-test-")
@@ -283,6 +429,7 @@ def main():
     test_legacy_migration()
     test_bootstrap_idempotent()
     test_manifest_reconcile()
+    test_probe_p3_p1()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:

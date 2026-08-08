@@ -467,7 +467,7 @@
     "^无$"
   ],
   "coverage_gates": {
-    "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底；v0.8.0 补强：加测试点/设计文档/安全三门；v0.9.0 根因6：#7/#8/#S 不再随 auto_light 降级——文档覆盖门在连跑/轻量亦硬判）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列(回退G/W/T)引用的最低比例；tp_trace_min_ratio=#7-H 测试点清单每条 TP 被用例关联规则列引用的最低比例；design_doc_trace_min_ratio=#8-H 设计文档可追溯章节每条被用例覆盖(关联规则/用例名称,回退G/W/T)的最低比例（DESIGN 落盘时生效，否则 SKIP）；interface_three_class=每个变更接口三类覆盖硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门；testpoint_coverage=#7-H 测试点覆盖硬门（v0.9.0 不随 auto_light 降级）；design_doc_testpoints_trace=#8-H 设计文档测试要点追溯硬门（v0.9.0 不随 auto_light 降级，DESIGN 无则 SKIP）；safety_coverage=涉敏感数据时安全类用例数>0 硬门（v0.9.0 不随 auto_light 降级）。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（仅对 interface/risk 生效；#7/#8/#S v0.9.0 起无视模式恒硬）；off=关闭。domain_config.json 同名字段可覆盖。",
+    "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底；v0.8.0 补强：加测试点/设计文档/安全三门；v0.9.0 根因6：#7/#8/#S 不再随 auto_light 降级——文档覆盖门在连跑/轻量亦硬判）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列(回退G/W/T)引用的最低比例；tp_trace_min_ratio=#7-H 测试点清单每条 TP 被用例关联规则列引用的最低比例；design_doc_trace_min_ratio=#8-H 设计文档可追溯章节每条被用例覆盖(关联规则/用例名称,回退G/W/T)的最低比例（DESIGN 落盘时生效，否则 SKIP）；interface_three_class=每个变更接口三类覆盖硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门；testpoint_coverage=#7-H 测试点覆盖硬门（v0.9.0 不随 auto_light 降级）；testpoint_section_presence=#7-P 测试点清单存在性硬门（P7-1：TP 清单缺失即 exit=1，闭合『不写 TP 清单绕过 #7-H』，v0.9.0 不随 auto_light 降级）；design_doc_testpoints_trace=#8-H 设计文档测试要点追溯硬门（v0.9.0 不随 auto_light 降级，DESIGN 无则 SKIP）；safety_coverage=涉敏感数据时安全类用例数>0 硬门（v0.9.0 不随 auto_light 降级）；req_trace_presence=#4-P REQ 存在性硬门（REQ 缺失/不可解析即 exit=1）；open_questions=5.5b 台账待确认门禁（台账『待确认』P0/P1，full 含 P2，须已解决或正式转假设方可落盘）；rule_source_hard=规则建模每条须标来源硬门（full 模式无来源标记即 exit=1）；risk_source_hard=风险来源待确认硬门（full 模式风险来源未确认即 exit=1）；req_id_hard=关联需求ID 追溯失效硬门（P11-1：full 模式『全员笼统占位 见需求文档/无』即 exit=1；『全员相同占位 见需求文档<章节>』单粗粒度需求模块可能合法，留软告警）。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（仅对 interface/risk 生效；#7/#8/#S v0.9.0 起无视模式恒硬）；off=关闭。domain_config.json 同名字段可覆盖。",
     "req_trace_min_ratio": 1.0,
     "tp_trace_min_ratio": 1.0,
     "design_doc_trace_min_ratio": 1.0,
@@ -475,6 +475,7 @@
     "risk_p0p1": "full",
     "req_trace_presence": "full",
     "testpoint_coverage": "full",
+    "testpoint_section_presence": "full",
     "design_doc_testpoints_trace": "full",
     "safety_coverage": "full",
     "ledger_propagation": "warn",
@@ -482,7 +483,8 @@
     "keyword_coverage": "warn",
     "assumption_resolution": "full",
     "rule_source_hard": "full",
-    "risk_source_hard": "full"
+    "risk_source_hard": "full",
+    "req_id_hard": "full"
   },
   "behavior_source": {
     "_doc": "检查15 业务行为来源追溯 + #5 反向行为来源追溯（dedup_coverage.md）。用例 Given/When/Then 断言的业务行为（状态流转目标/模态规则/约束值/异常机制）须有来源三选一：(a)行为 token 出现在需求文档/接口契约文档；(b)关联规则列引用 R<序号>/TP<序号>/API<序号>（规则建模/风险清单/变更影响清单已沉淀）；契约驱动分支下接口契约文档亦为合法来源；(c)关联规则或用例名称含假设标记 假设A<序号>/基于假设。三者皆无且行为信号不在需求文档->疑似无来源业务行为(脑补)，供 selfcheck 检查15 转问题(P0/P1)/假设(P2/P3)，不得静默保留。规则建模 section 每条规则项建议标 来源:需求文档<章节>/台账Q<序号>/假设A<序号>，无来源标记->疑似脑补规则(破 rule_coverage 自证洗白)。",
@@ -531,14 +533,15 @@
       "（假设",
       "\\(假设"
     ],
-    "citation_pattern": "(R|TP|API)\\d+",
+    "citation_pattern": "(R|RK|TP|API|SC)\\d+",
     "source_marker_pattern": "来源[:：]",
     "antonym_pairs": [
       ["放行", "丢弃"],
       ["放行", "阻断"],
       ["禁止", "允许"],
       ["不重试", "重试"],
-      ["升序", "降序"]
+      ["升序", "降序"],
+      ["启用", "停用"]
     ]
   },
   "citation_resolution": {
@@ -569,7 +572,7 @@
     "5": ["risk_source_report", "check_section_id_contiguity:RK"],
     "7": ["check_risk_testpoint_linkage", "check_section_id_contiguity:TP"],
     "8": ["collect_all_findings", "check_citation_resolution", "check_assumption_resolution", "check_ledger_propagation", "check_behavior_consistency", "check_section_id_contiguity:all", "testpoint_coverage"],
-    "10": ["coverage_gate_failures", "check_open_questions_gate", "check_ledger_propagation", "testpoint_coverage", "design_doc_testpoints_trace"],
+    "10": ["collect_all_findings", "coverage_gate_failures", "check_open_questions_gate", "check_ledger_propagation", "testpoint_coverage", "design_doc_testpoints_trace", "safety_coverage"],
     "13": ["verify_md", "collect_all_findings", "coverage_gate_failures", "check_open_questions_gate", "testpoint_coverage", "design_doc_testpoints_trace", "safety_coverage"]
   },
   "requirement_probe_keywords": {

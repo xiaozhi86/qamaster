@@ -229,6 +229,19 @@ COVERAGE_GATES = {
     "rule_source_hard": _gate_mode(_CG.get("rule_source_hard")),
     # v0.8.1 Gap3：风险来源待确认硬门（full 模式风险来源未确认即 exit=1；auto_light 软告警）
     "risk_source_hard": _gate_mode(_CG.get("risk_source_hard")),
+    # P11-1 修复：关联需求ID 追溯失效硬门（full 模式"全员笼统占位 见需求文档/无"即 exit=1；
+    # "全员相同占位 见需求文档<章节>"留软告警，单粗粒度需求模块可能合法全员归同一章节）
+    "req_id_hard": _gate_mode(_CG.get("req_id_hard")),
+    # #4-P REQ 存在性硬门（v0.7.0）：REQ 缺失/不可解析即 exit=1（G-3 修复：纳入 COVERAGE_GATES
+    # 使 config/domain_config 的 req_trace_presence 取值真正生效，旧版读 COVERAGE_GATES 但
+    # 未注册该键→恒取默认 full，config 值形同装饰）
+    "req_trace_presence": _gate_mode(_CG.get("req_trace_presence")),
+    # #7-P TP 清单存在性硬门（P7-1 修复）：TP 清单缺失即 exit=1，闭合"不写 TP 清单绕过 #7-H"
+    "testpoint_section_presence": _gate_mode(_CG.get("testpoint_section_presence")),
+    # 5.5b 台账待确认门禁（G-3 类修复·严格检查发现）：check_open_questions_gate 经
+    # COVERAGE_GATES.get("open_questions") 读模式（off/full/auto_light），旧版未注册该键→
+    # 恒取默认 full，config/domain_config 的取值形同装饰（无法按域关闭/降级待确认硬门）。
+    "open_questions": _gate_mode(_CG.get("open_questions")),
 }
 
 # 敏感数据信号词表（v0.8.0·safety_coverage 硬门触发条件）
@@ -259,6 +272,10 @@ def coverage_gate_failures(findings, run_mode="full"):
     req_presence_fail = check_req_presence(findings, run_mode=run_mode)
     if req_presence_fail:
         fails.append(req_presence_fail)
+    # #7-P TP 清单缺失硬门（P7-1 修复·闭合 36→0 静默跳过）
+    tp_presence_fail = check_testpoint_presence(findings, run_mode=run_mode)
+    if tp_presence_fail:
+        fails.append(tp_presence_fail)
     # #4-H 需求追溯硬门
     unc_req, req_total = traces.get("requirement", [None, 0])
     if unc_req is not None and req_total:
@@ -353,6 +370,10 @@ def verify_summary_line(findings, hard_gate_fails=None):
         "design_uncovered": len(traces["design_doc"][0]),
         "safety_fail": len(findings.get("_safety_fails") or []),
         "check15": soft["behavior"][0],
+        "tp_risk_orphans": soft.get("tp_risk_orphans", [0, []])[0],
+        "rule_source_fake": soft.get("rule_source_fake", [0, []])[0],
+        "clarification_gaps": soft.get("clarification_gaps", [0, []])[0],
+        "combination_gaps": soft.get("combination_gaps", [0, []])[0],
         "hard_violations": len(findings["hard_violations"]),
         "gate_fails": (len(hard_gate_fails) if hard_gate_fails is not None
                        else len(coverage_gate_failures(findings))),
@@ -539,9 +560,14 @@ def check_storage(data_rows):
 
 
 def check_duplicates(data_rows):
-    """检查6：重复用例（软判定）。按 dedup_coverage.md 维度/方法多样性保护：
-    关联规则+断言+测试维度+测试类型+用例等级（P0-P3 代理风险）五者全同才报疑似重复
-   （用例表无独立"风险"列，以用例等级代理；保护宽度，防过度合并）。"""
+    """检查6：重复用例（软判定）+ P9-1 边界点/场景变体保护。按 dedup_coverage.md 维度/方法
+    多样性保护：关联规则+断言+测试维度+测试类型+用例等级（P0-P3 代理风险）五者全同才报疑似重复
+   （用例表无独立"风险"列，以用例等级代理；保护宽度，防过度合并）。
+
+    P9-1 增强：五者全同但 Given/When 不同（如金额=0 vs 金额=最大值，断言模板相同）→ 升级告警
+    "合并恐丢失边界点/场景变体"。此类近重复恰是去重会静默吞掉覆盖深度的危险情形（边界点丢失
+    无硬门兜底——#4-H 只管 REQ 被引用≥1，不管边界值覆盖）。在 Phase 8 gate（去重前全集）即提示，
+    先于 Phase 9 去重。仍是软告警。"""
     seen = {}
     suspects = []
     for i, r in enumerate(data_rows, 1):
@@ -550,11 +576,19 @@ def check_duplicates(data_rows):
         cdim = r[IDX_DIM] if len(r) > IDX_DIM else ""
         ctype = r[IDX_TYPE] if len(r) > IDX_TYPE else ""
         clevel = r[IDX_LEVEL] if len(r) > IDX_LEVEL else ""
+        given = r[IDX_GIVEN] if len(r) > IDX_GIVEN else ""
+        when = r[IDX_WHEN] if len(r) > IDX_WHEN else ""
         key = (rule.strip(), then.strip(), cdim.strip(), ctype.strip(), clevel.strip())
         if key in seen:
-            suspects.append("行%d: 与行%d 规则+断言+维度+类型+等级全同（疑似重复）" % (i, seen[key]))
+            j, jg, jw = seen[key]  # P9-1：(首次行号, given, when)
+            # P9-1：五者全同但 Given/When 不同 → 合并恐丢失边界点/场景变体（危险近重复）
+            if given.strip() != jg or when.strip() != jw:
+                suspects.append("行%d: 与行%d 规则+断言+维度+类型+等级全同，但 Given/When 不同"
+                                "（合并恐丢失边界点/场景变体，请确认非真重复）" % (i, j))
+            else:
+                suspects.append("行%d: 与行%d 规则+断言+维度+类型+等级全同（疑似重复）" % (i, j))
         else:
-            seen[key] = i
+            seen[key] = (i, given.strip(), when.strip())
     return len(suspects), suspects
 
 
@@ -581,18 +615,26 @@ def check_overdesign(data_rows):
 def check_requirement_id(data_rows):
     """关联需求ID 追溯失效检测（软判定，对应 modeling.md 20.2）。
     信号：全员均为笼统占位（见需求文档'需求内容'/见需求文档/无），或全员相同且为占位形式
-    → 需求条目级追溯失效，'每需求≥1用例'无法闭环。"""
+    → 需求条目级追溯失效，'每需求≥1用例'无法闭环。
+    返回 (n, suspects, vague_suspects)：
+      suspects       = 全部信号（软告警，含"全员相同占位"）；
+      vague_suspects = 仅"全员笼统占位"子集（追溯全失效·P11-1 硬门·非模糊判定）。
+    "全员相同占位"（如全员同一个'见需求文档<章节>'）留软告警——单粗粒度需求模块可能全员合法
+    归同一章节，硬阻断会误伤；仅"全员笼统占位（见需求文档/无）"这一无歧义坍塌升硬门。"""
     if not data_rows:
-        return 0, []
+        return 0, [], []
     req_ids = [r[IDX_REQ].strip() if len(r) > IDX_REQ else "" for r in data_rows]
     suspects = []
+    vague_suspects = []
     vague_count = sum(1 for rid in req_ids if any(re.match(p, rid) for p in VAGUE_REQ_PATTERNS))
     if req_ids and vague_count == len(req_ids):
-        suspects.append("全部 %d 条关联需求ID均为笼统占位（见需求文档'需求内容'/'见需求文档'/'无'），"
-                        "需求条目级追溯失效；应填具体编号或'见需求文档<章节号/章节名>'" % vague_count)
+        msg = ("全部 %d 条关联需求ID均为笼统占位（见需求文档'需求内容'/'见需求文档'/'无'），"
+               "需求条目级追溯失效；应填具体编号或'见需求文档<章节号/章节名>'" % vague_count)
+        suspects.append(msg)
+        vague_suspects.append(msg)  # 无歧义坍塌→P11-1 硬门
     elif len(set(req_ids)) == 1 and req_ids[0] and "见需求文档" in req_ids[0]:
         suspects.append("全部用例关联需求ID相同（'%s'），未做需求条目级区分，追溯失效" % req_ids[0])
-    return len(suspects), suspects
+    return len(suspects), suspects, vague_suspects
 
 
 def row_text(r):
@@ -751,13 +793,16 @@ def collect_section_ids(lines):
 
 
 # ===== 项 1：反向引用完整性【闭环 D1，兼治台账 Q 悬空】=====
-def check_citation_resolution(data_rows, section_ids):
+def check_citation_resolution(data_rows, section_ids, ledger_q_set=None):
     """校验用例'关联规则'列引用的 R/RK/TP/API/SC/台账Q 是否在对应 section 清单内真实存在。
 
     仅校验 case->section 方向（section->case 由 risk_coverage/testpoint_coverage 已覆盖）。
     悬空引用（如用例引用 R28 但规则清单只到 R24）-> 违规列表。exit=1 硬门（v0.7.0·闭环 D1）。
     external_citation_marker（如'（外部引用）'/'（跨需求）'）为行级豁免，处理跨需求合法引用。
-    台账Q<n> 引用须能解析（修 check_rule_source 现仅查标记存在的缺口）。
+
+    台账Q<n> 引用解析（G-1 修复·闭合死代码）：ledger_q_set 非空（台账已传入）时逐条
+    校验所引台账Q 是否在台账已解决/待确认/假设集合内，不在即悬空（D1，exit=1）；
+    ledger_q_set 为 None（台账未传入）时跳过，避免误伤（与旧版降级语义一致，但死代码已激活）。
     """
     violations = []
     for i, r in enumerate(data_rows, 1):
@@ -777,17 +822,14 @@ def check_citation_resolution(data_rows, section_ids):
                 continue
             if num not in sec["ids"]:
                 violations.append("行%d: 关联规则引用 %s%d 但%s清单中不存在（悬空引用·D1）" % (i, prefix, num, prefix))
-        # 台账Q<n> 引用解析
-        for m in _CR_LEDGER_Q_PAT.finditer(rule_text):
-            num = int(m.group(1))
-            # 台账Q 来源在规则建模 section 的'来源:台账Q<n>'标记中，或台账事实集中
-            # 此处校验：规则来源标记中出现的台账Q 须能在规则建模 section 找到对应项
-            # （完整台账解析由 check_ledger_propagation 的台账接入处理，此处仅查悬空）
-            ledger_q_in_rules = set()
-            in_section = False
-            for ln in []:  # placeholder；完整实现见 check_ledger_propagation
-                pass
-            # 台账Q 悬空校验降级为软提示（台账文件未传入时无法判定，避免误伤）
+        # 台账Q<n> 引用解析【G-1 修复·激活原死代码】
+        # ledger_q_set 由 collect_all_findings 从台账 resolved+open+assumptions 的 Q id 抽取（int 集）。
+        # 台账已传入→逐条校验所引台账Q 是否存在；未传入→跳过（无法判定，避免误伤）。
+        if ledger_q_set is not None:
+            for m in _CR_LEDGER_Q_PAT.finditer(rule_text):
+                num = int(m.group(1))
+                if num not in ledger_q_set:
+                    violations.append("行%d: 关联规则引用台账Q%d 但台账中不存在（悬空引用·D1）" % (i, num))
     return violations
 
 
@@ -920,15 +962,17 @@ def _has_assumption_section_in_md(data_rows):
 
 # ===== 项 4：把台账接进校验器【闭环 C3/C2/G3/G4/G8，直击 RC0】=====
 def parse_clarification_ledger(path):
-    """读取 Clarification_Ledger_<id>.md，产出 {resolved, open, assumptions, facts, path}。
+    """读取 Clarification_Ledger_<id>.md，产出 {resolved, open, assumptions, facts, question_text, path}。
 
     - resolved: 已解决 Q id 列表（状态=已解决）
     - open: 待确认 Q id 列表（状态=待确认/待确认残留）
     - assumptions: 假设 A id 列表（状态=假设）
     - facts: 权威事实要点文本片段列表（从 Q 解答 + §权威事实节提取，用于传递/一致性对照）
+    - question_text: 问题原文（"原问题"列，cells[2]）片段列表（P1-1 澄清完整性探针对照源，
+      与 facts 分离以免污染 check_ledger_propagation 的 token 提取）
     - path: 台账文件路径（未找到返回 None）
     RC0 根因：校验器只读 REQ 不读台账，台账权威事实对校验器不可见。
-    本解析器让台账事实成为校验对照源（项 5.5a/5.5b/5.5c + 项5 一致性）。
+    本解析器让台账事实成为校验对照源（项 5.5a/5.5b/5.5c + 项5 一致性 + P1-1 完整性探针）。
     """
     if not path or not os.path.exists(path):
         return None
@@ -939,6 +983,7 @@ def parse_clarification_ledger(path):
         return None
     resolved, open_qs, assumptions = [], [], []
     facts = []
+    question_text = []
     # 解析问题清单表（Q1-Qn）
     in_q_table = False
     in_facts_section = False
@@ -969,6 +1014,11 @@ def parse_clarification_ledger(path):
                 status = cells[4].strip() if len(cells) > 4 else ""
                 # 解答列（第4列）作为事实
                 answer = cells[3].strip() if len(cells) > 3 else ""
+                # P1-1：原问题列（第3列）作为问题文本（所有状态均收，供澄清完整性探针对照）
+                if len(cells) > 2:
+                    qtxt = cells[2].strip()
+                    if qtxt:
+                        question_text.append(qtxt)
                 if "已解决" in status:
                     resolved.append(qid)
                     facts.append(answer)
@@ -986,6 +1036,7 @@ def parse_clarification_ledger(path):
         "open": open_qs,
         "assumptions": assumptions,
         "facts": facts,
+        "question_text": question_text,
         "path": path,
     }
 
@@ -1042,6 +1093,113 @@ def check_open_questions_gate(ledger, run_mode="full"):
         return None  # 连跑/轻量降级为软告警
     return [("台账待确认门禁(C2)",
              "台账待确认未闭环 %d 条：%s（须解决或正式转假设方可落盘）" % (len(open_qs), "/".join(open_qs)))]
+
+
+# ===== P1-1：澄清完整性探针【Phase 1 软探针】=====
+# 复用模块全局信号词表，按"需求信号类 → surface 信号词"组织；depth 目标改为台账文本。
+# 在模块加载末尾装配（在 domain_config 合并 KEYWORD_DIMS/EXCEPTION_SUBTYPES 之后），
+# 故领域扩展词自动纳入各类。
+def _build_clarify_categories():
+    """从模块全局词表装配"需求信号类 → surface 信号词"映射。"""
+    cat = {}
+    # 状态机流转：合法/非法/回滚锚点 + 状态异常子类
+    cat["状态机流转"] = (FLOW_LEGAL + FLOW_ILLEGAL + FLOW_ROLLBACK +
+                         EXCEPTION_SUBTYPES.get("状态异常", []))
+    # 权限与敏感数据：敏感信号 + 安全维度 + 权限异常 + 裸权限概念词
+    # （SENSITIVE_SIGNALS/安全维度/权限异常子类均无裸"权限/鉴权/授权"，REQ 仅说"权限校验"
+    #  会漏判——R2 评审 MED 修复：补裸概念词使该类能被 REQ 命中）
+    cat["权限与敏感数据"] = (SENSITIVE_SIGNALS + KEYWORD_DIMS.get("安全", []) +
+                              EXCEPTION_SUBTYPES.get("权限异常", []) +
+                              ["权限", "鉴权", "授权", "访问控制", "登录态"])
+    # 异常处理：全部异常子类展平
+    cat["异常处理"] = [w for sub in EXCEPTION_SUBTYPES.values() for w in sub]
+    # 上下游依赖：上下游维度 + 服务/网络/MQ 异常
+    cat["上下游依赖"] = (KEYWORD_DIMS.get("上下游", []) +
+                          EXCEPTION_SUBTYPES.get("服务异常", []) +
+                          EXCEPTION_SUBTYPES.get("网络异常", []) +
+                          EXCEPTION_SUBTYPES.get("MQ异常", []))
+    # 并发幂等：并发 + 幂等维度
+    cat["并发幂等"] = (KEYWORD_DIMS.get("并发", []) + KEYWORD_DIMS.get("幂等", []))
+    return cat
+
+
+_CLARIFY_CATEGORIES = _build_clarify_categories()
+
+
+def check_clarification_completeness(req_lines, ledger):
+    """P1-1 澄清完整性探针（软）：REQ 含某类信号但台账未澄清该类。
+
+    镜像 keyword_coverage_probe 的 surface 判定，但 depth 目标改为台账文本
+    （问题原文 + 解答 + §权威事实）而非用例。判定：某类 surface 信号词在 REQ
+    出现，却完全缺席台账 -> 报"REQ 含<X>信号但台账未澄清<X>类（疑似漏问）"。
+    闭合 Phase 1 无机器校验的缺口：状态机/权限/异常/上下游/并发幂等高价值类
+    在 REQ 出现却未被澄清时给出软提示。软探针，不阻断 confirm。
+    无台账（ledger is None）或无 REQ -> 降级跳过（不误伤首轮/无 REQ 流程）。
+    返回 (缺口类数, 缺口描述列表)。
+    """
+    if not ledger or not req_lines:
+        return 0, []
+    req_text = ""
+    for ln in req_lines:
+        s = ln.strip()
+        if s:
+            req_text += " " + s
+    # 台账整体文本：§权威事实 + 解答（facts）+ 问题原文（question_text）
+    ledger_text = " ".join(ledger.get("facts", [])) + " " + " ".join(ledger.get("question_text", []))
+    gaps = []
+    for cat, surface in _CLARIFY_CATEGORIES.items():
+        if not surface:
+            continue
+        # REQ 含该类信号（任一 surface 词命中）且台账完全缺席该类信号词 -> 疑似漏问
+        if any(kw in req_text for kw in surface) and not any(kw in ledger_text for kw in surface):
+            gaps.append("REQ 含【%s】类信号但台账未澄清该类（疑似漏问）" % cat)
+    return len(gaps), gaps
+
+
+# ===== P2-1：组合/判定表覆盖探针【覆盖深度·软探针】=====
+# 闭合覆盖矩阵"组合"维度的机器盲区：KEYWORD_DIMS 仅含"时间组合"（时间边界），业务规则的
+# 判定表/多条件组合既无关键词维度也无硬门（硬门只保追溯性"每条目被引用≥1"，不保覆盖深度）。
+# 组合分支是 bug 高发区，此探针提示"需求/规则含组合信号但用例未覆盖组合维度"。软探针，不阻断。
+_COMBINATION_SURFACE = ["判定表", "决策表", "正交", "组合", "叠加", "互斥", "阶梯", "同时满足", "多条件"]
+_COMBINATION_DEPTH_TAGS = ("判定表", "决策表", "正交", "组合")
+
+
+def check_combination_coverage(req_lines, lines, data_rows):
+    """P2-1 组合/判定表覆盖探针（软）：需求/规则含组合信号但用例未覆盖组合维度。
+
+    镜像 check_clarification_completeness 的 surface/depth，但 depth 目标改为用例。
+    判定：surface（组合信号词）出现在 REQ 或规则/风险 section（用例表之前的非用例行），
+    且用例全无组合/判定表/正交 depth 标记 -> 报"需求含组合逻辑但无用例覆盖（疑似漏测）"。
+    软探针，不阻断。无 REQ/无用例表 -> 降级跳过（不误伤）。
+    返回 (缺口数, 描述列表)；组合为单一维度，命中即 (1, [描述])。
+    """
+    if not data_rows or (not req_lines and not lines):
+        return 0, []
+    # surface 源：REQ 全文 + 用例表之前的规则/风险 section（不含用例行，避免自证）
+    req_text = ""
+    if req_lines:
+        for ln in req_lines:
+            s = ln.strip()
+            if s:
+                req_text += " " + s
+    section_text = ""
+    if lines:
+        for ln in lines:
+            s = ln.strip()
+            if s.startswith("|") and "用例ID" in s:
+                break
+            section_text += " " + s
+    source_text = req_text + " " + section_text
+    if not any(kw in source_text for kw in _COMBINATION_SURFACE):
+        return 0, []
+    # depth：用例是否覆盖组合维度（测试类型/维度标签或全文含 判定表/正交/组合）
+    for r in data_rows:
+        ctype = r[IDX_TYPE] if len(r) > IDX_TYPE else ""
+        cdim = r[IDX_DIM] if len(r) > IDX_DIM else ""
+        blob = ctype + " " + cdim + " " + row_text(r)
+        if any(t in blob for t in _COMBINATION_DEPTH_TAGS):
+            return 0, []  # 已有组合类用例覆盖
+    return 1, ["需求/规则含组合逻辑信号但用例未覆盖组合/判定表维度（疑似漏测 bug 高发区）"]
 
 
 # ===== 项 5：用例↔台账/规则一致性【闭环 C3】=====
@@ -1184,6 +1342,29 @@ def check_req_presence(findings, run_mode="full"):
             return None  # 连跑/轻量降级为软告警
         return ("#4-P 需求追溯基准缺失",
                 "REQ 缺失/不可解析，#4 反向需求追溯未校验（req_total=0）；按 phase0_manifest.md 步骤零落盘 REQ_<需求标识>.md 后重跑")
+    return None
+
+
+def check_testpoint_presence(findings, run_mode="full"):
+    """TP 清单缺失硬门禁（P7-1 修复·闭合"不写 TP 清单即绕过 #7-H"静默跳过）。
+
+    现状 coverage_gate_failures #7-H 仅 tp_total>0 才触发；TP 清单缺失（Phase 7 未落盘）
+    时 tp_total=0 → #7-H SKIP → 模型可借"不写测试点清单"绕过测试点覆盖门禁（36→0 压缩无人知晓）。
+    本检查补该缺口：coverage_gates.testpoint_section_presence != off 且 tp_total=0 且
+    有用例（findings.n>0，即已到 Phase 8/10/13 出口）-> 追加硬门违约。
+    v0.9.0 口径：与 #7-H 一致，不随 auto_light 降级——覆盖门在连跑/轻量亦硬判。
+    无 TP 分解的轻型需求须显式登记假设'本需求无测试点分解'，不得静默跳过。
+    """
+    mode = _gate_mode(COVERAGE_GATES.get("testpoint_section_presence", "full"), "full")
+    if mode == "off":
+        return None
+    traces = findings.get("traces", {})
+    _unc_tp, tp_total = traces.get("testpoint", [None, 0])
+    # tp_total=0 且有用例 → Phase 7 应落盘的 TP 清单缺失
+    if tp_total == 0 and findings.get("n", 0) > 0:
+        return ("#7-P 测试点清单缺失",
+                "TP 清单缺失（tp_total=0），#7 测试点追溯未校验；Phase 7 须落盘'## 测试点清单'（每条 TP<序号>）后重跑，"
+                "或登记假设'本需求无测试点分解'并在交付摘要标注'#7 未校验（TP 清单缺失）'")
     return None
 
 
@@ -1369,6 +1550,53 @@ def check_risk_testpoint_linkage(risk_rows, tp_rows):
                 continue
         violations.append("%s(%s) 无对应测试点覆盖（P0/P1 风险→≥1 TP 硬门）" % (rk_id or "未知", level))
     return violations
+
+
+# G-FB2·critique 后移机器信号：P0 域风险信号词（与 risk.md critique 高发漏标方向对齐）
+_TP_RISK_DOMAIN_SIGNALS = (
+    "资金", "支付", "扣减", "超卖", "超扣", "退款", "金额", "数值", "精度",
+    "并发", "幂等", "重复", "竞态", "乐观锁",
+    "状态", "流转", "终态", "回滚", "非法流转",
+    "权限", "越权", "token", "Token", "伪造", "重放",
+    "缓存", "MQ", "消息", "一致", "最终一致",
+    "脱敏", "敏感", "注入", "热更新", "热生效",
+)
+
+
+def check_testpoint_risk_orphans(tp_rows, risk_rows):
+    """G-FB2 修复·critique 后移机器信号：测试点含 P0 域信号但风险清单无对应 RK。
+
+    第5阶段 critique 是 LLM 主观第二视角，漏判 P0 风险时无客观兜底；第7阶段测试点设计
+    常暴露漏标风险（TP 描述含资金/并发/状态/权限等 P0 域信号，但风险清单未列对应 RK）。
+    本检查给出机器信号：对每条 TP，若描述含 P0 域信号且风险清单无同域 RK → 软提示
+    "疑似漏标风险"，建议 patch --to 5 补标（见 risk.md critique 后移节）。
+
+    软判定（防假阳性）：仅当风险清单存在（risk_rows 非空）才判；TP 描述需含≥1 P0 域信号。
+    返回 (orphan 数, orphan 描述列表)。
+    """
+    if not tp_rows:
+        return 0, []
+    # 风险清单描述文本（用于判断该域是否已有 RK）
+    risk_text = " ".join((rr[2].strip() if len(rr) > 2 else "") for rr in risk_rows) if risk_rows else ""
+    orphans = []
+    for tr in tp_rows:
+        tpid = tr[0].strip() if tr else ""
+        desc = ""
+        if len(tr) > 2:
+            desc = tr[2].strip() if tr[2] else ""
+        elif len(tr) > 1:
+            desc = tr[1].strip() if tr[1] else ""
+        if not desc:
+            continue
+        # TP 描述含 P0 域信号
+        hit_signals = [s for s in _TP_RISK_DOMAIN_SIGNALS if s in desc]
+        if not hit_signals:
+            continue
+        # 风险清单无同域信号 → 疑似漏标
+        if not any(s in risk_text for s in hit_signals):
+            orphans.append("TP %s 描述含 P0 域信号[%s]但风险清单无对应 RK（疑似漏标风险·critique 后移·建议 patch --to 5 补标）"
+                           % (tpid, "/".join(hit_signals[:3])))
+    return len(orphans), orphans
 
 
 def parse_design_testpoints(design_lines):
@@ -1710,11 +1938,18 @@ def check_behavior_source(data_rows, req_doc_path):
     return check_behavior_source_lines(data_rows, req_text)
 
 
-def check_rule_source(lines):
+def check_rule_source(lines, req_doc_lines=None):
     """检查15 增强（规则来源·破自证循环·软判定）。规则建模 section 每条规则项建议标注来源
     （来源:需求文档<章节>/台账Q<序号>/假设A<序号>）。无来源标记 -> 疑似脑补规则。
     规则建模 section 由模型自写，若无来源约束会被 rule_coverage 反向洗白为"已覆盖"，
-    本检查补该缺口（根因5 自证循环）。无规则建模 section 或无可解析项 -> 跳过（返回 0,[]）。"""
+    本检查补该缺口（根因5 自证循环）。无规则建模 section 或无可解析项 -> 跳过（返回 0,[],[]）。
+
+    P3-1 增强：对**已标来源**的规则项，核对"需求文档<章节>"型来源声称的章节是否真实存在于
+    需求文档（破假标注自证——旧版只查'来源:'子串存在，标 [来源:需求文档<瞎编章节>] 即过）。
+    返回 (n, suspects, fake_suspects)：
+      suspects      = 无来源标记的规则项（rule_source_hard 硬门，行为不变）；
+      fake_suspects = 来源标注疑似失实（软告警，NLU 限制·参照检查15 同等定性）。
+    无 req_doc_lines 或需求文档无可定位章节（纯散文兜底单章节）-> 假标注核对降级跳过。"""
     in_section = False
     items = []
     for ln in lines:
@@ -1731,15 +1966,102 @@ def check_rule_source(lines):
         if re.match(r"^[-*]?\s*\*\*([^*：:]{2,20})\*\*", s) or re.match(r"^\d+[.、]\s*\*\*?([^*：:（(]{2,20})", s):
             items.append(s)
     if not items:
-        return 0, []
+        return 0, [], []
+    # P3-1：预构建需求文档章节索引（仅当提供了需求文档且章节可定位时核对）
+    req_chapters, chap_valid = _req_chapter_index(req_doc_lines)
     suspects = []
+    fake_suspects = []
     for it in items:
         if not _SOURCE_MARKER_PAT.search(it):
             m = re.match(r"^[-*]?\s*\*\*([^*：:]{2,20})\*\*", it) or \
                 re.match(r"^\d+[.、]\s*\*\*?([^*：:（(]{2,20})", it)
             name = m.group(1).strip() if m else it[:20]
             suspects.append("规则项[%s] 无来源标记（建议补 来源:需求文档<章节>/台账Q<n>/假设A<n>，破自证循环）" % name)
-    return len(suspects), suspects
+            continue
+        # P3-1：已标来源 -> 核对"需求文档<章节>"型来源章节是否真实
+        if chap_valid:
+            fake = _detect_fake_rule_source(it, req_chapters)
+            if fake:
+                fake_suspects.append(fake)
+    return len(suspects), suspects, fake_suspects
+
+
+# P3-1：规则来源标注里"需求文档<章节>"型章节名提取正则
+# 兼容 [来源:需求文档订单创建节] / [来源:需求文档<订单创建>] / [来源:需求文档3.2 订单创建]
+_RULE_SRC_REQ_CHAPTER = re.compile(
+    r"来源[:：]\s*需求文档\s*[<〈（(\[\"'\s]*"
+    r"([一-龥A-Za-z0-9_.\-]+(?:[ 　][一-龥A-Za-z0-9_.\-]+)*)"
+)
+
+
+def _req_chapter_index(req_doc_lines):
+    """从需求文档行构建章节名→章节文本 索引（供规则来源假标注核对·P3-1）。
+    返回 (chapters, valid)：
+      chapters = {章节名: 章节文本（要点拼接）}，基于 parse_requirement_items_from_lines
+                 的条目（"标题:X"/"要点:X > Y"提取父章节 X）；
+      valid    = 是否有 ≥2 个有效章节名（可做核对）；纯散文兜底单章节→False（降级，不误伤）。"""
+    chapters = {}
+    if not req_doc_lines:
+        return chapters, False
+    for item_id, _raw in parse_requirement_items_from_lines(req_doc_lines):
+        m = re.match(r"^(?:标题|要点):([^>]+?)(?:\s*>\s*(.+))?$", item_id)
+        if not m:
+            continue
+        chap = m.group(1).strip()
+        content = (m.group(2) or "").strip()
+        chapters.setdefault(chap, [])
+        if content:
+            chapters[chap].append(content)
+    out = {k: " ".join(v) for k, v in chapters.items()}
+    return out, len(out) >= 2
+
+
+def _chapter_name_match(claimed, chapter_names):
+    """规则来源声称的章节名 vs 需求文档实际章节名集合，宽松匹配（降误报·P3-1）。
+    normalize（去尾部 节/章节/章/标题/section）后双向子串或 2-gram 重合 ≥1 即视为匹配。"""
+    def norm(x):
+        x = x.strip()
+        for suf in ("节标题", "章节", "节", "章", "标题", "section", "Section"):
+            if x.endswith(suf) and len(x) > len(suf):
+                x = x[:-len(suf)]
+                break
+        return x.strip()
+    c = norm(claimed)
+    if not c:
+        return False
+    for cn in chapter_names:
+        n = norm(cn)
+        if not n:
+            continue
+        if c in n or n in c:
+            return True
+        grams_c = set(c[i:i + 2] for i in range(len(c) - 1)) if len(c) >= 2 else {c}
+        grams_n = set(n[i:i + 2] for i in range(len(n) - 1)) if len(n) >= 2 else {n}
+        if grams_c & grams_n:
+            return True
+    return False
+
+
+def _detect_fake_rule_source(item_line, req_chapters):
+    """检测规则项来源标注是否疑似失实（P3-1·软）。
+    仅核对"需求文档<章节>"型：声称的章节在需求文档章节集合中找不到匹配 -> 疑似假标注。
+    台账Q/假设A 型来源不在此核对（解引用由 check_citation_resolution 对用例引用侧覆盖；
+    规则项来源的台账Q/假设A 核对为边际增量，留后续）。返回告警字符串或 None。"""
+    names = _RULE_SRC_REQ_CHAPTER.findall(item_line)
+    if not names:
+        return None  # 非需求文档章节型来源，不核对
+    rule_name_m = re.match(r"^[-*]?\s*\*\*([^*：:]{2,20})\*\*", item_line) or \
+        re.match(r"^\d+[.、]\s*\*\*?([^*：:（(]{2,20})", item_line)
+    rule_name = rule_name_m.group(1).strip() if rule_name_m else item_line[:20]
+    chapter_names = list(req_chapters.keys())
+    for claimed in names:
+        claimed = claimed.strip()
+        if not claimed:
+            continue
+        if not _chapter_name_match(claimed, chapter_names):
+            return ("规则项[%s] 来源标注疑似失实：声称来自需求文档'%s'，但需求文档无该章节"
+                    "（假标注嫌疑·破自证洗白；NLU 限制供复核）" % (rule_name, claimed))
+    return None
 
 
 def parse_tech_impl_names(lines):
@@ -2079,8 +2401,19 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
     # section ID 注册表（v0.7.0·反向引用/连续性/假设对账公共依赖）
     section_ids = collect_section_ids(lines)
 
+    # 台账 Q id 集合（G-1 修复）：从台账 resolved+open+assumptions 的 Q id 抽取 int 集，
+    # 供 check_citation_resolution 校验台账Q<n> 悬空引用。台账未传入→None（跳过，避免误伤）。
+    ledger_q_set = None
+    if ledger:
+        ledger_q_set = set()
+        for qid in (ledger.get("resolved", []) + ledger.get("open", []) + ledger.get("assumptions", [])):
+            m = re.match(r"Q(\d+)$", qid.strip())
+            if m:
+                ledger_q_set.add(int(m.group(1)))
+        # 空集仍传非 None，表示"台账已传入但无 Q"，此时任何台账Q<n> 引用都判悬空
+
     # 项 1 反向引用完整性【闭环 D1】（硬·exit=1）
-    citation_violations = check_citation_resolution(data_rows, section_ids)
+    citation_violations = check_citation_resolution(data_rows, section_ids, ledger_q_set=ledger_q_set)
 
     # 项 1b 追溯性 section 内联实体【闭环 D1 自证循环·v0.8.1】（硬·exit=1）
     # section 标题存在但解析出 0 个 ID → 指针式引用 → D1 被空注册表绕过。Phase 8/10 必须内联。
@@ -2105,7 +2438,7 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
     schema_n, schema_list = check_storage_schema(data_rows, lines)
     dup_n, dup_list = check_duplicates(data_rows)
     overdesign_n, overdesign_list = check_overdesign(data_rows)
-    reqid_n, reqid_list = check_requirement_id(data_rows)
+    reqid_n, reqid_list, reqid_vague_list = check_requirement_id(data_rows)
     complete_n, complete_list = check_assertion_completeness(data_rows)
     if req_doc_lines is not None:
         req_doc_text = "".join(req_doc_lines) if req_doc_lines else ""
@@ -2117,7 +2450,7 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
         # #4 跳过。与 Phase 13 "未传第2参数"行为一致。
         behsrc_n, behsrc_list, has_req = check_behavior_source_lines(data_rows, "")
         unc_req, req_total = None, 0
-    rulesrc_n, rulesrc_list = check_rule_source(lines)
+    rulesrc_n, rulesrc_list, rulesrc_fake_list = check_rule_source(lines, req_doc_lines=req_doc_lines)
 
     # v0.8.1 Gap3：规则来源标记硬门（full 模式无来源标记即 exit=1；auto_light 软告警）
     # 闭合 phases.py 契约"每条规则项标注来源"——旧逻辑 check_rule_source 仅进 soft.rule_source
@@ -2128,6 +2461,17 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
         rule_src_hard_violations = list(rulesrc_list)
     hard_violations = hard_violations + rule_src_hard_violations
 
+    # P11-1 修复：关联需求ID 追溯失效硬门（full 模式"全员笼统占位 见需求文档/无"即 exit=1）。
+    # 闭合"用例关联需求ID 全填'见需求文档'/'无'致 #4 反向追溯全失效"——旧逻辑 check_requirement_id
+    # 仅进 soft.reqid 不阻断，模型可借全员占位绕过需求条目级追溯。仅升"全员笼统占位"这一无歧义
+    # 坍塌（reqid_vague_list）；"全员相同占位（见需求文档<章节>）"留软告警——单粗粒度需求模块
+    # 可能全员合法归同一章节，硬阻断会误伤。
+    req_id_hard_violations = []
+    req_id_mode = COVERAGE_GATES.get("req_id_hard", "full")
+    if req_id_mode == "full" and reqid_vague_list:
+        req_id_hard_violations = list(reqid_vague_list)
+    hard_violations = hard_violations + req_id_hard_violations
+
     # 项 5 用例↔台账/规则一致性【闭环 C3】（软判定）
     consist_n, consist_list = check_behavior_consistency(data_rows, lines, ledger=ledger)
 
@@ -2136,6 +2480,12 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
 
     # 项 4 台账传递检查 5.5a（软判定·闭环 G3/G4/G8）
     ledger_prop_n, ledger_prop_list = check_ledger_propagation(data_rows, ledger, req_doc_lines)
+
+    # P1-1 澄清完整性探针（软判定·Phase 1）：REQ 含某类信号但台账未澄清该类
+    clarify_n, clarify_list = check_clarification_completeness(req_doc_lines, ledger)
+
+    # P2-1 组合/判定表覆盖探针（软判定·覆盖深度）：需求/规则含组合信号但用例未覆盖
+    combo_n, combo_list = check_combination_coverage(req_doc_lines, lines, data_rows)
 
     # 覆盖统计
     stats = coverage_stats(data_rows)
@@ -2154,6 +2504,9 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
     # 闭合 phase_gate_map[7] 声明 testpoint_risk_linkage 但函数不存在 + 被过滤的缺口
     risk_tp_linkage_violations = check_risk_testpoint_linkage(risk_rows, tp_rows)
     hard_violations = hard_violations + risk_tp_linkage_violations
+
+    # G-FB2: critique 后移机器信号——TP 含 P0 域信号但风险清单无对应 RK（软提示，补 critique 主观盲区）
+    tp_risk_orphan_n, tp_risk_orphan_list = check_testpoint_risk_orphans(tp_rows, risk_rows)
 
     # v0.8.1 Gap3：风险来源待确认硬门（full 模式 P0/P1 风险来源∈ROLE_SOURCES 须台账确认；
     # 未确认即 exit=1；auto_light 软告警）。闭合 phases.py 契约"风险清单每条须标注风险来源"——
@@ -2181,8 +2534,12 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
             "completeness": [complete_n, complete_list],
             "behavior": [behsrc_n, behsrc_list, has_req],
             "rule_source": [rulesrc_n, rulesrc_list],
+            "rule_source_fake": [len(rulesrc_fake_list), rulesrc_fake_list],
             "behavior_consistency": [consist_n, consist_list],
             "ledger_propagation": [ledger_prop_n, ledger_prop_list],
+            "clarification_gaps": [clarify_n, clarify_list],
+            "combination_gaps": [combo_n, combo_list],
+            "tp_risk_orphans": [tp_risk_orphan_n, tp_risk_orphan_list],
         },
         "coverage": stats,
         "traces": {
@@ -2199,6 +2556,25 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
         "section_contiguity": {"warnings": contig_warnings},
         "assumption_resolution": {"warnings": assump_warnings},
         "_safety_fails": s_fails,
+        # G-3 修复：按检查名分组的硬违规子集，键名与 phase_gate_map 声明一致，
+        # 供 run_phase_gate 按 phase_gate_map 真分派（废弃子串过滤）。
+        "hard_by_check": {
+            "check_ids": id_violations,
+            "check_fields": field_violations,
+            "check_citation_resolution": citation_violations + traceback_violations,
+            "check_section_id_contiguity:R": [v for v in contig_violations if v.startswith("R清单")],
+            "check_section_id_contiguity:RK": [v for v in contig_violations if v.startswith("RK清单")],
+            "check_section_id_contiguity:TP": [v for v in contig_violations if v.startswith("TP清单")],
+            "check_section_id_contiguity:API": [v for v in contig_violations if v.startswith("API清单")],
+            "check_section_id_contiguity:SC": [v for v in contig_violations if v.startswith("SC清单")],
+            "check_section_id_contiguity:all": contig_violations,
+            "check_assumption_resolution": assump_violations,
+            "check_rule_source": rule_src_hard_violations,
+            "risk_source_report": risk_src_hard_violations,
+            "check_risk_testpoint_linkage": risk_tp_linkage_violations,
+            "check_requirement_id": req_id_hard_violations,  # P11-1：需求ID 全员占位硬门子集
+            "collect_all_findings": hard_violations,  # 全量硬违规（Phase 8/10/13 声明时取全量）
+        },
     }
 
 
@@ -2426,6 +2802,11 @@ def print_findings(findings, basename, req_doc_lines=None):
     print("检查15 规则来源(破自证循环): 疑似 %d 条（规则建模项无来源标记）" % rulesrc_n)
     for v in rulesrc_list[:10]:
         print("  - %s" % v)
+    # P3-1：规则来源假标注核对（软探针，不升硬门）
+    fake_n, fake_list = soft.get("rule_source_fake", [0, []])
+    print("检查15增强 规则来源假标注: 疑似 %d 条（标注章节在需求文档不存在或语义不符）" % fake_n)
+    for v in fake_list[:10]:
+        print("  - %s" % v)
     # 项 5 用例↔台账/规则一致性（v0.7.0·闭环 C3·软）
     consist_n, consist_list = soft.get("behavior_consistency", [0, []])
     print("项5 行为一致性(C3): 疑似 %d 条（用例断言与规则/台账来源互为反义）" % consist_n)
@@ -2447,6 +2828,30 @@ def print_findings(findings, basename, req_doc_lines=None):
             print("  - 未覆盖: %s" % v)
     else:
         print("项5.5a 台账传递(G3/G4/G8): 台账事实要点均有用例覆盖（或无台账）")
+    # P1-1 澄清完整性探针（Phase 1·软）
+    clarify_n, clarify_list = soft.get("clarification_gaps", [0, []])
+    if clarify_n:
+        print("P1-1 澄清完整性探针: %d 类 REQ 信号台账未澄清（疑似漏问）" % clarify_n)
+        for v in clarify_list[:10]:
+            print("  - %s" % v)
+    else:
+        print("P1-1 澄清完整性探针: REQ 高价值信号类均已被台账澄清（或无台账/无 REQ）")
+    # P2-1 组合/判定表覆盖探针（覆盖深度·软）
+    combo_n, combo_list = soft.get("combination_gaps", [0, []])
+    if combo_n:
+        print("P2-1 组合覆盖探针: 需求/规则含组合逻辑但用例未覆盖组合/判定表维度（疑似漏测 bug 高发区）")
+        for v in combo_list[:10]:
+            print("  - %s" % v)
+    else:
+        print("P2-1 组合覆盖探针: 无组合信号或用例已覆盖组合维度")
+    # G-FB2: critique 后移机器信号
+    tp_orphan_n, tp_orphan_list = soft.get("tp_risk_orphans", [0, []])
+    if tp_orphan_n:
+        print("G-FB2 critique后移(漏标风险): %d 条 TP 含 P0 域信号但风险清单无对应 RK" % tp_orphan_n)
+        for v in tp_orphan_list[:10]:
+            print("  - %s" % v)
+    else:
+        print("G-FB2 critique后移(漏标风险): 无漏标信号（或无 TP/无风险清单）")
 
     # 覆盖统计
     print("-" * 48)
@@ -2681,28 +3086,26 @@ def run_phase_gate(argv):
                                     ledger=ledger, design_doc_lines=design_doc_lines)
     findings["_ledger"] = ledger
 
-    # 按 phase_gate_map 跑对应检查子集（简化：所有阶段都跑 collect_all_findings 已计算的硬违规）
+    # 按 phase_gate_map 跑对应检查子集（G-3 修复：真分派，废弃子串过滤）
     gate_map = _RULES.get("phase_gate_map", {})
     phase_checks = gate_map.get(str(a.phase), [])
     print("GATE: Phase %d — 阶段出口门禁（检查子集: %s）" % (a.phase, ", ".join(phase_checks) or "默认全量"))
 
     hard_violations = findings.get("hard_violations", [])
-    # 阶段过滤：Phase 3 只报规则来源+R连续性；Phase 5 只报风险来源+RK连续性；余类推
-    phase_filtered = []
-    if a.phase == 3:
-        # v0.8.1 Gap3: 保留 R 跳号 + 规则来源标记硬门（rule_source_hard=full 时）
-        phase_filtered = [v for v in hard_violations
-                          if ("序号跳号" in v and "R清单" in v) or "无来源标记" in v]
-    elif a.phase == 5:
-        # v0.8.1 Gap3: 保留 RK 跳号 + 风险来源待确认硬门（risk_source_hard=full 时）
-        phase_filtered = [v for v in hard_violations
-                          if ("序号跳号" in v and "RK清单" in v) or "需在台账确认" in v]
-    elif a.phase == 7:
-        # v0.8.1: 保留 TP 跳号 + P0/P1 风险→≥1 TP 硬门（check_risk_testpoint_linkage）
-        phase_filtered = [v for v in hard_violations
-                          if ("序号跳号" in v and "TP清单" in v) or "无对应测试点覆盖" in v]
+    hard_by_check = findings.get("hard_by_check", {})
+    # 按 phase_gate_map 声明的检查名分派：取各检查对应硬违规子集，去重保序。
+    # 同一违规可能被多个检查名覆盖（如 collect_all_findings 含全部），去重避免重复报。
+    if phase_checks:
+        seen = set()
+        phase_filtered = []
+        for check in phase_checks:
+            for v in hard_by_check.get(check, []):
+                if v not in seen:
+                    seen.add(v)
+                    phase_filtered.append(v)
     else:
-        phase_filtered = hard_violations
+        # 该阶段未在 phase_gate_map 声明 → 全量硬违规（保守兜底）
+        phase_filtered = list(hard_violations)
 
     gate_fails = coverage_gate_failures(findings, run_mode=a.run_mode)
     # v0.8.0: Phase 8/10/13 启用覆盖硬门（含 TP 追溯）；Phase 8 也判覆盖硬门（不再仅 10/13）
