@@ -18,27 +18,37 @@ disable-model-invocation: true
 
 你是 **LLM Worker**：只在 Runtime 颁发的【RUNTIME CONTRACT 契约卡】范围内思考与产出。你**无权**：决定下一阶段、宣布阶段完成、跳过人工门禁、修改流程状态。
 
+## 入口协议（bootstrap → start，单步不变·模型无关）
+
+> `/case-design` 命令文件内部链式跑两步，用户无感；模型只接收 Runtime 颁发的契约卡。
+
+1. **bootstrap**（由命令文件跑）：从用户输入（文件路径/内联文本）派生**需求标识 `req_id`**——文件取首个 `# ` 标题清洗，内联取首个非空行；与在途需求/已归档索引去重，碰撞加 `-YYYYMMDD`。**不创建状态**（幂等可重跑）；检测到进行中状态则输出 `RESUME`，`start` 走 resume 分支不重建。
+2. **start --req-id <id>**（由命令文件跑）：req_id 必需且恒非空；状态落 `.qamaster/case-design/<req_id>/state.json`；启动或断点续跑；输出 Phase 0 契约卡。
+
+**模型不派生 `req_id`**：Phase 0 起所有产出物文件名直接用 `state.req_id`（来自 bootstrap），不再在阶段内派生 id——消除"先有鸡还是先有蛋"。重跑 `/case-design` 同一在途需求：bootstrap 输出 `RESUME` → `start` 续跑，断点不丢。
+
 ## 每轮执行循环（强制）
 
 ```
 读契约卡（start/next/status 的输出）
   → 按 ALLOWED 执行当前阶段，产出 PRODUCES
-  → 运行 python "runtime/qamaster_runtime.py" gate
-       PASS → 运行 next 取下一阶段契约卡
+  → 运行 python "runtime/qamaster_runtime.py" gate --req-id <id>
+       PASS → 运行 next --req-id <id> 取下一阶段契约卡
        FAIL → 按修复指令原地修复，重跑 gate（禁止跳阶段）
   → 人工门（Phase 1/14/15）：输出确认请求后停止等待用户；
-     用户答复后先落盘再 gate；确认用 confirm / 拒绝用 reject / 反馈问题用 fail --to <阶段> --reason "..."
+     用户答复后先落盘再 gate；确认用 confirm --req-id <id> / 拒绝用 reject / 反馈问题用 fail --to <阶段> --req-id <id> --reason "..."
 ```
 
-## 三条铁律（违反即判定执行缺陷）
+## 五条铁律（违反即判定执行缺陷）
 
-1. **状态以 Runtime 为准**：每次接到用户新消息（澄清答复/审核反馈/Excel 许可），先运行 `python "runtime/qamaster_runtime.py" status` 恢复权威状态，禁止凭对话记忆推断"现在该哪一步"。
+1. **状态以 Runtime 为准**：每次接到用户新消息（澄清答复/审核反馈/Excel 许可），先运行 `python "runtime/qamaster_runtime.py" status --req-id <id>` 恢复权威状态，禁止凭对话记忆推断"现在该哪一步"。
 2. **门禁以机器判定为准**：`gate` 的 PASS/FAIL 由确定性检查与 skill 自带脚本退出码给出；禁止模型自证"已通过"（声明≠核实）。
 3. **业务规范不变**：Runtime 只做流程控制；避坑红线（§0）、输入协议（§5）、运行模式（§6.5）、质量门禁、输出协议等全部业务规则仍以本文件 + references/ 为唯一细则来源。
-4. **gate FAIL 明细自查通道（v0.8.1·截断兜底）**：`gate` 回传给模型的 `detail` 有上限（`fail_lines[:50]` + 尾部 30 行 + `##VERIFY_SUMMARY##` 摘要行）。若 `detail` 末尾被截断、或 `[FAIL] 硬违规:` 后跟的明细不足以定位修复点，模型**必须**直接跑 verify_cases.py 拿全量 stdout 自查，**不要凭空猜测改法盲改**：
+4. **MANIFEST 由 Runtime 维护**：`case-design-out/MANIFEST.md` 是多需求共享索引，由 Runtime 在 gate PASS 时自动维护（Phase 0 `add` / Phase 1 `update` 台账 / Phase 13 `update` 用例文件 / Phase 14 `complete`）。模型**禁止 Write/Edit MANIFEST.md**——多需求索引的协调权属于 Runtime，不属于模型。失步时执行 `python runtime/qamaster_runtime.py manifest reconcile` 重建。
+5. **gate FAIL 明细自查通道（v0.8.1·截断兜底）**：`gate` 回传给模型的 `detail` 有上限（`fail_lines[:50]` + 尾部 30 行 + `##VERIFY_SUMMARY##` 摘要行）。若 `detail` 末尾被截断、或 `[FAIL] 硬违规:` 后跟的明细不足以定位修复点，模型**必须**直接跑 verify_cases.py 拿全量 stdout 自查，**不要凭空猜测改法盲改**：
 
    ```
-   python "<PLUGIN_ROOT>/skills/case-design/scripts/verify_cases.py" --phase-gate <N> "<工作目录>/case-design-out/.runtime/checkpoint_<N>.md" --req "<工作目录>/case-design-out/REQ_<需求标识>.md" --ledger "<工作目录>/case-design-out/Clarification_Ledger_<需求标识>.md" --run-mode full
+   python "<PLUGIN_ROOT>/skills/case-design/scripts/verify_cases.py" --phase-gate <N> "<工作目录>/.qamaster/case-design/<需求标识>/checkpoint_<N>.md" --req "<工作目录>/case-design-out/REQ_<需求标识>.md" --ledger "<工作目录>/case-design-out/Clarification_Ledger_<需求标识>.md" --run-mode full
    ```
 
    - `<PLUGIN_ROOT>` 与 `<工作目录>` 用 runtime 已解析的绝对路径（见 `start`/`gate` 输出的 PLUGIN_ROOT 行），**不要猜 `0.7.1/scripts/` 这类相对路径**（旧事故里模型猜错路径致 `No such file or directory`，自查通道也断）。
@@ -203,7 +213,7 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 垂直领域可扩展 `config/domain_config.json` 的 business_anchors/keyword_dims/exception_subtypes/overdesign_exempt_types（如金融加利率/手续费/清算锚点，医疗加处方/剂量/适应症）。未覆盖字段以 `config/validation_rules.json`（校验规则单一事实源）为默认，行为不变。`scripts/verify_cases.py` 启动时先加载 validation_rules.json 再叠加 domain_config.json 覆盖。
 ```
 
-需求标识来自用户输入或索引文件匹配（见第0阶段）。
+需求标识由 `bootstrap` 派生写入 `state.req_id`（见"入口协议"），模型从 state 读取，不在阶段内派生。
 
 > **可选通道的流向**：技术实现摘要 → 第4阶段 SDD（State/Exception/契约事实校对）+ 第8阶段测试数据 + 检查9（存储可断言，见 references/selfcheck.md）；业务规则与历史缺陷 → 第3阶段规则建模 + 第5阶段业务领域风险；历史缺陷摘要 → 第5阶段缺陷种子测试点（强制覆盖）。三者均可选，未提供时 skill 退回当前"自然语言兜底+澄清提问"行为，不阻断。 接口契约文档 -> 第4阶段接口契约模型+变更影响清单 + 统一接口测试矩阵（契约/规则/场景三类）+ 检查16/#6 反向接口追溯；启用契约驱动分支（见 references/modeling.md 接口契约模型、references/dedup_coverage.md 契约驱动分支）。 设计文档 -> 第0阶段全量落盘 DESIGN_<需求标识>.md（v0.9.0 整文落盘）+ 第2阶段覆盖矩阵 8.11 + 第7阶段测试点引用 + 第8/10/13阶段 #8-H 反向设计文档测试要点追溯（runtime/Phase13 均传 `--design`）+ safety_coverage 触发（v0.8.0，见 references/phase0_manifest.md 步骤零、references/coverage.md 8.11、references/dedup_coverage.md #8）。
 
@@ -215,12 +225,12 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 解决多需求快速定位。**必须首先读取** `references/phase0_manifest.md` 获得完整规则后执行：
 
-1. 读取索引文件 `case-design-out/MANIFEST.md`（存在则读入全部索引表；`case-design-out/` 或索引文件不存在视为首次，按需创建目录与空索引）
-2. 匹配需求标识（精确匹配/关键词匹配/无匹配=新需求）
+1. 读取索引文件 `case-design-out/MANIFEST.md`（存在则读入全部索引表；`case-design-out/` 或索引文件不存在视为首次，按需创建目录与空索引）。**MANIFEST 由 Runtime 在 gate PASS 时自动维护**，模型可读但禁止 Write/Edit。
+2. 匹配需求标识（精确匹配/关键词匹配/无匹配=新需求）；`req_id` 已由 `bootstrap` 派生写入 `state.req_id`，本阶段直接读取使用，不在阶段内派生。
 3. 匹配成功则定位已有文件（均位于 `case-design-out/` 下）：`case-design-out/Clarification_Ledger_<需求标识>.md` / `case-design-out/TestCases_<需求标识>.md` / `case-design-out/Knowledge_<需求标识>.md`
 4. 判断处理模式（新需求完整设计 / 已有需求增量 / 修改 / 复用）
 
-**强制**：必须先读索引文件，禁止逐一扫描所有文件；匹配成功后必须立即更新索引状态=进行中；新需求在第1阶段澄清台账生成后新增索引条目（status=进行中，路径填全），第13阶段用例落盘、第14阶段审核通过后更新状态=已完成；索引更新遵循完整输出（整表 Write，按里程碑多次更新，禁止 Edit 增量）。索引文件位于 `case-design-out/MANIFEST.md`。
+**强制**：必须先读索引文件，禁止逐一扫描所有文件；索引由 Runtime 在各 gate PASS 时按里程碑自动维护——Phase 0 PASS → `add`（status=进行中，需求名称从 `REQ_<id>.md` 首个 `# ` 标题自动抽取），Phase 1 confirm → `update` 台账文件列，Phase 13 PASS → `update` 用例文件列，Phase 14 confirm → `complete`（status=已完成）。**模型禁止 Write/Edit MANIFEST.md**（铁律 4）；失步时执行 `python runtime/qamaster_runtime.py manifest reconcile` 从磁盘重建。索引文件位于 `case-design-out/MANIFEST.md`。
 
 ## 主执行流程（第1-15阶段）
 
@@ -228,14 +238,14 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 1. Requirement Analysis + Clarification（需求分析与澄清，落盘台账，问题按角色路由 @开发/@产品/@业务，详见 `references/clarification.md`）
 2. Test Requirement Analysis（测试需求分析，维度见 `references/coverage.md`）
-3. Rule Modeling（规则建模，详见 `references/modeling.md`；含**第3阶段出口机器 gate**——规则来源 check_rule_source + R 编号连续性，runtime 强制 `verify_cases.py --phase-gate 3`，检查点 `.runtime/checkpoint_3.md`）
+3. Rule Modeling（规则建模，详见 `references/modeling.md`；含**第3阶段出口机器 gate**——规则来源 check_rule_source + R 编号连续性，runtime 强制 `verify_cases.py --phase-gate 3`，检查点 `.qamaster/case-design/<需求标识>/checkpoint_3.md`）
 4. Specification Modeling（规格建模 SDD，State/Exception/契约标注事实来源由 @开发 校对，详见 `references/modeling.md`）
 5. Risk Analysis（风险分析，三源共验产出 P0-P3：需求推导+技术隐含@开发+业务领域@业务+缺陷反哺，详见 `references/risk.md`；含**第5阶段出口机器 gate**——风险来源 risk_source_report + RK 编号连续性，runtime 强制 `verify_cases.py --phase-gate 5`；含**第5阶段 critique 循环**——P0 漏标对抗式第二视角，≤2轮 critique 自修）
 6. Test Strategy Matching（测试策略匹配，决策表见 `references/methods.md`）
-7. Test Point Modeling（测试点建模，维度见 `references/coverage.md`；含**第7阶段出口机器 gate**——TP 编号连续性 + P0/P1 风险→≥1 TP，runtime 强制 `verify_cases.py --phase-gate 7`，检查点 `.runtime/checkpoint_7.md`）
-8. Test Case Generation（用例生成，Given/When/Then + AI友好 + 字段规范 + 断言完整性，详见 `references/modeling.md` 与 `references/quality_rules.md`；含**第8阶段出口机器 gate**——`verify_cases.py --phase-gate 8` 全量校验 + **反向引用完整性(D1) + 台账传递 + 行为一致性(C3) + 消费门禁**，runtime 强制；检查点 `.runtime/checkpoint_8.md`；详见 `references/modeling.md` 15.7）
+7. Test Point Modeling（测试点建模，维度见 `references/coverage.md`；含**第7阶段出口机器 gate**——TP 编号连续性 + P0/P1 风险→≥1 TP，runtime 强制 `verify_cases.py --phase-gate 7`，检查点 `.qamaster/case-design/<需求标识>/checkpoint_7.md`）
+8. Test Case Generation（用例生成，Given/When/Then + AI友好 + 字段规范 + 断言完整性，详见 `references/modeling.md` 与 `references/quality_rules.md`；含**第8阶段出口机器 gate**——`verify_cases.py --phase-gate 8` 全量校验 + **反向引用完整性(D1) + 台账传递 + 行为一致性(C3) + 消费门禁**，runtime 强制；检查点 `.qamaster/case-design/<需求标识>/checkpoint_8.md`；详见 `references/modeling.md` 15.7）
 9. Duplicate Removal（去重，详见 `references/dedup_coverage.md`）
-10. Coverage Validation（覆盖率校验 + 反向需求追溯 #4 + 反向行为来源追溯 #5 + **台账待确认门禁(C2) + 台账传递**，详见 `references/dedup_coverage.md`；含**第10阶段出口机器 gate**——runtime 强制 `verify_cases.py --phase-gate 10`，检查点 `.runtime/checkpoint_10.md`）
+10. Coverage Validation（覆盖率校验 + 反向需求追溯 #4 + 反向行为来源追溯 #5 + **台账待确认门禁(C2) + 台账传递**，详见 `references/dedup_coverage.md`；含**第10阶段出口机器 gate**——runtime 强制 `verify_cases.py --phase-gate 10`，检查点 `.qamaster/case-design/<需求标识>/checkpoint_10.md`）
 11. Pre-Output Self-Check（输出前自查，15项：含检查13 断言完整性、检查14 对抗生成遍、检查15 业务行为来源追溯，详见 `references/selfcheck.md`，**内存内零文件操作**）
 12. Show Case Projection + Coverage in Chat（对话中展示用例紧凑投影+覆盖矩阵，只展示不写文件，明细见第13阶段文件）
 13. Final Output（一次性 Write .md，详见 `references/output_write.md`）
@@ -412,7 +422,7 @@ Excel 数据校验：未执行 / 七项全过 / 不通过(问题项及条数)
 
 ## 检查点机制（沉淀阶段）
 
-Phase 3/5/7/8/10 结束时，模型把**本阶段产物**写到 `case-design-out/.runtime/checkpoint_<阶段>.md`（每阶段一次性 Write，非 Edit；runtime 受控临时件，Phase 13 后清理）。runtime 的 gate 解析它 → 跑阶段专属检查 → 回填 `state.json` 制品注册表。**不违反"禁止增量写 TestCases.md"红线**——该红线针对最终 `TestCases_*.md`，检查点是 runtime 临时件。
+Phase 3/5/7/8/10 结束时，模型把**本阶段产物**写到 `.qamaster/case-design/<需求标识>/checkpoint_<阶段>.md`（路径由 Runtime 解析，状态按 `(workflow, req_id)` 分区隔离不同需求；每阶段一次性 Write，非 Edit；runtime 受控临时件，Phase 13 后清理）。runtime 的 gate 解析它 → 跑阶段专属检查 → 回填 `state.json` 制品注册表。**不违反"禁止增量写 TestCases.md"红线**——该红线针对最终 `TestCases_*.md`，检查点是 runtime 临时件。
 
 ### 检查点格式契约（v0.7.1·强制）
 
@@ -462,14 +472,13 @@ Runtime 按**当前阶段 `consumes`** 从 `state.json.artifacts` 注入上游�
       "allow": [
         "Write(case-design-out/TestCases_*.md)",
         "Edit(case-design-out/TestCases_*.md)",
-        "Write(case-design-out/MANIFEST.md)",
-        "Edit(case-design-out/MANIFEST.md)",
         "Write(case-design-out/Clarification_Ledger_*.md)",
         "Edit(case-design-out/Clarification_Ledger_*.md)",
         "Write(case-design-out/Knowledge_*.md)",
         "Edit(case-design-out/Knowledge_*.md)",
         "Write(case-design-out/REQ_*.md)",
         "Write(case-design-out/TestCases_*.xlsx)",
+        "Bash(python *qamaster_runtime.py manifest:*)",
         "Bash(python *verify_md.py:*)",
         "Bash(python *verify_cases.py:*)",
         "Bash(python *verify_knowledge.py:*)",

@@ -4,7 +4,7 @@
 > **日期**：2026-08-04
 > **作者**：xiaozhi
 > **范围**：`skills/case-design`（scripts / config / references / SKILL.md）+ `runtime/`（state_store / phases / qamaster_runtime）
-> **与既有设计的关系**：本文是 `qamaster-Agent-Runtime-Engineering-Refactor-Design-v1.0.0.md`（Runtime 总体重构）在"中间阶段门禁 + 跨阶段制品传递"维度的细化与落地，不改写那份总览；二者互补，本文不推翻既有 Runtime 哲学，而是**让 Runtime 兑现自己承诺却未做到的两件事**。
+> **与既有设计的关系**：本文是 `qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md`（Runtime 总体重构）在"中间阶段门禁 + 跨阶段制品传递"维度的细化与落地，不改写那份总览；二者互补，本文不推翻既有 Runtime 哲学，而是**让 Runtime 兑现自己承诺却未做到的两件事**。
 
 ---
 
@@ -161,11 +161,11 @@ PRIOR_ARTIFACTS（本阶段必须消费的上游制品·由 Runtime 注入，勿
 
 ### 4.4 检查点机制（让沉淀机器可见，绕开"禁止增量写 TestCases.md"）
 
-每个沉淀阶段（3/5/7/8/10）结束时，模型把**本阶段产物**写到 runtime 检查点 `case-design-out/.runtime/checkpoint_<阶段>.md`（每阶段一次性 Write，非 Edit；runtime 受控临时件，Phase 13 后清理）。
+每个沉淀阶段（3/5/7/8/10）结束时，模型把**本阶段产物**写到 runtime 检查点 `.qamaster/case-design/<req_id>/checkpoint_<阶段>.md`（每阶段一次性 Write，非 Edit；runtime 受控临时件，按 `(workflow, req_id)` 分区隔离不同需求，Phase 13 后清理）。
 
 runtime 的 gate 解析它 → 跑阶段专属检查（§6）→ 回填 `artifacts["<phase>"]`。
 
-> **不违反"禁止增量写入"红线**——该红线针对最终 `TestCases_*.md`（防 Edit/append 损坏）；`.runtime/checkpoint_*.md` 是 runtime 受控临时件，与 state.json 同级，Phase 13 后由 runtime 清理（纳入"临时文件清理"节）。
+> **不违反"禁止增量写入"红线**——该红线针对最终 `TestCases_*.md`（防 Edit/append 损坏）；`.qamaster/case-design/<req_id>/checkpoint_*.md` 是 runtime 受控临时件，与 state.json 同级（按 `(workflow, req_id)` 分区隔离），Phase 13 后由 runtime 清理（纳入"临时文件清理"节）。
 
 ---
 
@@ -325,7 +325,7 @@ Phase 8 的 gate 增检查（由 `--phase-gate 8` 跑，对照 `state.json["arti
 - `_card` 增 PRIOR_ARTIFACTS 渲染（读 `artifacts` + `consumes`，§4.3）。
 - `cmd_gate` auto 分支：解析检查点 → 回填 `artifacts`、计 `gate_rounds`、≥3 次强制人工提示（§6.4）。
 - `_run_check` 增 `phase_gate` kind。
-- 检查点清理：Phase 13 gate PASS 后清理 `.runtime/checkpoint_*.md`（纳入"临时文件清理"节）。
+- 检查点清理：Phase 13 gate PASS 后清理 `.qamaster/case-design/<req_id>/checkpoint_*.md`（纳入"临时文件清理"节）。
 
 ---
 
@@ -340,7 +340,7 @@ Phase 8 的 gate 增检查（由 `--phase-gate 8` 跑，对照 `state.json["arti
 | `references/coverage.md` | 15.2/15.3 补 prose 测点分解（§5.7）；§8 覆盖矩阵补"台账事实传递"维度 |
 | `references/dedup_coverage.md` | #4/#5/#6 追溯补"台账传递/一致性/待确认门禁"；Phase 10 出口 gate runtime 强制 |
 | `references/selfcheck.md` | 检查15 增"一致性"判据；检查4 增"不得仅登记假设无具体断言"；与 phase-gate 分工声明 |
-| `references/output_write.md` | 临时文件清理节补"`.runtime/checkpoint_*.md` 由 runtime 在 Phase 13 后清理"；写盘约束补"对照 artifacts 防漂移" |
+| `references/output_write.md` | 临时文件清理节补"`.qamaster/case-design/<req_id>/checkpoint_*.md` 由 runtime 在 Phase 13 后清理"；写盘约束补"对照 artifacts 防漂移" |
 | `references/review_gate.md` | 审核话术补"phase-gate 已在 3/5/7/8/10 就地强制"说明 |
 | `SKILL.md` | §6 阶段列表 3/5/7/8/10 标注"runtime 强制 phase-gate"；§19 输出顺序补"沉淀阶段写 checkpoint"；交付摘要补"phase-gate 摘要"字段 |
 | `CHANGELOG.md` | 新增 v0.7.0 发布说明（见 §11） |
@@ -450,7 +450,7 @@ Phase 8 的 gate 增检查（由 `--phase-gate 8` 跑，对照 `state.json["arti
 
 ## 13. 取舍与风险（诚实披露）
 
-1. **检查点增加少量 Write**：沉淀阶段多 5 次小文件写（`.runtime/checkpoint_*.md`）。代价是换"生成时强制"——值得，且是 runtime 临时件、Phase 13 后清理。
+1. **检查点增加少量 Write**：沉淀阶段多 5 次小文件写（`.qamaster/case-design/<req_id>/checkpoint_*.md`）。代价是换"生成时强制"——值得，且是 runtime 临时件、Phase 13 后清理。
 2. **`--phase-gate` 检查子集要维护**：`phase_gate_map` 需与 Phase 13 全量校验对齐，避免重复或遗漏。用 config 一处声明。
 3. **一致性/传递仍是"高概率非保证"**：反义词词典、台账事实关键词命中属启发式；门禁强制的是"必须过"，过不了就回退/浮现，但语义终判仍归 LLM/人。
 4. **契约卡变长**：PRIOR_ARTIFACTS 增加卡片体积，但换来"不靠记忆"——只注入 ID 范围 + 待确认项 + 关键事实摘要控制长度。
@@ -464,7 +464,7 @@ Phase 8 的 gate 增检查（由 `--phase-gate 8` 跑，对照 `state.json["arti
 
 | 既有约束 | 本设计是否破坏 | 说明 |
 |---|---|---|
-| TestCases.md 单文件一次 Write（禁 Edit 增量） | 否 | 检查点是 `.runtime/checkpoint_*.md`，非 TestCases.md |
+| TestCases.md 单文件一次 Write（禁 Edit 增量） | 否 | 检查点是 `.qamaster/case-design/<req_id>/checkpoint_*.md`，非 TestCases.md |
 | state.json 由 state_store 单写 | 否 | 仍由 runtime 在 gate 时写，模型不碰 |
 | 深度裁剪 heavy/medium/light | 否 | light 跳 3/10，由 Phase 8+13 兜底（与现行一致） |
 | 降级协议情形A/B | 否 | 情形A 退回模型自律时 phase-gate 脚本仍可由模型经 Bash 自跑；情形B 仍禁止落盘 |

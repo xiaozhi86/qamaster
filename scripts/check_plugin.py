@@ -172,6 +172,29 @@ if (rt_dir / "phases.py").exists():
 if not (ROOT / "scripts" / "test_runtime.py").exists():
     warn("scripts/test_runtime.py: 缺失（Runtime 自证测试）")
 
+# 6.6 多需求并行 + 通用 workflow 引擎结构护栏（回归 fence）
+for must in (rt_dir / "locking.py", rt_dir / "manifest.py"):
+    if not must.exists():
+        err(f"{must.relative_to(ROOT)}: 缺失（多需求并行/共享索引核心文件）")
+wf_dir = rt_dir / "workflows"
+for must in (wf_dir / "__init__.py", wf_dir / "registry.py", wf_dir / "case_design.py"):
+    if not must.exists():
+        err(f"{must.relative_to(ROOT)}: 缺失（通用 workflow 注册表）")
+rt_py = rt_dir / "qamaster_runtime.py"
+if rt_py.exists():
+    _rt_txt = rt_py.read_text(encoding="utf-8")
+    if "def cmd_bootstrap" not in _rt_txt or '"bootstrap"' not in _rt_txt:
+        err("runtime/qamaster_runtime.py: 缺少 bootstrap 子命令（req_id 派生协议）")
+    if "def cmd_manifest" not in _rt_txt or '"manifest"' not in _rt_txt:
+        err("runtime/qamaster_runtime.py: 缺少 manifest 子命令（Runtime 独占索引维护）")
+# 铁律 4 护栏：模型禁止 Write/Edit MANIFEST.md（SKILL.md 不应含该权限示例）
+_skill_md = ROOT / "skills" / "case-design" / "SKILL.md"
+if _skill_md.exists():
+    _sk_txt = _skill_md.read_text(encoding="utf-8")
+    if re.search(r"(Write|Edit)\([^)]*MANIFEST\.md", _sk_txt):
+        err("skills/case-design/SKILL.md: 仍含 Write/Edit MANIFEST.md 权限示例"
+            "（铁律 4：MANIFEST 由 Runtime 维护，模型禁止 Write/Edit）")
+
 # 7. README
 if not (ROOT / "README.md").exists():
     err("README.md: 缺失")

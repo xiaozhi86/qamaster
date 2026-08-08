@@ -312,7 +312,7 @@ Skill 会跳过完整设计流程，先做源 .md 一致性校验，通过后直
 
 ### 8.2 产出目录会被写入文件
 
-Skill 会在**项目根目录下的 `case-design-out/` 子目录**写 `MANIFEST.md`、`TestCases_*.md`、`Clarification_Ledger_*.md`、`Knowledge_*.md`、`TestCases_*.xlsx`（目录不存在时自动创建）。建议：
+Skill 会在**项目根目录下的 `case-design-out/` 子目录**写 `TestCases_*.md`、`Clarification_Ledger_*.md`、`Knowledge_*.md`、`TestCases_*.xlsx`，并由 Runtime 自动维护索引文件 `MANIFEST.md`（模型不直接写，铁律 4）；流程控制层状态写 `.qamaster/case-design/<需求标识>/`（已默认 `.gitignore`，多需求分区隔离）。建议：
 - 在**专用项目文件夹**运行，不要在系统目录或代码仓库根目录直接跑（除非你确要这么用）。
 - Excel 生成会临时在 `case-design-out/` 下建 `.py` 脚本和中间文件，用完即自动删除；正式产出物不会被删。
 

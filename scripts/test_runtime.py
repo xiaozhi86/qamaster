@@ -23,14 +23,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RT = os.path.join(ROOT, "runtime", "qamaster_runtime.py")
 SKILL_SCRIPTS = os.path.join(ROOT, "skills", "case-design", "scripts")
 sys.path.insert(0, os.path.join(ROOT, "runtime"))
 import phases as _RT_PHASES  # noqa: E402
+import manifest as _MANIFEST  # noqa: E402
+import state_store as _STATE  # noqa: E402
 
 REQ_ID = "自证需求-20260802"
+WORKFLOW = "case-design"
+QAMASTER_PART = os.path.join(".qamaster", WORKFLOW)  # 分区根（相对 workdir）
 
 HEADER = ("| 用例ID | 关联需求ID | 关联规则 | 测试类型 | 测试维度 | 所属模块 | 用例名称 | "
           "Given | When | Then | 编辑模式 | 标签 | 责任人 | 用例等级 | 用例状态 |")
@@ -149,15 +154,6 @@ KNOWLEDGE_MD = """# 知识总结 - 自证需求
 本需求已全部澄清。
 """
 
-MANIFEST_MD = """# 需求文件索引 MANIFEST
-
-## 索引表
-
-| 需求标识 | 需求名称 | 需求文档 | 台账文件 | 测试用例文件 | 知识总结 | 状态 | 更新时间 |
-| -- | -- | -- | -- | -- | -- | -- | -- |
-| `{req}` | 自证需求 | REQ_{req}.md | Clarification_Ledger_{req}.md | TestCases_{req}.md | Knowledge_{req}.md | 进行中 | 2026-08-02 |
-"""
-
 LEDGER_MD = """# 澄清台账 Clarification_Ledger - {req}
 
 | 问题ID | 类型 | 原问题 | 用户答复 | 状态 | 建议回答角色 | 登记轮次 |
@@ -178,8 +174,23 @@ def check(name, cond, detail=""):
         print("  [FAIL] %s  %s" % (name, detail))
 
 
-def run(workdir, *args, expect_rc=None):
-    proc = subprocess.run([sys.executable, RT] + list(args) + ["--workdir", workdir],
+def _inject_args(args, req_id):
+    """run/run_debug 公共：自动注入 --workflow case-design；命令非 bootstrap 且未显式带 --req-id 时注入 req_id。
+
+    bootstrap 派生 id，不能强塞 --req-id；start/status/manifest 等显式带 --req-id 的调用方不重复注入。
+    """
+    args = list(args)
+    if "--workflow" not in args:
+        args += ["--workflow", WORKFLOW]
+    cmd = args[0] if args else ""
+    if cmd != "bootstrap" and req_id and "--req-id" not in args:
+        args += ["--req-id", req_id]
+    return args
+
+
+def run(workdir, *args, expect_rc=None, req_id=REQ_ID):
+    full = _inject_args(args, req_id)
+    proc = subprocess.run([sys.executable, RT] + full + ["--workdir", workdir],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     if expect_rc is not None:
         assert proc.returncode == expect_rc, "rc=%d expected %d\ncmd=%s\nstdout=%s\nstderr=%s" % (
@@ -187,18 +198,24 @@ def run(workdir, *args, expect_rc=None):
     return proc
 
 
-def run_debug(workdir, *args):
-    proc = subprocess.run([sys.executable, RT] + list(args) + ["--workdir", workdir],
+def run_debug(workdir, *args, req_id=REQ_ID):
+    full = _inject_args(args, req_id)
+    proc = subprocess.run([sys.executable, RT] + full + ["--workdir", workdir],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     print("    cmd=%s rc=%d | %s" % (" ".join(args), proc.returncode,
                                    (proc.stdout or proc.stderr).strip().splitlines()[0][:100] if (proc.stdout or proc.stderr).strip() else ""))
     return proc
 
 
-def state_of(workdir):
-    p = os.path.join(workdir, "case-design-out", ".runtime", "state.json")
+def state_of(workdir, req_id=REQ_ID):
+    """读分区状态：<workdir>/.qamaster/case-design/<req_id>/state.json"""
+    p = os.path.join(workdir, QAMASTER_PART, req_id, "state.json")
     with open(p, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def manifest_path(workdir):
+    return os.path.join(workdir, "case-design-out", "MANIFEST.md")
 
 
 def w(workdir, rel, content):
@@ -216,12 +233,18 @@ def openpyxl_available():
         return False
 
 
-def write_checkpoints(workdir, req_id):
+def cp_dir(workdir, req_id=REQ_ID):
+    """检查点分区目录：<workdir>/.qamaster/case-design/<req_id>/"""
+    d = os.path.join(workdir, QAMASTER_PART, req_id)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def write_checkpoints(workdir, req_id=REQ_ID):
     """v0.7.0: Phase 3/5/7/8/10 现有 phase_gate 检查，需检查点占位文件。
-    Phase 8/10 用 TC_MD 内容（含用例表，使引用解析/覆盖校验有内容）。"""
-    out = "case-design-out"
-    cp_dir = os.path.join(workdir, out, ".runtime")
-    os.makedirs(cp_dir, exist_ok=True)
+    Phase 8/10 用 TC_MD 内容（含用例表，使引用解析/覆盖校验有内容）。
+    分区路径：<workdir>/.qamaster/case-design/<req_id>/checkpoint_<N>.md"""
+    d = cp_dir(workdir, req_id)
     secs = {
         3: "## 规则建模\n\n- **R1 订单创建主流程** [来源:需求文档]\n- **R2 库存扣减时机** [来源:需求文档]\n",
         5: "## 风险清单\n\n| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |\n| -- | -- | -- | -- | -- |\n| RK1 | P0 | x | m | 需求推导 |\n",
@@ -230,19 +253,19 @@ def write_checkpoints(workdir, req_id):
         10: TC_MD.format(req=req_id, header=HEADER, sep=SEP),
     }
     for pid, content in secs.items():
-        with open(os.path.join(cp_dir, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+        with open(os.path.join(d, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
             f.write(content)
 
 
-def advance_to_phase13(workdir):
+def advance_to_phase13(workdir, req_id=REQ_ID):
     """从 Phase 2（已 confirm 进入）推进到 Phase 13（写盘前）。
     v0.7.0: Phase 3/5/7/8/10 有 phase_gate，需先写检查点。"""
-    run(workdir, "gate", expect_rc=0)  # Phase 2
-    write_checkpoints(workdir, REQ_ID)
+    run(workdir, "gate", expect_rc=0, req_id=req_id)  # Phase 2
+    write_checkpoints(workdir, req_id)
     for pid in [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
-        run(workdir, "next", expect_rc=0)
-        run(workdir, "gate", expect_rc=0)
-    run(workdir, "next", expect_rc=0)  # → Phase 13
+        run(workdir, "next", expect_rc=0, req_id=req_id)
+        run(workdir, "gate", expect_rc=0, req_id=req_id)
+    run(workdir, "next", expect_rc=0, req_id=req_id)  # → Phase 13
 
 
 def main():
@@ -252,6 +275,14 @@ def main():
         _run_suite(workdir)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+    # 并行/迁移/索引自证（各自独立 workdir）
+    test_concurrent_reqs()
+    test_manifest_concurrent_update()
+    test_phase0_manifest_created_on_pass()
+    test_legacy_migration()
+    test_bootstrap_idempotent()
+    test_manifest_reconcile()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -280,9 +311,10 @@ def _run_suite(workdir):
     st = state_of(workdir)
     check("FAIL 后停留 Phase 0", st["current_phase"] == 0 and st["status"] == "RUNNING")
     w(workdir, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
-    w(workdir, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+    # MANIFEST 不预写：Runtime 在 Phase 0 gate PASS 时经 manifest add 自动创建（见 [new] test_phase0_manifest_created_on_pass）
     r = run(workdir, "gate", expect_rc=0)
     check("补齐产物后 gate PASS", "GATE RESULT: PASS" in r.stdout)
+    check("Phase 0 gate PASS 后 Runtime 自动创建 MANIFEST", os.path.isfile(manifest_path(workdir)))
     r = run(workdir, "next", expect_rc=0)
     check("next 进入 Phase 1 契约卡", "Phase 1" in r.stdout and "澄清" in r.stdout)
 
@@ -314,9 +346,8 @@ def _run_suite(workdir):
         check("推进到 Phase %d" % pid, st["current_phase"] == pid)
         # v0.7.0: 有 phase_gate 的阶段补检查点占位，使 gate PASS
         if pid in checkpoints:
-            cp_dir = os.path.join(workdir, out, ".runtime")
-            os.makedirs(cp_dir, exist_ok=True)
-            with open(os.path.join(cp_dir, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
+            d = cp_dir(workdir)
+            with open(os.path.join(d, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
                 f.write(checkpoints[pid])
         r = run(workdir, "gate", expect_rc=0)
         check("Phase %d gate PASS" % pid, "GATE RESULT: PASS" in r.stdout, r.stdout[-400:])
@@ -348,9 +379,8 @@ def _run_suite(workdir):
     # v0.7.0: 重走时 Phase 8/10 需补检查点占位（已在 [5] 写过 3/5/7；8 用 TestCases 内容、10 用覆盖率占位）
     # [5] 已写 checkpoint_3/5/7/10；重走 8/10 时仍存在，phase_gate 应 PASS
     # 但 [5] 的 checkpoint_8 未写（8 阶段当时靠空 gate_checks）。重走需补 8 检查点。
-    cp_dir = os.path.join(workdir, out, ".runtime")
-    os.makedirs(cp_dir, exist_ok=True)
-    with open(os.path.join(cp_dir, "checkpoint_8.md"), "w", encoding="utf-8") as f:
+    d = cp_dir(workdir)
+    with open(os.path.join(d, "checkpoint_8.md"), "w", encoding="utf-8") as f:
         f.write(TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP))
     for pid in [9, 10, 11, 12, 13, 14]:
         run_debug(workdir, "gate")
@@ -403,7 +433,7 @@ def _run_suite(workdir):
     try:
         run(workdir2, "start", "--req-id", REQ_ID, expect_rc=0)
         w(workdir2, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
-        w(workdir2, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        # MANIFEST 不预写：Runtime 自动创建（铁律 4）
         run(workdir2, "gate", expect_rc=0)
         run(workdir2, "next", expect_rc=0)
         r = run(workdir2, "start", expect_rc=0)
@@ -418,7 +448,7 @@ def _run_suite(workdir):
     try:
         run(workdir3, "start", "--req-id", REQ_ID, "--mode", "auto", expect_rc=0)
         w(workdir3, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
-        w(workdir3, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        # MANIFEST 不预写：Runtime 自动创建
         run(workdir3, "gate", expect_rc=0)
         run(workdir3, "next", expect_rc=0)
         run(workdir3, "confirm", expect_rc=0)   # 澄清门确认 → Phase 1 GATE_PASSED
@@ -430,8 +460,7 @@ def _run_suite(workdir):
                7: "## 测试点清单\n\n| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |\n| -- | -- | -- | -- |\n| TP1 | 正常 | x | m |\n",
                8: TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP),
                10: TC_MD.format(req=REQ_ID, header=HEADER, sep=SEP)}
-        cp_dir3 = os.path.join(workdir3, out, ".runtime")
-        os.makedirs(cp_dir3, exist_ok=True)
+        cp_dir3 = cp_dir(workdir3)
         for pid, content in cp3.items():
             with open(os.path.join(cp_dir3, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
                 f.write(content)
@@ -466,19 +495,20 @@ def _run_suite(workdir):
     finally:
         shutil.rmtree(workdir3, ignore_errors=True)
 
-    print("\n[14] 深度裁剪（light 裁 3/4/10）")
+    print("\n[14] 深度裁剪（light 裁 3/4）")
     workdir4 = tempfile.mkdtemp(prefix="qamaster-rt-test4-")
     try:
         run(workdir4, "start", "--req-id", REQ_ID, "--mode", "light", expect_rc=0)
         run(workdir4, "set", "--depth", "light", expect_rc=0)
         r = run(workdir4, "plan", expect_rc=0)
-        check("plan 不含 Phase 3/4/10", "Phase 3 " not in r.stdout and "Phase 10 " not in r.stdout
-              and "Phase 4 " not in r.stdout, r.stdout)
+        check("plan 不含 Phase 3/4", "Phase 3 " not in r.stdout and "Phase 4 " not in r.stdout,
+              r.stdout)
         st = state_of(workdir4)
-        check("skipped_phases=[3,4,10]", st["skipped_phases"] == [3, 4, 10])
+        check("skipped_phases=[3,4]", st["skipped_phases"] == [3, 4],
+              "actual=%s" % st.get("skipped_phases"))
         # light 模式澄清门语义（仅 P0 阻断）：人工门默认 WAIT，confirm 后放行
         w(workdir4, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
-        w(workdir4, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        # MANIFEST 不预写：Runtime 自动创建
         run(workdir4, "gate", expect_rc=0)
         run(workdir4, "next", expect_rc=0)          # Phase 1（light 裁不掉澄清）
         st = state_of(workdir4)
@@ -496,7 +526,7 @@ def _run_suite(workdir):
     try:
         run(workdir5, "start", "--req-id", REQ_ID, "--mode", "auto", expect_rc=0)
         w(workdir5, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
-        w(workdir5, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        # MANIFEST 不预写：Runtime 自动创建
         run(workdir5, "set", "--excel", "asked_yes", expect_rc=0)   # 用户已声明要 Excel
         run(workdir5, "gate", expect_rc=0)
         run(workdir5, "next", expect_rc=0)
@@ -507,8 +537,7 @@ def _run_suite(workdir):
         cp5 = {3: "## 规则建模\n\n- **R1 订单创建主流程** [来源:需求文档]\n- **R2 库存扣减时机** [来源:需求文档]\n",
                5: "## 风险清单\n\n| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |\n| -- | -- | -- | -- | -- |\n| RK1 | P0 | x | m | 需求推导 |\n",
                7: "## 测试点清单\n\n| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |\n| -- | -- | -- | -- |\n| TP1 | 正常 | x | m |\n"}
-        cp_dir5 = os.path.join(workdir5, out, ".runtime")
-        os.makedirs(cp_dir5, exist_ok=True)
+        cp_dir5 = cp_dir(workdir5)
         for pid, content in cp5.items():
             with open(os.path.join(cp_dir5, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
                 f.write(content)
@@ -552,7 +581,7 @@ def _run_suite(workdir):
         check("警告含补验指令", "verify_cases.py" in r.stdout and "REQ_" in r.stdout)
         # 情形 b：state 在 Phase 1，TestCases 已落盘 → 续跑 start 应告警
         w(workdir6, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
-        w(workdir6, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        # MANIFEST 不预写：Runtime 自动创建
         run(workdir6, "gate", expect_rc=0)
         run(workdir6, "next", expect_rc=0)   # Phase 1
         r = run(workdir6, "start", expect_rc=0)
@@ -568,8 +597,7 @@ def _run_suite(workdir):
         cp6 = {3: "## 规则建模\n\n- **R1 订单创建主流程** [来源:需求文档]\n- **R2 库存扣减时机** [来源:需求文档]\n",
                5: "## 风险清单\n\n| 风险ID | 风险等级 | 风险描述 | 关联模块 | 风险来源 |\n| -- | -- | -- | -- | -- |\n| RK1 | P0 | x | m | 需求推导 |\n",
                7: "## 测试点清单\n\n| 测试点ID | 场景类型 | 测试点描述 | 关联模块 |\n| -- | -- | -- | -- |\n| TP1 | 正常 | x | m |\n"}
-        cp_dir6 = os.path.join(workdir6, out, ".runtime")
-        os.makedirs(cp_dir6, exist_ok=True)
+        cp_dir6 = cp_dir(workdir6)
         for pid, content in cp6.items():
             with open(os.path.join(cp_dir6, "checkpoint_%d.md" % pid), "w", encoding="utf-8") as f:
                 f.write(content)
@@ -599,7 +627,7 @@ def _run_suite(workdir):
         run(workdir7, "start", "--req-id", REQ_ID, expect_rc=0)
         # REQ 有 2 个二级标题条目；构造只引用其中 1 条、P0 风险 R1 无引用的用例集
         w(workdir7, os.path.join(out, "REQ_%s.md" % REQ_ID), REQ_DOC)
-        w(workdir7, os.path.join(out, "MANIFEST.md"), MANIFEST_MD.format(req=REQ_ID))
+        # MANIFEST 不预写：Runtime 自动创建
         run(workdir7, "gate", expect_rc=0)
         run(workdir7, "next", expect_rc=0)
         w(workdir7, os.path.join(out, "Clarification_Ledger_%s.md" % REQ_ID), LEDGER_MD.format(req=REQ_ID))
@@ -651,6 +679,249 @@ def _run_suite(workdir):
         check("回读输出含 ##VERIFY_SUMMARY## 机器摘要块", "##VERIFY_SUMMARY##" in r.stdout)
     finally:
         shutil.rmtree(workdir7, ignore_errors=True)
+
+
+# ============================================================
+# 并行/迁移/索引自证（各自独立 workdir，证明多需求隔离与铁律）
+# ============================================================
+
+def test_concurrent_reqs():
+    """并发核心：同 workdir 两 req 独立推进，state/检查点互不覆盖，降级对账不误报对方用例（C2）。"""
+    print("\n[new] 并发核心：同 workdir 两 req 独立推进，状态互不覆盖，降级对账不误报（C2）")
+    out = "case-design-out"
+    workdir_cc = tempfile.mkdtemp(prefix="qamaster-rt-test-conc-")
+    try:
+        rA = "并发需求甲-20260808"
+        rB = "并行需求乙-20260808"
+
+        def advance_to_phase2(wd, rid):
+            run(wd, "start", "--req-id", rid, req_id=rid, expect_rc=0)
+            w(wd, os.path.join(out, "REQ_%s.md" % rid),
+              "# %s\n\n## 订单创建\n\n内容%s\n\n## 库存扣减\n\n内容\n" % (rid, rid))
+            run(wd, "gate", req_id=rid, expect_rc=0)       # Phase 0 PASS → manifest add
+            run(wd, "next", req_id=rid, expect_rc=0)        # → Phase 1（人工确认门）
+            w(wd, os.path.join(out, "Clarification_Ledger_%s.md" % rid), LEDGER_MD.format(req=rid))
+            run(wd, "confirm", req_id=rid, expect_rc=0)     # Phase 1 confirm → GATE_PASSED
+            run(wd, "next", req_id=rid, expect_rc=0)        # → Phase 2
+
+        advance_to_phase2(workdir_cc, rA)
+        st_a = state_of(workdir_cc, rA)
+        check("req A 到达 Phase 2", st_a["current_phase"] == 2, "phase=%s" % st_a.get("current_phase"))
+        check("req A state.req_id 独立", st_a["req_id"] == rA)
+        a_created = st_a["created_at"]
+
+        advance_to_phase2(workdir_cc, rB)
+        st_b = state_of(workdir_cc, rB)
+        check("req B 到达 Phase 2", st_b["current_phase"] == 2, "phase=%s" % st_b.get("current_phase"))
+        check("req B state.req_id 独立", st_b["req_id"] == rB)
+
+        # 关键断言：B 推进后 A 的状态未被覆盖（分区隔离证明）
+        st_a2 = state_of(workdir_cc, rA)
+        check("B 推进后 A 仍在 Phase 2（未被覆盖）", st_a2["current_phase"] == 2,
+              "phase=%s" % st_a2.get("current_phase"))
+        check("B 推进后 A 的 req_id 仍为 A", st_a2["req_id"] == rA)
+        check("B 推进后 A 的 created_at 不变（不重建状态·C8）", st_a2["created_at"] == a_created,
+              "before=%s after=%s" % (a_created, st_a2["created_at"]))
+
+        # 检查点分区目录各自独立
+        dir_a = os.path.join(workdir_cc, QAMASTER_PART, rA)
+        dir_b = os.path.join(workdir_cc, QAMASTER_PART, rB)
+        check("A/B 分区目录各自独立", os.path.isdir(dir_a) and os.path.isdir(dir_b))
+
+        # C2：A、B 均有用例（均<13，降级产物）；audit B 只报 B 的、不误报 A 的
+        w(workdir_cc, os.path.join(out, "TestCases_%s.md" % rA),
+          TC_MD.format(req=rA, header=HEADER, sep=SEP))
+        w(workdir_cc, os.path.join(out, "TestCases_%s.md" % rB),
+          TC_MD.format(req=rB, header=HEADER, sep=SEP))
+        rb = run(workdir_cc, "start", "--req-id", rB, req_id=rB, expect_rc=0)  # B 续跑 → 触发降级对账
+        check("audit B 触发自身降级警告", "降级产物对账警告" in rb.stdout, rb.stdout[:500])
+        check("audit B 不误报 A 的 TestCases（C2）",
+              ("TestCases_%s" % rA) not in rb.stdout, rb.stdout[:800])
+        check("audit B 仅报自身 TestCases", ("TestCases_%s" % rB) in rb.stdout, rb.stdout[:800])
+
+        # MANIFEST 两行共存（共享索引未丢行）
+        rows = _MANIFEST.load_rows(manifest_path(workdir_cc))
+        ids = [row.get("req_id") for row in rows]
+        check("MANIFEST 两 req 行共存", rA in ids and rB in ids, "ids=%s" % ids)
+
+        # status --all 列出两 req
+        rall = run(workdir_cc, "status", "--all", req_id=None, expect_rc=0)
+        check("status --all 列出两 req", rA in rall.stdout and rB in rall.stdout, rall.stdout[:400])
+    finally:
+        shutil.rmtree(workdir_cc, ignore_errors=True)
+
+
+def test_manifest_concurrent_update():
+    """并发 manifest update：FileLock 串行化，无损坏无丢行。"""
+    print("\n[new] 并发 manifest update：FileLock 串行化，无损坏无丢行")
+    workdir_mc = tempfile.mkdtemp(prefix="qamaster-rt-test-mc-")
+    try:
+        rA = "清单甲-20260808"
+        rB = "清单乙-20260808"
+        run(workdir_mc, "manifest", "add", "--req-id", rA, req_id=None, expect_rc=0)
+        run(workdir_mc, "manifest", "add", "--req-id", rB, req_id=None, expect_rc=0)
+
+        errors = []
+
+        def worker(rid, idx):
+            try:
+                run(workdir_mc, "manifest", "update", "--req-id", rid,
+                    "--knowledge-file", "Kf_%s_%d.md" % (rid, idx),
+                    "--ledger-file", "Lg_%s_%d.md" % (rid, idx),
+                    req_id=None, expect_rc=0)
+            except Exception as e:  # noqa
+                errors.append("%s/%d: %s" % (rid, idx, e))
+
+        threads = []
+        for i in range(6):
+            threads.append(threading.Thread(target=worker, args=(rA, i)))
+            threads.append(threading.Thread(target=worker, args=(rB, i)))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        check("并发更新无异常", not errors, str(errors[:3]))
+        rows = _MANIFEST.load_rows(manifest_path(workdir_mc))
+        ids = [row.get("req_id") for row in rows]
+        check("并发后两行均存在", rA in ids and rB in ids, "ids=%s" % ids)
+        check("并发后无重复行", len(ids) == len(set(ids)) == 2, "ids=%s" % ids)
+        for row in rows:
+            check("%s 行字段已写（非空）" % row.get("req_id"),
+                  bool(row.get("knowledge_file")) and bool(row.get("ledger_file")), str(row))
+    finally:
+        shutil.rmtree(workdir_mc, ignore_errors=True)
+
+
+def test_phase0_manifest_created_on_pass():
+    """C1：空 MANIFEST 下 Phase 0 gate PASS 由 Runtime 自动创建 MANIFEST（gate-check 不卡 exists MANIFEST）。"""
+    print("\n[new] Phase 0 gate PASS 自动创建 MANIFEST（C1）")
+    out = "case-design-out"
+    workdir_p0 = tempfile.mkdtemp(prefix="qamaster-rt-test-p0-")
+    try:
+        rid = "清单创建-20260808"
+        run(workdir_p0, "start", "--req-id", rid, req_id=rid, expect_rc=0)
+        check("初始无 MANIFEST", not os.path.isfile(manifest_path(workdir_p0)))
+        w(workdir_p0, os.path.join(out, "REQ_%s.md" % rid), "# %s\n\n## 订单创建\n\n内容\n" % rid)
+        r = run(workdir_p0, "gate", req_id=rid, expect_rc=0)
+        check("Phase 0 gate PASS", "GATE RESULT: PASS" in r.stdout, r.stdout[-400:])
+        check("gate PASS 后 MANIFEST 自动创建", os.path.isfile(manifest_path(workdir_p0)))
+        rows = _MANIFEST.load_rows(manifest_path(workdir_p0))
+        ids = [row.get("req_id") for row in rows]
+        check("MANIFEST 含本 req 行", rid in ids, "ids=%s" % ids)
+        row = next((row for row in rows if row.get("req_id") == rid), None)
+        check("行 status=进行中", row is not None and row.get("status") == "进行中", str(row))
+    finally:
+        shutil.rmtree(workdir_p0, ignore_errors=True)
+
+
+def test_legacy_migration():
+    """legacy v2 状态迁移到分区路径；空 req_id 拒绝迁移（归属不明）。"""
+    print("\n[new] legacy v2 状态迁移到分区路径；空 req_id 拒绝迁移")
+    out = "case-design-out"
+
+    def _legacy_state(workdir, rid, phase):
+        return {
+            "schema": 2, "workflow": WORKFLOW, "req_id": rid, "workdir": workdir,
+            "current_phase": phase, "completed": list(range(0, phase)), "status": "RUNNING",
+            "run_mode": "full", "depth": "heavy", "input_kind": "requirement",
+            "skipped_phases": [], "failed_gates": {}, "confirm_rounds": 0, "history": [],
+            "created_at": "2026-07-01 10:00:00", "updated_at": "2026-07-01 11:00:00",
+        }
+
+    workdir_lm = tempfile.mkdtemp(prefix="qamaster-rt-test-legacy-")
+    try:
+        LEG = "迁移需求-20260808"
+        legacy_dir = os.path.join(workdir_lm, out, ".runtime")
+        os.makedirs(legacy_dir, exist_ok=True)
+        with open(os.path.join(legacy_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(_legacy_state(workdir_lm, LEG, 5), f, ensure_ascii=False)
+
+        ok, rid, reason = _STATE.migrate_legacy_state(workdir_lm, WORKFLOW)
+        check("非空 req_id 迁移返回 migrated", ok is True and rid == LEG,
+              "ret=(%s,%s,%s)" % (ok, rid, reason))
+        new_path = os.path.join(workdir_lm, QAMASTER_PART, LEG, "state.json")
+        check("迁移到分区路径", os.path.isfile(new_path))
+        with open(new_path, "r", encoding="utf-8") as f:
+            st = json.load(f)
+        check("迁移保留 current_phase=5", st["current_phase"] == 5, "phase=%s" % st.get("current_phase"))
+        check("迁移保留 req_id", st["req_id"] == LEG)
+        check("迁移升 schema=3", st["schema"] == 3, "schema=%s" % st.get("schema"))
+        # 幂等：再迁一次不重建
+        ok2, _rid2, reason2 = _STATE.migrate_legacy_state(workdir_lm, WORKFLOW)
+        check("二次迁移幂等", ok2 is False, "ret2=(%s,%s)" % (ok2, reason2))
+        # start 命中已迁移的分区状态 → 断点续跑（不重置）
+        r = run(workdir_lm, "start", "--req-id", LEG, req_id=LEG, expect_rc=0)
+        check("start 检测到迁移后状态续跑", "断点续跑" in r.stdout, r.stdout[:300])
+    finally:
+        shutil.rmtree(workdir_lm, ignore_errors=True)
+
+    # 空 req_id 旧状态 → 拒绝迁移
+    workdir_lm2 = tempfile.mkdtemp(prefix="qamaster-rt-test-legacy-empty-")
+    try:
+        legacy_dir2 = os.path.join(workdir_lm2, out, ".runtime")
+        os.makedirs(legacy_dir2, exist_ok=True)
+        with open(os.path.join(legacy_dir2, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(_legacy_state(workdir_lm2, "", 3), f, ensure_ascii=False)
+        ok, rid, reason = _STATE.migrate_legacy_state(workdir_lm2, WORKFLOW)
+        check("空 req_id 拒绝迁移", ok is False and "empty req_id" in reason, "reason=%s" % reason)
+        check("空 req_id 未生成分区状态", not os.path.isdir(os.path.join(workdir_lm2, QAMASTER_PART)))
+        check("空 req_id 旧状态保留原处", os.path.isfile(os.path.join(legacy_dir2, "state.json")))
+    finally:
+        shutil.rmtree(workdir_lm2, ignore_errors=True)
+
+
+def test_bootstrap_idempotent():
+    """bootstrap 幂等：在途需求重跑输出 RESUME 且不重建状态（C8）。"""
+    print("\n[new] bootstrap 幂等：在途需求重跑输出 RESUME 且不重建状态（C8）")
+    workdir_bi = tempfile.mkdtemp(prefix="qamaster-rt-test-bs-")
+    try:
+        r1 = run(workdir_bi, "bootstrap", "--user-input", "# 幂等需求", req_id=None, expect_rc=0)
+        check("首次 bootstrap 输出 BOOTSTRAP OK", "BOOTSTRAP OK" in r1.stdout, r1.stdout[:200])
+        import re as _re
+        m = _re.search(r"req_id=(\S+)", r1.stdout)
+        check("首次 bootstrap 派生 req_id", m is not None, r1.stdout[:200])
+        rid = m.group(1)
+        st_path = os.path.join(workdir_bi, QAMASTER_PART, rid, "state.json")
+        check("bootstrap 未创建状态文件", not os.path.isfile(st_path))
+
+        run(workdir_bi, "start", "--req-id", rid, req_id=rid, expect_rc=0)
+        st = state_of(workdir_bi, rid)
+        created0 = st["created_at"]
+        check("start 后状态 created_at 已记录", bool(created0))
+
+        r2 = run(workdir_bi, "bootstrap", "--user-input", "# 幂等需求", req_id=None, expect_rc=0)
+        check("二次 bootstrap 输出 RESUME", "BOOTSTRAP RESUME" in r2.stdout, r2.stdout[:200])
+        check("RESUME 含 phase/status", "phase=" in r2.stdout and "status=" in r2.stdout, r2.stdout[:200])
+        st2 = state_of(workdir_bi, rid)
+        check("RESUME 后 created_at 不变（C8 不重建状态）", st2["created_at"] == created0,
+              "before=%s after=%s" % (created0, st2["created_at"]))
+    finally:
+        shutil.rmtree(workdir_bi, ignore_errors=True)
+
+
+def test_manifest_reconcile():
+    """C6 兜底：删 MANIFEST 后 manifest reconcile 从磁盘 REQ_/TestCases_ 重建索引。"""
+    print("\n[new] manifest reconcile：从磁盘重建索引（C6 兜底）")
+    out = "case-design-out"
+    workdir_rc = tempfile.mkdtemp(prefix="qamaster-rt-test-recon-")
+    try:
+        rid = "重建清单-20260808"
+        w(workdir_rc, os.path.join(out, "REQ_%s.md" % rid), "# %s\n\n## 订单创建\n\n内容\n" % rid)
+        w(workdir_rc, os.path.join(out, "TestCases_%s.md" % rid),
+          TC_MD.format(req=rid, header=HEADER, sep=SEP))
+        check("初始无 MANIFEST", not os.path.isfile(manifest_path(workdir_rc)))
+        r = run(workdir_rc, "manifest", "reconcile", req_id=None, expect_rc=0)
+        check("reconcile 输出 OK", "MANIFEST RECONCILE: OK" in r.stdout, r.stdout[:300])
+        rows = _MANIFEST.load_rows(manifest_path(workdir_rc))
+        ids = [row.get("req_id") for row in rows]
+        check("reconcile 重建出本 req 行", rid in ids, "ids=%s" % ids)
+        row = next((row for row in rows if row.get("req_id") == rid), None)
+        check("reconcile 回填 testcase_files", row is not None and "TestCases" in (row.get("testcase_files") or ""),
+              str(row))
+        check("reconcile 回填 req_file", row is not None and "REQ_" in (row.get("req_file") or ""), str(row))
+    finally:
+        shutil.rmtree(workdir_rc, ignore_errors=True)
 
 
 def P_gate_of(st):

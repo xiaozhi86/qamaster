@@ -36,6 +36,11 @@ gate 取值：
 """
 from state_store import PHASE_KINDS  # noqa: F401  (re-export, 供调用方校验)
 
+# workflow 元数据常量（供 workflows/case_design.py 与控制器引用，单一事实源）
+WORKFLOW_NAME = "case-design"
+OUTPUT_DIR = "case-design-out"
+SKILL_DIR = "skills/case-design"
+
 POST_CONFIRM_KNOWLEDGE = "knowledge"   # Phase14 审核通过后的知识沉淀后置动作标记
 
 PHASES = [
@@ -44,22 +49,22 @@ PHASES = [
         "refs": ["references/phase0_manifest.md"],
         "objective": "读 MANIFEST 索引定位需求、需求文档强制落盘 REQ_<需求标识>.md、判定需求规模(重/中/轻)与输入形态(纯需求/契约驱动)、确定运行模式。",
         "allowed": [
-            "读取 case-design-out/MANIFEST.md（不存在则按需创建目录与空索引）",
+            "读取 case-design-out/MANIFEST.md（Runtime 在 gate PASS 时自动维护索引；模型可读但禁止 Write/Edit）",
             "将用户需求文档落盘为 case-design-out/REQ_<需求标识>.md（纯散文须补 ## 二级标题分节）",
-            "已有需求匹配成功时整表更新索引状态=进行中",
+            "需求标识由 bootstrap 预先派生写入 state.req_id，本阶段不再派生 id",
             "向用户复述判定结论：需求标识/规模分级/运行模式/输入形态（不调 set 由 Runtime 记录）",
         ],
-        "forbidden": ["逐一扫描所有文件定位需求", "跳过 REQ 落盘直接进入澄清", "生成任何测试用例"],
-        "produces": ["case-design-out/REQ_<需求标识>.md", "case-design-out/MANIFEST.md"],
-        "exit_condition": "REQ 文件与索引文件均存在于磁盘（Runtime 机器判定）",
+        "forbidden": ["逐一扫描所有文件定位需求", "跳过 REQ 落盘直接进入澄清", "生成任何测试用例", "Write/Edit case-design-out/MANIFEST.md（由 Runtime 维护）"],
+        "produces": ["case-design-out/REQ_<需求标识>.md", "case-design-out/DESIGN_<需求标识>.md（如提供）"],
+        "exit_condition": "REQ 文件存在于磁盘（Runtime 机器判定；MANIFEST 由 Runtime 在 gate PASS 时自动 add）",
         "gate_checks": [
             {"kind": "exists_any", "patterns": ["case-design-out/REQ_*.md"], "label": "需求文档已落盘"},
-            {"kind": "exists", "path": "case-design-out/MANIFEST.md", "label": "索引文件存在"},
             # v0.8.0: 设计文档存在性校验（optional——仅当用户提供【设计文档】时才校验；
             # runtime 探测 SKILL.md §5【设计文档】输入标记，无则 SKIP，不阻断纯需求驱动流程）
             {"kind": "exists_any", "patterns": ["case-design-out/DESIGN_*.md"], "label": "设计文档已落盘（如提供·#8-H 追溯基准）", "optional": True},
+            # C1: 不再校验 exists MANIFEST.md——MANIFEST 由 Runtime 在 gate PASS 副作用时创建/更新，
+            # gate-check 在 PASS 之前跑，若校验 exists 会死锁（MANIFEST 不存在→FAIL→到不了 PASS→永不创建）。
         ],
-        "produces": ["case-design-out/REQ_<需求标识>.md", "case-design-out/DESIGN_<需求标识>.md（如提供）", "case-design-out/MANIFEST.md"],
     },
     {
         "id": 1, "name": "需求分析与澄清", "gate": "confirm",
@@ -91,7 +96,7 @@ PHASES = [
         "id": 3, "name": "规则建模", "gate": "auto",
         "refs": ["references/modeling.md"],
         "objective": "沉淀规则建模清单，每条规则标注来源 [来源:需求文档<章节>/台账Q<n>/假设A<n>]，出口机器 gate 校验规则来源 + R 编号连续性。",
-        "allowed": ["建立规则建模清单（内存，后续沉淀为 TestCases .md 的 section）", "每条规则项标注来源", "本阶段结束写检查点 case-design-out/.runtime/checkpoint_3.md 供 runtime gate 校验"],
+        "allowed": ["建立规则建模清单（内存，后续沉淀为 TestCases .md 的 section）", "每条规则项标注来源", "本阶段结束写检查点（路径由 Runtime 解析：.qamaster/case-design/<req_id>/checkpoint_3.md）供 runtime gate 校验"],
         "forbidden": ["无来源标记的规则项静默保留（须转问题/假设）", "脑补业务规则"],
         "produces": [],
         "exit_condition": "规则清单全部带来源标注 + R 编号连续不跳号（本阶段不写最终文件，由 Phase13 统一沉淀落盘）",
@@ -115,7 +120,7 @@ PHASES = [
         "id": 5, "name": "风险分析", "gate": "auto",
         "refs": ["references/risk.md"],
         "objective": "三源共验产出 P0-P3 风险清单（含风险来源标注）；出口机器 gate 校验风险来源 + RK 编号连续性 + P0 漏标 critique 循环。",
-        "allowed": ["产出风险清单（风险ID/等级/描述/模块/来源）", "技术隐含@开发/业务领域@业务/缺陷反哺来源的风险经台账角色确认（完整模式）", "本阶段结束写检查点 case-design-out/.runtime/checkpoint_5.md 供 runtime gate 校验"],
+        "allowed": ["产出风险清单（风险ID/等级/描述/模块/来源）", "技术隐含@开发/业务领域@业务/缺陷反哺来源的风险经台账角色确认（完整模式）", "本阶段结束写检查点（路径由 Runtime 解析：.qamaster/case-design/<req_id>/checkpoint_5.md）供 runtime gate 校验"],
         "forbidden": ["P0 风险不显式列出", "跳过风险分析直接用例"],
         "produces": [],
         "exit_condition": "风险清单完整含来源 + RK 编号连续不跳号，critique ≤2 轮无新增漏标",
@@ -139,7 +144,7 @@ PHASES = [
         "id": 7, "name": "测试点建模", "gate": "auto",
         "refs": ["references/coverage.md"],
         "objective": "产出测试点清单（测试点ID/场景类型/描述/模块），覆盖主流程/分支/异常/状态/权限/数据一致性/幂等/并发/UI结构；出口机器 gate 校验 TP 编号连续性 + P0/P1 风险→≥1 TP。",
-        "allowed": ["按 15.3 维度提取测试点", "测试点清单后续沉淀为 TestCases .md section", "本阶段结束写检查点 case-design-out/.runtime/checkpoint_7.md 供 runtime gate 校验"],
+        "allowed": ["按 15.3 维度提取测试点", "测试点清单后续沉淀为 TestCases .md section", "本阶段结束写检查点（路径由 Runtime 解析：.qamaster/case-design/<req_id>/checkpoint_7.md）供 runtime gate 校验"],
         "forbidden": ["遗漏高风险测试点", "测试点无场景类型标注"],
         "produces": [],
         "exit_condition": "测试点清单完成且覆盖高风险维度 + TP 编号连续不跳号",
@@ -152,7 +157,7 @@ PHASES = [
         "id": 8, "name": "用例生成", "gate": "auto",
         "refs": ["references/modeling.md", "references/quality_rules.md"],
         "objective": "生成全部 Given/When/Then 用例（内存），遵守断言完整性/数据真实/存储保护/方法落地，关联规则列引用 R<n>/TP<n>/API<n>/假设A<n>；出口机器 gate 全量校验 + 反向引用完整性 + 台账传递 + 一致性（消费门禁）。",
-        "allowed": ["内存内生成全部用例（不落盘）", "断言可观测且状态变更类双重断言", "关联规则含 ID 引用实现追溯", "本阶段结束写检查点 case-design-out/.runtime/checkpoint_8.md 供 runtime gate 校验"],
+        "allowed": ["内存内生成全部用例（不落盘）", "断言可观测且状态变更类双重断言", "关联规则含 ID 引用实现追溯", "本阶段结束写检查点（路径由 Runtime 解析：.qamaster/case-design/<req_id>/checkpoint_8.md）供 runtime gate 校验"],
         "forbidden": ["脑补无来源业务行为", "模糊断言", "杜撰存储信息", "边生成边写文件", "引用不存在的 R/TP/RK/API（悬空引用）"],
         "produces": [],
         "exit_condition": "全部用例内存生成完毕（写前零文件操作）+ 反向引用完整 + 台账事实传递 + 假设对账",
@@ -176,7 +181,7 @@ PHASES = [
         "id": 10, "name": "覆盖率校验与反向追溯", "gate": "auto",
         "refs": ["references/dedup_coverage.md"],
         "objective": "覆盖率校验 + #4 反向需求追溯 + #5 业务行为来源追溯（契约分支加 #6 接口追溯）+ 台账待确认门禁 + 台账传递；未覆盖/无来源项内存补齐或转问题/假设。",
-        "allowed": ["按停止条件收敛（核心规则/高风险/关键状态/核心异常已覆盖即停）", "缺口转待确认问题/假设并回显清单", "本阶段结束写检查点 case-design-out/.runtime/checkpoint_10.md 供 runtime gate 校验"],
+        "allowed": ["按停止条件收敛（核心规则/高风险/关键状态/核心异常已覆盖即停）", "缺口转待确认问题/假设并回显清单", "本阶段结束写检查点（路径由 Runtime 解析：.qamaster/case-design/<req_id>/checkpoint_10.md）供 runtime gate 校验"],
         "forbidden": ["为覆盖率而覆盖、无限扩展边缘场景", "REQ 缺失时宣称覆盖率全过", "台账待确认项未闭环即推进"],
         "produces": [],
         "exit_condition": "覆盖缺口闭合或已登记假设 + 台账待确认项已闭环或转假设",
@@ -210,22 +215,23 @@ PHASES = [
     {
         "id": 13, "name": "写盘与脚本回读", "gate": "auto",
         "refs": ["references/output_write.md"],
-        "objective": "追溯性 section + 15列用例表一次性 Write 落盘 case-design-out/TestCases_<需求标识>.md（默认单文件；超预算按风险拆 PART），verify_md.py + verify_cases.py 回读核对，更新 MANIFEST 进度。",
+        "objective": "追溯性 section + 15列用例表一次性 Write 落盘 case-design-out/TestCases_<需求标识>.md（默认单文件；超预算按风险拆 PART），verify_md.py + verify_cases.py 回读核对，Runtime 在 gate PASS 时自动更新 MANIFEST 进度。",
         "allowed": [
             "每个文件恰好一次 Write（整体创建/覆盖），回读不通过内存修后重新整体 Write（≤2次/文件）",
             "用 python skills/case-design/scripts/verify_md.py + verify_cases.py <TC.md> case-design-out/REQ_<需求标识>.md 串联回读",
             "多 PART 自动续跑（中途不等用户），全部落盘后统一进 Phase14",
-            "整表更新 MANIFEST（状态保持进行中 + 实际落盘文件清单）",
+            "MANIFEST 由 Runtime 在 gate PASS 时自动更新（状态保持进行中 + 实际落盘文件清单）；模型禁止 Write/Edit MANIFEST.md",
         ],
-        "forbidden": ["Edit/MultiEdit/append 落盘或补齐", "把整份 .md 用 Read 读回上下文（必须用脚本回读）", "单文件场景写文件调用>2次"],
-        "produces": ["case-design-out/TestCases_<需求标识>.md", "case-design-out/MANIFEST.md"],
-        "exit_condition": "verify_md.py 结构通过 + verify_cases.py 硬性校验通过（exit=0）",
+        "forbidden": ["Edit/MultiEdit/append 落盘或补齐", "把整份 .md 用 Read 读回上下文（必须用脚本回读）", "单文件场景写文件调用>2次", "Write/Edit case-design-out/MANIFEST.md（由 Runtime 维护）"],
+        "produces": ["case-design-out/TestCases_<需求标识>.md"],
+        "exit_condition": "verify_md.py 结构通过 + verify_cases.py 硬性校验通过（exit=0）；MANIFEST 由 Runtime 在 PASS 时自动更新",
         "gate_checks": [
             {"kind": "script", "cmd": "python \"{skill_scripts}/verify_md.py\" \"case-design-out/TestCases_{req_id}.md\"", "label": "结构回读(verify_md)"},
             # v0.9.0·根因2/6 修复：传 --design，否则 #8-H 设计文档测试要点追溯 + safety_coverage
             # 在 Phase 13 回读全程拿不到设计文档 → 两门沦为死代码（DESIGN 不存在时脚本安全跳过）
             {"kind": "script", "cmd": "python \"{skill_scripts}/verify_cases.py\" \"case-design-out/TestCases_{req_id}.md\" \"case-design-out/REQ_{req_id}.md\" --ledger \"case-design-out/Clarification_Ledger_{req_id}.md\" --design \"case-design-out/DESIGN_{req_id}.md\"", "label": "内容回读(verify_cases+台账+设计文档)"},
-            {"kind": "exists", "path": "case-design-out/MANIFEST.md", "label": "索引已更新"},
+            # C1: 不再校验 exists MANIFEST.md——Runtime 在本 gate PASS 时自动 update 索引文件列。
+            # MANIFEST 是 Runtime 产物，不是模型需负责的门禁。
         ],
         "consumes": ["3", "5", "7", "8", "ledger", "req"],
     },
@@ -236,9 +242,9 @@ PHASES = [
         "allowed": [
             "按 review_gate.md 话术输出审核提示（数值取自 verify_cases.py 回读，禁止只填'通过'）",
             "用户反馈问题 → 按 output_write.md 起点判定重走（Runtime fail 回退到对应阶段）",
-            "审核通过后：更新 MANIFEST 状态=已完成 → 生成/更新知识总结 Knowledge_<需求标识>.md（13维度，verify_knowledge.py 校验）",
+            "审核通过后：Runtime 在 confirm 时自动将 MANIFEST 置已完成 → 生成/更新知识总结 Knowledge_<需求标识>.md（13维度，verify_knowledge.py 校验）",
         ],
-        "forbidden": ["默认审核通过", "用户未明确反馈即推进（完整模式）", "审核通过却跳过知识总结", "未经审核直接生成 Excel"],
+        "forbidden": ["默认审核通过", "用户未明确反馈即推进（完整模式）", "审核通过却跳过知识总结", "未经审核直接生成 Excel", "Write/Edit case-design-out/MANIFEST.md（由 Runtime 维护）"],
         "produces": ["case-design-out/Knowledge_<需求标识>.md"],
         "exit_condition": "完整模式：用户 confirm；连跑/轻量：标注待审核自动放行（REVIEW_PENDING）",
         "gate_checks": [],

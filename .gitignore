@@ -7,6 +7,9 @@ __pycache__/
 case-design-out/
 requirement-review-out/
 
+# Runtime 控制层状态（按 (workflow, req_id) 分区；本地运行态，不应入库）
+.qamaster/
+
 # Claude Code 本地会话状态
 .claude/settings.local.json
 

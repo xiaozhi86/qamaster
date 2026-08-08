@@ -68,7 +68,7 @@
 
 #### Phase 10 检查点格式（v0.7.1·runtime 强制 gate 用）
 
-runtime 在 Phase 10 出口门禁调 `verify_cases.py --phase-gate 10 .runtime/checkpoint_10.md --req .. --ledger ..`。**检查点文件必须复制 checkpoint_8.md 的完整 15 列用例表 + 追加覆盖分析**（不可只写"## 覆盖率 OK"摘要文档）。
+runtime 在 Phase 10 出口门禁调 `verify_cases.py --phase-gate 10 .qamaster/case-design/<req_id>/checkpoint_10.md --req .. --ledger ..`（路径由 Runtime 按 `(workflow, req_id)` 分区解析，状态隔离不同需求）。**检查点文件必须复制 checkpoint_8.md 的完整 15 列用例表 + 追加覆盖分析**（不可只写"## 覆盖率 OK"摘要文档）。
 
 **原因**：#4-H 需求追溯硬门校验的是用例表"关联需求ID"列对 REQ 条目的引用。若检查点无用例表，`parse_table_from_lines` 返回 None → `data_rows=[]` → 所有 REQ 条目"未引用" → 0% < 100% → 误报 FAIL。模型会误以为"关联需求ID 格式不对"反复改格式（无关修复），实则检查点格式错。
 

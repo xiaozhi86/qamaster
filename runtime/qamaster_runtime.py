@@ -1,52 +1,61 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-qamaster_runtime.py — qamaster Runtime Controller（流程状态机 CLI）
+qamaster_runtime.py — qamaster Runtime Controller（通用 workflow 状态机 CLI）
 
-设计依据：qamaster-Agent-Runtime-Engineering-Refactor-Design-v1.0.0.md
+设计依据：qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md
     模型负责思考，Runtime 负责控制。任何模型不可绕过。
 
-本 CLI 是 0-14(+Excel) 阶段流程的唯一权威控制点：
+本 CLI 是流程阶段机的唯一权威控制点：
   - 阶段迁移（next）：只允许 current+1（按流程深度裁剪后的序列），非法跳转被拒绝
   - 质量门（gate）：机器门跑确定性检查（文件存在性 + skill 自带校验脚本），
     人工门（confirm/license）在完整模式必须用户 confirm 才放行
   - 契约卡渲染：每个阶段向模型输出 CURRENT PHASE / ALLOWED / FORBIDDEN /
     PRODUCES / EXIT CONDITION，模型无法决定下一阶段
 
+【多需求并行】状态按 (workflow, req_id) 分区：<workdir>/.qamaster/<workflow>/<req_id>/state.json
+每个在途需求独立 state.json/checkpoint，单写者无并发 clobber。MANIFEST.md 是唯一共享可变资源，
+由 Runtime 在 gate PASS 时经 FileLock 自动维护（cmd_manifest / _manifest_side_effect），
+模型禁止 Write/Edit MANIFEST.md（铁律 4）。
+
+【通用 workflow】控制器按 --workflow 路由取 WorkflowSpec（runtime/workflows/registry.py）。
+新增 skill 只需注册自己的阶段机即可继承隔离 + 强控。
+
 用法（cwd = 用户工作目录）：
-  python qamaster_runtime.py start   [--req-id X] [--mode full|auto|light] [--user-input "..."] [--workdir DIR]
-  python qamaster_runtime.py status  [--workdir DIR]
-  python qamaster_runtime.py next    [--workdir DIR]
-  python qamaster_runtime.py gate    [--workdir DIR]
-  python qamaster_runtime.py confirm [--workdir DIR]
-  python qamaster_runtime.py reject  [--workdir DIR]
-  python qamaster_runtime.py fail    --to <阶段号|阶段名> --reason "..." [--workdir DIR]
-  python qamaster_runtime.py set     --req-id X [--depth heavy|medium|light] [--input-kind requirement|contract]
-                                     [--knowledge done] [--excel asked|na] [--workdir DIR]
-  python qamaster_runtime.py plan    [--workdir DIR]
-  python qamaster_runtime.py verify  [--workdir DIR]
-  python qamaster_runtime.py reset   [--workdir DIR]
+  bootstrap --user-input "..." [--req-id X]            派生需求标识（不创状态，幂等）
+  start --req-id X [--mode full|auto|light]            启动/恢复流程（req_id 必需）
+  status --req-id X | --all                            查看状态
+  next | gate | confirm | reject                       阶段推进/门禁
+  fail --to <阶段号|名> --reason "..."                 回退重走
+  set --depth ... --input-kind ... --mode ... --knowledge done --excel ...
+  manifest add|update|complete|list|reconcile --req-id X   MANIFEST 维护（Runtime 独占）
+  plan | verify | reset [--legacy]                     计划/自证/重置
 
 约定：
-  - 状态文件：<workdir>/case-design-out/.runtime/state.json（与产出物同目录，不入库）
-  - skill 资产（scripts/references/config）通过插件根自动定位，不要求 cwd 是插件目录
+  - 状态文件：<workdir>/.qamaster/<workflow>/<req_id>/state.json（不入库，.gitignore 含 .qamaster/）
+  - 产物层：<workdir>/<spec.output_dir>/（如 case-design-out/，向后兼容）
+  - MANIFEST：<workdir>/<spec.output_dir>/MANIFEST.md（Runtime 在 FileLock 下维护）
+  - skill 资产通过插件根自动定位，不要求 cwd 是插件目录
   - 所有 gate 输出遵循"机器判定为准，禁止模型自证"：PASS/FAIL 由脚本退出码与确定性检查给出
 """
 import argparse
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflows"))
 import state_store  # noqa: E402
-import phases as P  # noqa: E402
+import locking  # noqa: E402
+import manifest  # noqa: E402
+from registry import get_workflow, list_workflows  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKILL_ROOT = os.path.join(PLUGIN_ROOT, "skills", "case-design")
-SKILL_SCRIPTS = os.path.join(SKILL_ROOT, "scripts")
-SKILL_MD = os.path.join(SKILL_ROOT, "SKILL.md")
+DEFAULT_WORKFLOW = "case-design"
 
 APPROVE_HINT = "审核通过 / 无问题 / confirm / approve"
 
@@ -58,11 +67,54 @@ def _utf8():
         pass
 
 
-def _load_or_die(workdir, need=True):
-    path = state_store.default_state_path(workdir)
+def _register_workflows():
+    """显式注册已知 workflow（无 import 副作用；R7 规避）。幂等。"""
+    try:
+        import case_design as _cd  # noqa: E402
+        _cd.register()
+    except Exception:
+        pass
+
+
+def _spec(a_or_workflow):
+    """取 WorkflowSpec；未注册则 die。接受 args 对象或 workflow 字符串。"""
+    wf = a_or_workflow if isinstance(a_or_workflow, str) else a_or_workflow.workflow
+    spec = get_workflow(wf)
+    if spec is None:
+        _die("未知 workflow: %s（已注册: %s）" % (wf, ",".join(list_workflows()) or "(无)"))
+    return spec
+
+
+def _skill_scripts(spec):
+    return os.path.join(PLUGIN_ROOT, spec.skill_dir, "scripts")
+
+
+def _skill_md_abs(spec):
+    return os.path.join(PLUGIN_ROOT, spec.skill_md)
+
+
+def _checkpoint_path(workdir, spec, req_id, phase):
+    """分区检查点路径：<workdir>/.qamaster/<workflow>/<req_id>/checkpoint_<N>.md"""
+    return os.path.join(workdir, state_store.QAMASTER_ROOT, spec.name, req_id,
+                        "checkpoint_%d.md" % phase)
+
+
+def _manifest_path(workdir, spec):
+    return os.path.join(workdir, spec.output_dir, "MANIFEST.md")
+
+
+def _load_or_die(workdir, workflow, req_id, need=True):
+    """按 (workflow, req_id) 定位分区状态。lookup 前惰性迁移 legacy state（幂等、廉价）。"""
+    # 惰性迁移旧 case-design-out/.runtime/state.json → 分区路径（仅 case-design 有 legacy）
+    try:
+        state_store.migrate_legacy_state(workdir, workflow)
+    except Exception:
+        pass  # 迁移失败不阻断 lookup；legacy 仍在原处，可 reset --legacy 处理
+    path = state_store.default_state_path(workdir, workflow, req_id)
     st = state_store.load(path)
     if st is None and need:
-        _die("未找到运行状态（%s）。请先执行: python \"%s\" start" % (path, os.path.abspath(__file__)))
+        _die("未找到运行状态（workflow=%s, req_id=%s, path=%s）。"
+             "请先执行: bootstrap + start --req-id <需求标识>" % (workflow, req_id or "(空)", path))
     return st, path
 
 
@@ -71,20 +123,24 @@ def _die(msg, rc=2):
     sys.exit(rc)
 
 
-def _audit_degraded_artifacts(workdir, st):
-    """降级产物对账（v0.6.0 事故修复）：检测『无 Runtime 裁决却已有用例落盘』的降级执行痕迹。
+def _require_req_id(a):
+    rid = (a.req_id or "").strip()
+    if not rid:
+        _die("本命令需 --req-id（由 bootstrap 派生）；workflow=%s" % a.workflow)
+    return rid
 
-    触发条件（任一）：
-      a) state.json 不存在（首次 start），但 case-design-out/ 下已有 TestCases_*.md
-         —— 用例是在无状态机裁决的情况下落盘的（手动降级或他处生成）；
-      b) state.json 存在，current_phase < 13，但 TestCases_*.md 已存在
-         —— 用例先于写盘门(Phase 13)落盘，未过 verify_md/verify_cases 机器校验。
-    处理：打印显式警告（不阻断、不删除产出物），要求先对这些文件补跑
-    verify_md.py + verify_cases.py（Phase 13 的 gate_checks 同口径），
-    通过后方可信任其覆盖结论；降级期间交付摘要中『脚本校验摘要』若填了数值，一律视为编造。
+
+def _audit_degraded_artifacts(workdir, spec, st, req_id):
+    """降级产物对账（v0.6.0 事故修复·C2 修正）：检测『无 Runtime 裁决却已有用例落盘』的降级执行痕迹。
+
+    C2 修正：glob 限定为当前 req_id（TestCases_<req_id>*.md），不再命中其他需求的用例，
+    避免多需求下新起需求 Y 时误报需求 X 的 TestCases。
     """
+    if not req_id:
+        return []
     try:
-        tc_hits = sorted(glob.glob(os.path.join(workdir, "case-design-out", "TestCases_*.md")))
+        tc_hits = sorted(glob.glob(os.path.join(workdir, spec.output_dir,
+                                                "TestCases_%s*.md" % req_id)))
     except Exception:
         return []
     tc_hits = [t for t in tc_hits if os.path.isfile(t)]
@@ -98,12 +154,13 @@ def _audit_degraded_artifacts(workdir, st):
     print("!" * 64)
     print("【降级产物对账警告】检测到未经 Runtime 裁决的用例产出物（v0.6.0 事故修复）：")
     for n in names:
-        print("  ! case-design-out/%s" % n)
+        print("  ! %s/%s" % (spec.output_dir, n))
     print("  原因: %s" % ("state.json 缺失——用例为无状态机裁决的降级执行产物" if st is None
                        else "当前阶段=Phase %s(<13)——用例先于写盘门落盘，未过机器校验" % phase))
     print("  处置（强制·先补验后信任）: 对每个文件补跑写盘门同口径校验——")
-    print("    python \"%s\" \"case-design-out/<文件>\"  （结构）" % os.path.join(SKILL_SCRIPTS, "verify_md.py"))
-    print("    python \"%s\" \"case-design-out/<文件>\" \"case-design-out/REQ_<需求标识>.md\"  （内容+覆盖硬门）" % os.path.join(SKILL_SCRIPTS, "verify_cases.py"))
+    print("    python \"%s\" \"%s/<文件>\"  （结构）" % (os.path.join(_skill_scripts(spec), "verify_md.py"), spec.output_dir))
+    print("    python \"%s\" \"%s/<文件>\" \"%s/REQ_%s.md\"  （内容+覆盖硬门）"
+          % (os.path.join(_skill_scripts(spec), "verify_cases.py"), spec.output_dir, spec.output_dir, req_id))
     print("  verify_cases.py 现含覆盖硬门（#4-H 需求引用率/#6-H 接口三类/RK P0-P1 风险），")
     print("  exit=1 即覆盖不达标——须补齐用例后重写，禁止以『核心用例已交付』收尾。")
     print("  降级期间该产出物的交付摘要若『脚本校验摘要』填了数值而非『未执行』，一律视为编造（SKILL.md 3.1 红线）。")
@@ -116,9 +173,12 @@ def _rt_cmd():
     return 'python "%s"' % os.path.abspath(__file__)
 
 
-def _fmt_cmd(cmd, st):
+def _fmt_cmd(cmd, st, spec):
     req = st.get("req_id") or "<需求标识>"
-    return cmd.replace("{skill_scripts}", SKILL_SCRIPTS).replace("{req_id}", req)
+    return (cmd.replace("{skill_scripts}", _skill_scripts(spec))
+              .replace("{req_id}", req)
+              .replace("{workflow}", spec.name)
+              .replace("{output_dir}", spec.output_dir))
 
 
 def _backfill_artifacts(st, phase, checkpoint_path, stdout_lines=None):
@@ -147,7 +207,7 @@ def _backfill_artifacts(st, phase, checkpoint_path, stdout_lines=None):
     st["artifacts"][str(phase)] = entry
 
 
-def _prior_artifacts_block(st, phase):
+def _prior_artifacts_block(st, phase, spec):
     """v0.7.0: 渲染契约卡的 PRIOR_ARTIFACTS 段——按当前阶段 consumes 注入上游制品 ID 范围。
 
     不靠模型记忆：runtime 把已沉淀阶段的实际 ID 范围（R1-R24 / RK1-RK17 等）+ 台账/REQ
@@ -158,17 +218,19 @@ def _prior_artifacts_block(st, phase):
         return ""
     workdir = st.get("workdir", os.getcwd())
     req_id = st.get("req_id", "")
-    out = os.path.join(workdir, "case-design-out")
+    if not req_id:
+        return ""
+    out = os.path.join(workdir, spec.output_dir)
     artifacts = st.get("artifacts", {})
     lines = ["PRIOR_ARTIFACTS（本阶段必须消费的上游制品·由 Runtime 注入，勿凭记忆）:"]
     for c in consumes:
         if c == "req":
-            p = os.path.join(out, ("REQ_%s.md" % req_id) if req_id else "REQ_<需求标识>.md")
-            lines.append("  需求文档: case-design-out/%s" % os.path.basename(p))
+            p = os.path.join(out, ("REQ_%s.md" % req_id))
+            lines.append("  需求文档: %s/%s" % (spec.output_dir, os.path.basename(p)))
         elif c == "ledger":
-            p = os.path.join(out, ("Clarification_Ledger_%s.md" % req_id) if req_id else "")
-            if p and os.path.exists(p):
-                lines.append("  澄清台账: case-design-out/%s（已解决/待确认/假设 见台账）" % os.path.basename(p))
+            p = os.path.join(out, "Clarification_Ledger_%s.md" % req_id)
+            if os.path.exists(p):
+                lines.append("  澄清台账: %s/%s（已解决/待确认/假设 见台账）" % (spec.output_dir, os.path.basename(p)))
         elif c.isdigit():
             art = artifacts.get(c, {})
             ids = art.get("ids", {})
@@ -176,15 +238,14 @@ def _prior_artifacts_block(st, phase):
                 id_desc = " | ".join("%s=%s" % (k, v) for k, v in ids.items())
                 lines.append("  Phase %s 制品: %s（已沉淀·ID 范围）" % (c, id_desc))
             else:
-                cp = os.path.join(out, ".runtime", "checkpoint_%s.md" % c)
                 # v0.8.1 Gap4: 区分"无 phase_gate 的内存阶段"与"真未完成"，消除"未沉淀"误导
-                # Phase 2/4/6/9/11/12 无 phase_gate，artifacts 永不回填，旧文案"未沉淀·前置阶段未完成？"
-                # 误导模型以为前置阶段没做。实际已 PASS，只是无 phase_gate 触发回填。
-                src_phase = P.get_phase(int(c)) if c.isdigit() else None
+                src_phase = spec.get_phase(int(c))
                 has_gate = bool(src_phase and src_phase.get("gate_checks"))
                 if has_gate:
+                    cp = _checkpoint_path(workdir, spec, req_id, int(c))
                     mark = "（已沉淀）" if os.path.exists(cp) else "（未沉淀·前置阶段未完成？）"
-                    lines.append("  Phase %s 制品: case-design-out/.runtime/checkpoint_%s.md %s" % (c, c, mark))
+                    lines.append("  Phase %s 制品: .qamaster/%s/%s/checkpoint_%s.md %s"
+                                 % (c, spec.name, req_id, c, mark))
                 else:
                     # 无 phase_gate 的纯内存阶段：不写检查点，靠下游 Phase 8/10/13 gate 校验追溯性 section
                     lines.append("  Phase %s 制品: （内存产物·无 phase_gate·由下游 gate 校验追溯性 section）" % c)
@@ -193,9 +254,10 @@ def _prior_artifacts_block(st, phase):
     return "\n".join(lines)
 
 
-def _run_check(chk, st):
+def _run_check(chk, st, spec):
     """执行单条确定性检查，返回 (ok, detail)。"""
     workdir = st["workdir"]
+    req_id = st.get("req_id", "")
     kind = chk.get("kind")
     if kind == "exists":
         p = os.path.join(workdir, chk["path"])
@@ -211,23 +273,21 @@ def _run_check(chk, st):
         if phase is None:
             return (False, "%s: phase_gate 缺 phase 参数" % chk["label"])
         # v0.7.1: 空 req_id 防护——不构造字面量 REQ_<需求标识>.md，显式报错阻断
-        # 闭合执行日志"Phase 3 首次 gate traceback + 静默省略 --req 致 #4-P 误报"
-        req_id = st.get("req_id", "")
+        # C4: 新流程下 req_id 恒非空（来自 bootstrap），此分支保留为防御性兜底
         if not req_id:
-            return (False, "%s: req_id 未设置（state.json req_id 为空）。"
-                    "须先执行 `set --req-id <需求标识>` 再 gate。Phase 0 步骤零应已落盘 REQ_<需求标识>.md。" % chk["label"])
-        cp = os.path.join(workdir, "case-design-out", ".runtime", "checkpoint_%d.md" % phase)
-        req_path = os.path.join(workdir, "case-design-out", "REQ_%s.md" % req_id)
+            return (False, "%s: req_id 未设置（state.json req_id 为空——不应发生，bootstrap 应已派生）。"
+                    "请先执行 bootstrap + start --req-id。" % chk["label"])
+        cp = _checkpoint_path(workdir, spec, req_id, phase)
+        req_path = os.path.join(workdir, spec.output_dir, "REQ_%s.md" % req_id)
         if not os.path.exists(req_path):
             return (False, "%s: REQ 文件不存在 %s。按 phase0_manifest.md 步骤零落盘 REQ_%s.md 后重试。"
                     % (chk["label"], req_path, req_id))
-        ledger_path = os.path.join(workdir, "case-design-out", "Clarification_Ledger_%s.md" % req_id)
-        # v0.9.0·根因2/6 修复：DESIGN 落盘时必须传 --design，否则 #8-H 设计文档测试要点追溯
-        # + safety_coverage 触发判定在 phase_gate 路径全程拿不到设计文档 → 两门沦为死代码。
-        design_path = os.path.join(workdir, "case-design-out", "DESIGN_%s.md" % req_id)
+        ledger_path = os.path.join(workdir, spec.output_dir, "Clarification_Ledger_%s.md" % req_id)
+        # v0.9.0·根因2/6 修复：DESIGN 落盘时必须传 --design
+        design_path = os.path.join(workdir, spec.output_dir, "DESIGN_%s.md" % req_id)
         # REQ 为必需输入（phase_gate 校验 #4/#5 依赖它）；ledger/design 可选（不存在不阻断）
         parts = ['python "%s" --phase-gate %d "%s" --req "%s"'
-                 % (os.path.join(SKILL_SCRIPTS, "verify_cases.py"), phase, cp, req_path)]
+                 % (os.path.join(_skill_scripts(spec), "verify_cases.py"), phase, cp, req_path)]
         if os.path.exists(ledger_path):
             parts.append('--ledger "%s"' % ledger_path)
         if os.path.exists(design_path):
@@ -243,9 +303,6 @@ def _run_check(chk, st):
         all_lines = (proc.stdout or "").strip().splitlines()
         detail = "%s: exit=%d" % (chk["label"], proc.returncode)
         if proc.returncode != 0:
-            # v0.9.0·根因6 修复：截断上限 50→200、尾部 30→60、summary 400→1200。
-            # 旧 50 条上限在 100+ 违规时"修一批又浮一批"永不收敛；超限靠 ##VERIFY_SUMMARY##
-            # 的 hard_violations 计数让模型感知全量规模，完整明细写入 .runtime/ 供 agent 自取。
             fail_lines = [ln for ln in all_lines
                           if ln.strip().startswith("[FAIL]") or ln.lstrip().startswith("- ")]
             summary = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##")]
@@ -255,13 +312,13 @@ def _run_check(chk, st):
                 detail += "\n----- 输出(尾部) -----\n" + "\n".join(all_lines[-60:])
             if summary:
                 detail += "\n" + summary[-1][:1200]
-        # v0.7.0: gate PASS 时回填 artifacts（从 ##PHASE_ARTIFACTS## 行解析 ID 范围）+ 重置 gate_rounds
+        # v0.7.0: gate PASS 时回填 artifacts + 重置 gate_rounds
         if proc.returncode == 0:
             _backfill_artifacts(st, phase, cp, stdout_lines=all_lines)
             st["gate_rounds"][str(phase)] = 0
         return (proc.returncode == 0, detail)
     if kind == "script":
-        cmd = _fmt_cmd(chk["cmd"], st)
+        cmd = _fmt_cmd(chk["cmd"], st, spec)
         try:
             proc = subprocess.run(cmd, shell=True, cwd=workdir, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace", timeout=600)
@@ -273,15 +330,11 @@ def _run_check(chk, st):
         if proc.returncode != 0:
             if tail:
                 detail += "\n----- 脚本输出(尾部) -----\n" + "\n".join(tail)
-            # [FAIL] 行是修复指令本体；软提示明细较长时可能被截断出 tail，须全量补捞，
-            # 否则模型拿不到可执行的修复目标（v0.6.0 事故修复·覆盖硬门）。
-            # v0.9.0·根因6：补捞上限 10→60，避免大批覆盖硬门 FAIL 时修复目标被丢出模型视野。
             fail_lines = [ln for ln in all_lines if ln.strip().startswith("[FAIL]")]
             missing_fails = [ln for ln in fail_lines if not any(ln in t for t in tail)]
             if missing_fails:
                 detail += "\n----- 硬门 FAIL 明细(补捞) -----\n" + "\n".join(missing_fails[:60])
         else:
-            # 成功时保留摘要行（##VERIFY_SUMMARY##/结论行），供 gate 输出取证与交付摘要摘抄
             keep = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##") or "结论" in ln or "硬门" in ln]
             if keep:
                 detail += " | " + " ; ".join(keep)[:300]
@@ -289,10 +342,11 @@ def _run_check(chk, st):
     return (False, "未知检查类型: %s" % kind)
 
 
-def _card(st, phase, extra=""):
+def _card(st, phase, spec, extra=""):
     """渲染阶段契约卡（发送给模型的唯一控制协议）。"""
-    idx = P.effective_phases(st.get("depth") or "heavy").index(phase["id"]) + 1
-    total = len(P.effective_phases(st.get("depth") or "heavy"))
+    eff = spec.effective_phases(st.get("depth") or "heavy")
+    idx = eff.index(phase["id"]) + 1 if phase["id"] in eff else 0
+    total = len(eff)
     mode_cn = {"full": "完整", "auto": "连跑", "light": "轻量"}.get(st.get("run_mode"), st.get("run_mode"))
     depth_cn = {"heavy": "重型", "medium": "中型", "light": "light"}.get(st.get("depth") or "heavy")
     lines = []
@@ -300,12 +354,16 @@ def _card(st, phase, extra=""):
     lines.append("【RUNTIME CONTRACT — 由 qamaster Runtime 颁发，模型必须遵守，不得自改流程】")
     lines.append("=" * 64)
     lines.append("CURRENT PHASE: Phase %d — %s （流程进度 %d/%d）" % (phase["id"], phase["name"], idx, total))
+    # C4: req_id 恒非空（来自 bootstrap）；空则报错而非 fallback 文案
+    req_id = st.get("req_id") or ""
+    if not req_id:
+        _die("state.req_id 为空——不应发生（bootstrap 应已派生）。请重新 bootstrap + start --req-id。")
     lines.append("需求标识: %s | 运行模式: %s | 流程深度: %s | 输入形态: %s" % (
-        st.get("req_id") or "(未提供，Phase0 判定)", mode_cn, depth_cn,
+        req_id, mode_cn, depth_cn,
         "契约驱动" if st.get("input_kind") == "contract" else "纯需求"))
-    lines.append("本阶段规范: skills/case-design/SKILL.md（全局核心）+ 下方细则参考（阶段唯一细则来源，进入本阶段前先读）")
+    lines.append("本阶段规范: %s（全局核心）+ 下方细则参考（阶段唯一细则来源，进入本阶段前先读）" % spec.skill_md)
     for r in phase.get("refs", []):
-        lines.append("细则参考: %s" % os.path.join("skills", "case-design", r))
+        lines.append("细则参考: %s" % os.path.join(spec.skill_dir, r))
     lines.append("")
     lines.append("OBJECTIVE: %s" % phase["objective"])
     lines.append("")
@@ -327,11 +385,11 @@ def _card(st, phase, extra=""):
     lines.append("")
     if gate == "auto":
         lines.append("GATE 类型: 自动门。完成本阶段产物后立即执行：")
-        lines.append("  %s gate" % _rt_cmd())
+        lines.append("  %s gate --workflow %s --req-id %s" % (_rt_cmd(), spec.name, req_id))
         lines.append("  - PASS → 再执行 `next` 进入下一阶段；FAIL → 按修复指令原地修复后重跑 gate（禁止自行跳阶段）")
     elif gate == "confirm":
         lines.append("GATE 类型: 人工确认门。向用户输出本阶段确认请求后【停止等待】；")
-        lines.append("  收到用户答复后执行: %s gate（查看放行判定）" % _rt_cmd())
+        lines.append("  收到用户答复后执行: %s gate --workflow %s --req-id %s（查看放行判定）" % (_rt_cmd(), spec.name, req_id))
         if phase["id"] == 14:
             lines.append("  完整模式必须用户明确回复「%s」后执行 `confirm` 放行；用户反馈问题时执行 `fail --to <受影响最深阶段> --reason \"...\"` 回退重走" % APPROVE_HINT)
         else:
@@ -343,10 +401,9 @@ def _card(st, phase, extra=""):
     lines.append("  1. 严格按 Runtime 颁发的当前阶段执行，禁止跳阶段/合并阶段/提前输出后续阶段产物")
     lines.append("  2. 每次接到用户消息（澄清答复/审核反馈/Excel许可）后，先执行 `status` 或 `gate` 恢复权威状态再继续")
     lines.append("  3. 本阶段产物未过 gate，禁止进入下一阶段；模型无权自行宣布阶段完成")
-    lines.append("  4. 产出物全部写入 <工作目录>/case-design-out/ 下；写盘约束见 output_write.md（单文件一次 Write，禁止 Edit 增量）")
-    # v0.8.1: Phase 8/10 检查点含 15 列用例表时，check_fields 逐行校验枚举契约，
-    # 违约即 exit=1。旧事故里模型按"宽松心智"写"功能测试/正常场景/1段名称" → 105+ 硬违规，
-    # 又因 gate 明细被截断看不到原因而反复盲改。此处把硬契约塞进契约卡，从源头预防。
+    lines.append("  4. 产出物全部写入 <工作目录>/%s/ 下；写盘约束见 output_write.md（单文件一次 Write，禁止 Edit 增量）" % spec.output_dir)
+    lines.append("  5. MANIFEST.md 由 Runtime 在 gate PASS 时自动维护（add/update/complete），模型禁止 Write/Edit MANIFEST.md")
+    # v0.8.1: Phase 8/10 检查点含 15 列用例表时，check_fields 逐行校验枚举契约
     if phase["id"] in (8, 10) and phase.get("gate_checks"):
         lines.append("")
         lines.append("字段硬约束（check_fields 逐行校验，违约即 exit=1；枚举以 config/validation_rules.json 为准）:")
@@ -356,8 +413,13 @@ def _card(st, phase, extra=""):
         lines.append("  固定列: 编辑模式=STEP 标签=AI 责任人=AI 用例状态=Completed")
         lines.append("  用例等级∈{P0,P1,P2,P3}；用例ID=<需求标识>_<功能缩写>_<序号>（全局唯一、连续不跳号）")
         lines.append("  追溯性 section 须内联 R/RK/TP 实体内容（非\"见 Phase N\"指针），否则 D1悬空引用/D2跳号/coverage 静默失效")
+    # workflow 专属卡片片段（Phase 8/10 等）经 spec.extra_card_text 钩子注入，通用路径不硬编码
+    if spec.extra_card_text:
+        ect = spec.extra_card_text(phase["id"], st)
+        if ect:
+            lines.append(ect)
     # v0.7.0: 注入 PRIOR_ARTIFACTS（按当前阶段 consumes）
-    prior = _prior_artifacts_block(st, phase)
+    prior = _prior_artifacts_block(st, phase, spec)
     if prior:
         lines.append("")
         lines.append(prior)
@@ -367,8 +429,10 @@ def _card(st, phase, extra=""):
     return "\n".join(lines)
 
 
-def _resume_hint(st):
-    phase = P.get_phase(st["current_phase"])
+def _resume_hint(st, spec):
+    phase = spec.get_phase(st["current_phase"])
+    if phase is None:
+        return "状态: 当前阶段 %d 未定义" % st["current_phase"]
     if st["status"] == "WAIT_USER_CONFIRM":
         return ("状态: WAIT_USER_CONFIRM（等待用户确认/答复）\n"
                 "处理: 用户已答复 → 先将答复落盘（台账/假设），再执行 `gate` 判定放行；\n"
@@ -380,51 +444,230 @@ def _resume_hint(st):
         return ("状态: REVIEW_PENDING（连跑/轻量已标注待审核放行，当前阶段门禁已过）\n"
                 "处理: 执行 `next` 推进；知识沉淀后置动作在 Excel 许可环节前完成")
     if st["status"] == "DONE":
-        return "状态: DONE（流程已完成）。如需修改，用 `start` 开启新一轮（Runtime 会定位已有产出物）。"
+        return "状态: DONE（流程已完成）。如需修改，用 `start --fresh` 重启（Runtime 会定位已有产出物）。"
     if st["status"] == "GATE_PASSED":
         return "状态: GATE_PASSED（当前阶段门禁已通过）\n处理: 执行 `next` 进入下一阶段"
     return "状态: RUNNING（阶段产物尚未过出口门禁）"
 
 
+# ---------------------------------------------------------------- MANIFEST 副作用
+
+def _manifest_side_effect(st, phase, spec, workdir):
+    """gate PASS 时 Runtime 在 FileLock 下更新 MANIFEST（best-effort，不阻断 gate）。
+
+    Phase 0 PASS → manifest add（从 REQ_<id>.md 首个 # 标题抽需求名称）
+    Phase 1 PASS → manifest update（台账文件列）
+    Phase 13 PASS → manifest update（TestCases_<id>*.md 实际落盘文件列）
+    Phase 14 confirm → manifest complete（置已完成）
+
+    失败不阻断 gate（MANIFEST 是 best-effort 索引；失步可 `manifest reconcile` 重建——C6 兜底）。
+    """
+    pid = phase["id"]
+    req_id = (st.get("req_id") or "").strip()
+    if not req_id or pid not in (0, 1, 13, 14):
+        return
+    mp = _manifest_path(workdir, spec)
+    try:
+        with locking.FileLock(mp, timeout=10):
+            if pid == 0:
+                manifest.add(mp, req_id, workdir=workdir, output_dir=spec.output_dir)
+            elif pid == 1:
+                ledger = "Clarification_Ledger_%s.md" % req_id
+                manifest.update(mp, req_id, ledger_file=ledger)
+            elif pid == 13:
+                tcs = sorted(glob.glob(os.path.join(workdir, spec.output_dir,
+                                                    "TestCases_%s*.md" % req_id)))
+                if tcs:
+                    files = ",".join(os.path.basename(t) for t in tcs)
+                    manifest.update(mp, req_id, testcase_files=files)
+            elif pid == 14:
+                manifest.complete(mp, req_id)
+    except Exception as e:
+        print("  [WARN] MANIFEST 副作用失败（不阻断 gate；可执行 `manifest reconcile --req-id %s` 修复）: %s"
+              % (req_id, e))
+
+
+# ---------------------------------------------------------------- bootstrap
+
+_ID_KEEP = set("-")
+
+
+def _clean_id(s):
+    """清洗需求标识：保留中文/英文/数字/连字符，其余替换为 -。"""
+    import re
+    s = (s or "").strip()
+    s = re.sub(r"<<<[^>]*>>>", "", s)          # 去 <<<需求文档开始>>> 等标记
+    s = re.sub(r"^[#>\s]+", "", s)              # 去 markdown 标题/引用前缀
+    out = []
+    for ch in s:
+        if "一" <= ch <= "龥" or ch.isalnum() or ch == "-":
+            out.append(ch)
+        else:
+            out.append("-")
+    s = "".join(out)
+    s = re.sub(r"-+", "-", s).strip("-")
+    if len(s) > 30:
+        # 截到 30 字符内（中文按字符计），再清尾部连字符
+        s = s[:30].rstrip("-")
+    return s
+
+
+def _derive_from_file(path):
+    """从 .md/.txt 文件首个 # 标题派生 id；二进制文件用文件名 stem。"""
+    ext = os.path.splitext(path)[1].lower()
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if ext in (".md", ".txt", ""):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for ln in f:
+                    s = ln.strip()
+                    if s.startswith("# "):
+                        cand = _clean_id(s[2:])
+                        if cand:
+                            return cand
+                    elif s.startswith("## "):
+                        cand = _clean_id(s[3:])
+                        if cand:
+                            return cand
+        except OSError:
+            pass
+        # 文件无标题 → 用文件名 stem
+    return _clean_id(stem) or _clean_id(os.path.basename(path))
+
+
+def _derive_from_text(text):
+    """从内联文本首个 # 标题派生 id；无标题取首个非空行。"""
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s.startswith("# "):
+            cand = _clean_id(s[2:])
+            if cand:
+                return cand
+        if s.startswith("## "):
+            cand = _clean_id(s[3:])
+            if cand:
+                return cand
+    # 取首个非空、非标记行
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if s and not s.startswith("<<<") and not s.startswith("#"):
+            cand = _clean_id(s)
+            if cand:
+                return cand
+    return ""
+
+
+def _derive_req_id(a, spec, workdir):
+    """派生需求标识。优先级：--req-id > 文件路径 > 内联文本。"""
+    if a.req_id:
+        return a.req_id.strip()
+    ui = (a.user_input or "").strip()
+    if not ui:
+        return ""
+    # 去除外层引号
+    if len(ui) >= 2 and ui[0] in "\"'" and ui[-1] == ui[0]:
+        ui = ui[1:-1].strip()
+    if os.path.isfile(ui):
+        return _derive_from_file(ui)
+    return _derive_from_text(ui)
+
+
+def cmd_bootstrap(a):
+    """派生 req_id 但不创建状态（幂等）。已有进行中则输出 RESUME。"""
+    spec = _spec(a)
+    workdir = a.workdir
+    # 惰性迁移 legacy
+    state_store.migrate_legacy_state(workdir, spec.name)
+    req_id = _derive_req_id(a, spec, workdir)
+    if not req_id:
+        _die("bootstrap 无法从输入派生需求标识。请显式传 --req-id <需求标识>。")
+    # 碰撞检查：in-flight 状态 → RESUME
+    active = state_store.list_active_reqs(workdir, spec.name)
+    if req_id in active:
+        st_path = state_store.default_state_path(workdir, spec.name, req_id)
+        st = state_store.load(st_path)
+        ph = spec.get_phase(st["current_phase"]) if st else None
+        print("BOOTSTRAP RESUME req_id=%s phase=%s status=%s"
+              % (req_id, st.get("current_phase") if st else "?", st.get("status") if st else "?"))
+        print("  （检测到进行中状态，start 将走 resume 分支，不重建状态）")
+        return
+    # 碰撞检查：manifest 已有（完成/归档）→ 追加日期
+    mp = _manifest_path(workdir, spec)
+    existing_rows = manifest.load_rows(mp)
+    if any(r["req_id"] == req_id for r in existing_rows):
+        cand = "%s-%s" % (req_id, time.strftime("%Y%m%d"))
+        print("BOOTSTRAP NOTE req_id=%s 与已归档需求同名，改用 %s" % (req_id, cand), file=sys.stderr)
+        req_id = cand
+    print("BOOTSTRAP OK req_id=%s" % req_id)
+
+
 # ---------------------------------------------------------------- commands
 
 def cmd_start(a):
+    spec = _spec(a)
     workdir = a.workdir
-    path = state_store.default_state_path(workdir)
+    req_id = (a.req_id or "").strip()
+    if not req_id:
+        _die("start 需 --req-id <需求标识>（由 bootstrap 派生）。流程：bootstrap → start --req-id。")
+    # 惰性迁移 legacy（_load_or_die 也迁，但 start 需先迁移再判断 resume）
+    state_store.migrate_legacy_state(workdir, spec.name)
+    path = state_store.default_state_path(workdir, spec.name, req_id)
     try:
         existing = state_store.load(path)
     except state_store.StateCorruptError as e:
         _die(str(e) + "。请先人工检查/备份后删除该文件再 start")
     if existing and not a.fresh:
-        _audit_degraded_artifacts(workdir, existing)
-        phase = P.get_phase(existing["current_phase"])
+        _audit_degraded_artifacts(workdir, spec, existing, req_id)
+        phase = spec.get_phase(existing["current_phase"])
         print("检测到进行中的流程（断点续跑，禁止重新生成覆盖已落盘产物）:")
-        print("  req_id=%s phase=%d(%s) status=%s" % (
-            existing.get("req_id"), phase["id"], phase["name"], existing["status"]))
-        print(_resume_hint(existing))
+        print("  workflow=%s req_id=%s phase=%d(%s) status=%s" % (
+            spec.name, req_id, phase["id"], phase["name"], existing["status"]))
+        print(_resume_hint(existing, spec))
         print()
-        print(_card(existing, phase))
+        print(_card(existing, phase, spec))
         return
-    _audit_degraded_artifacts(workdir, None)
-    st = state_store.new_state("case-design", a.req_id or "", workdir)
+    _audit_degraded_artifacts(workdir, spec, None, req_id)
+    st = state_store.new_state(spec.name, req_id, workdir)
     if a.mode:
         st["run_mode"] = a.mode
-    state_store.log_event(st, "start", detail="mode=%s" % st["run_mode"])
+    state_store.log_event(st, "start", detail="mode=%s workflow=%s req_id=%s" % (st["run_mode"], spec.name, req_id))
     state_store.save(path, st)
-    phase = P.get_phase(0)
-    print("Runtime 已启动（workflow=case-design, mode=%s）。" % st["run_mode"])
-    print("全局业务规范（避坑红线/输入协议/运行模式细则，一次性阅读）: %s" % SKILL_MD)
+    phase = spec.get_phase(0)
+    print("Runtime 已启动（workflow=%s, req_id=%s, mode=%s）。" % (spec.name, req_id, st["run_mode"]))
+    print("全局业务规范（避坑红线/输入协议/运行模式细则，一次性阅读）: %s" % _skill_md_abs(spec))
     print("其后每个阶段只读 Runtime 颁发的契约卡与对应 references 细则，按契约执行。")
     print()
-    print(_card(st, phase))
+    print(_card(st, phase, spec))
 
 
 def cmd_status(a):
-    st, _ = _load_or_die(a.workdir)
-    phase = P.get_phase(st["current_phase"])
+    spec = _spec(a)
+    if a.all:
+        reqs = state_store.list_active_reqs(a.workdir, spec.name)
+        if not reqs:
+            print("无进行中的需求（workflow=%s, workdir=%s）" % (spec.name, a.workdir))
+            return
+        out = []
+        for rid in reqs:
+            p = state_store.default_state_path(a.workdir, spec.name, rid)
+            st = state_store.load(p)
+            if not st:
+                continue
+            ph = spec.get_phase(st["current_phase"])
+            out.append({"req_id": rid, "current_phase": st["current_phase"],
+                        "phase_name": ph["name"] if ph else "?", "status": st["status"],
+                        "run_mode": st.get("run_mode"), "depth": st.get("depth"),
+                        "updated_at": st["updated_at"]})
+        print(json.dumps({"workflow": spec.name, "reqs": out}, ensure_ascii=False, indent=2))
+        return
+    req_id = _require_req_id(a)
+    st, _ = _load_or_die(a.workdir, a.workflow, req_id)
+    phase = spec.get_phase(st["current_phase"])
     print(json.dumps({
         "workflow": st["workflow"], "req_id": st.get("req_id"),
-        "current_phase": st["current_phase"], "phase_name": phase["name"],
+        "current_phase": st["current_phase"], "phase_name": phase["name"] if phase else "?",
         "completed": st["completed"], "status": st["status"],
         "run_mode": st["run_mode"], "depth": st.get("depth"),
         "input_kind": st.get("input_kind"), "skipped_phases": st.get("skipped_phases"),
@@ -432,14 +675,16 @@ def cmd_status(a):
         "updated_at": st["updated_at"],
     }, ensure_ascii=False, indent=2))
     print()
-    print(_resume_hint(st))
+    print(_resume_hint(st, spec))
     if a.card:
         print()
-        print(_card(st, phase))
+        print(_card(st, phase, spec))
 
 
 def cmd_next(a):
-    st, path = _load_or_die(a.workdir)
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, path = _load_or_die(a.workdir, a.workflow, req_id)
     if st["status"] in ("WAIT_USER_CONFIRM", "WAIT_LICENSE"):
         _die("当前处于 %s，必须先过人工门禁（gate/confirm/reject）才能推进" % st["status"])
     if st["status"] == "RUNNING":
@@ -447,14 +692,14 @@ def cmd_next(a):
     if st["status"] == "DONE":
         _die("流程已完成（DONE），无下一阶段；如需修改用 `fail --to <阶段>` 回退或 `start --fresh` 重启")
     # status ∈ {GATE_PASSED, REVIEW_PENDING} → 允许推进
-    nxt = P.next_phase_id(st["current_phase"], st.get("depth") or "heavy")
+    nxt = spec.next_phase_id(st["current_phase"], st.get("depth") or "heavy")
     if nxt is None:
         _die("已是最后阶段")
-    # Phase 14 → 15 前：知识沉淀后置动作必须已登记（强制，防跳过知识总结直接进 Excel）
+    # Phase 14 → 15 前：知识沉淀后置动作必须已登记
     if st["current_phase"] == 14 and nxt == 15 and st.get("knowledge") != "done":
-        _die("知识沉淀未完成（knowledge!=done）：审核通过后须先生成 case-design-out/Knowledge_<需求标识>.md "
+        _die("知识沉淀未完成（knowledge!=done）：审核通过后须先生成 %s/Knowledge_%s.md "
              "并执行 `set --knowledge done`（会跑 verify_knowledge.py 结构校验），再 `next` 进 Excel 许可门。"
-             "知识总结为强制后置动作，不可跳过（references/knowledge.md 31.1）")
+             "知识总结为强制后置动作，不可跳过（references/knowledge.md 31.1）" % (spec.output_dir, req_id))
     prev = st["current_phase"]
     if prev not in st["completed"]:
         st["completed"].append(prev)
@@ -464,39 +709,41 @@ def cmd_next(a):
     st["confirm_rounds"] = 0
     state_store.log_event(st, "advance", phase=nxt, detail="from=%d" % prev)
     state_store.save(path, st)
-    print(_card(st, P.get_phase(nxt)))
+    print(_card(st, spec.get_phase(nxt), spec))
 
 
 def cmd_gate(a):
-    st, path = _load_or_die(a.workdir)
-    phase = P.get_phase(st["current_phase"])
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, path = _load_or_die(a.workdir, a.workflow, req_id)
+    phase = spec.get_phase(st["current_phase"])
     gkind = phase["gate"]
 
     # --- 人工门：由运行模式与用户意图决定放行/等待
     if gkind in ("confirm", "license"):
-        decision = _human_gate_decision(st, phase)
+        decision = _human_gate_decision(st, phase, spec)
         print("GATE: Phase %d (%s) — %s" % (phase["id"], phase["name"], decision["label"]))
         for ln in decision["lines"]:
             print("  " + ln)
         if decision["pass"]:
-            if gkind == "license" and phase["id"] == P.LAST_PHASE:
-                # 许可门自动放行（连跑/轻量且用户已声明要 Excel）：直接执行生成门禁，与 confirm 路径等价
+            if gkind == "license" and phase["id"] == spec.last_phase:
+                # 许可门自动放行（连跑/轻量且用户已声明要 Excel）：直接执行生成门禁
                 print("已声明要 Excel，自动放行 → 执行生成门禁...")
                 ok_all = True
                 for chk in phase.get("gate_checks", []):
-                    ok, detail = _run_check(chk, st)
+                    ok, detail = _run_check(chk, st, spec)
                     print(("  [PASS] " if ok else "  [FAIL] ") + detail)
                     ok_all = ok_all and ok
                 if ok_all:
-                    if P.LAST_PHASE not in st["completed"]:
-                        st["completed"].append(P.LAST_PHASE)
+                    if spec.last_phase not in st["completed"]:
+                        st["completed"].append(spec.last_phase)
                     st["status"] = "DONE"
                     st["excel"] = "generated"
-                    state_store.log_event(st, "gate_pass", phase=P.LAST_PHASE, detail="via=declared_auto")
+                    state_store.log_event(st, "gate_pass", phase=spec.last_phase, detail="via=declared_auto")
                     state_store.save(path, st)
                     print("\nGATE RESULT: PASS — Excel 已生成并通过校验，流程 DONE")
                 else:
-                    st["failed_gates"][str(P.LAST_PHASE)] = {"at": state_store._now()}
+                    st["failed_gates"][str(spec.last_phase)] = {"at": state_store._now()}
                     state_store.log_event(st, "excel_fail")
                     state_store.save(path, st)
                     print("\nGATE RESULT: FAIL — Excel 生成/校验未过，按 references/excel.md 生成失败处理")
@@ -504,6 +751,8 @@ def cmd_gate(a):
             st["status"] = "GATE_PASSED"
             state_store.log_event(st, "human_gate_release", phase=phase["id"], detail=decision["via"] or "")
             state_store.save(path, st)
+            # gate-PASS 副作用（Phase 14 auto-release 时 manifest complete）
+            _manifest_side_effect(st, phase, spec, a.workdir)
             print("\nGATE RESULT: PASS → 执行 `next` 查看下一阶段契约卡")
         else:
             st["status"] = "WAIT_LICENSE" if gkind == "license" else "WAIT_USER_CONFIRM"
@@ -516,9 +765,11 @@ def cmd_gate(a):
     results = []
     ok_all = True
     for chk in phase.get("gate_checks", []):
-        ok, detail = _run_check(chk, st)
+        ok, detail = _run_check(chk, st, spec)
         results.append((ok, detail))
-        ok_all = ok_all and ok
+        # optional 检查（如设计文档存在性）FAIL 不阻断——仅提示，不进入 ok_all
+        if not chk.get("optional"):
+            ok_all = ok_all and ok
     print("GATE: Phase %d (%s) — 自动门" % (phase["id"], phase["name"]))
     for ok, detail in results:
         print(("  [PASS] " if ok else "  [FAIL] ") + detail)
@@ -526,14 +777,14 @@ def cmd_gate(a):
         print("  （本阶段无机器检查项，产物为内存产物/已由模型按契约完成；Runtime 记录通过）")
     if ok_all:
         st["status"] = "GATE_PASSED"
-        # v0.7.0: 有界返修——gate PASS 时重置 gate_rounds；FAIL 时计数（下方 else 分支）
         if str(phase["id"]) in st.get("gate_rounds", {}):
             st["gate_rounds"][str(phase["id"])] = 0
         state_store.log_event(st, "gate_pass", phase=phase["id"], detail="via=auto")
         state_store.save(path, st)
+        # gate-PASS 副作用（Phase 0 add / Phase 13 update testcase files）
+        _manifest_side_effect(st, phase, spec, a.workdir)
         print("\nGATE RESULT: PASS → 执行 `next` 查看下一阶段契约卡")
     else:
-        # v0.7.0: 有界返修——auto 门 FAIL 计 gate_rounds，≥3 次强制人工提示（堵 silent infinite-retry）
         st.setdefault("gate_rounds", {})
         rounds = st["gate_rounds"].get(str(phase["id"]), 0) + 1
         st["gate_rounds"][str(phase["id"])] = rounds
@@ -549,14 +800,11 @@ def cmd_gate(a):
             print("脚本不可运行时按降级协议暂停等待（SKILL.md Runtime 控制协议·降级），不得产出用例文件。")
 
 
-def _human_gate_decision(st, phase):
+def _human_gate_decision(st, phase, spec):
     """人工门放行判定（模型无关：只看运行模式 + 用户意图标记，不信模型自证）。"""
     mode = st["run_mode"]
     lines = []
     if phase["id"] == 1:
-        # 澄清门：完整模式任何缺口都等用户；连跑等 P0/P1；轻量只等 P0。
-        # 是否有未关闭缺口由模型在契约执行中判定并以 confirm 表达"用户已答复"——
-        # Runtime 在收到 confirm 前一律 WAIT（机器保守），不放行。
         if mode == "full":
             lines.append("完整模式：无缺口或缺口已答复落盘台账后，执行 `confirm` 放行；有缺口则停止等待用户")
         elif mode == "auto":
@@ -570,12 +818,11 @@ def _human_gate_decision(st, phase):
             lines.append("完整模式：必须用户明确回复「%s」后执行 `confirm` 放行" % APPROVE_HINT)
             lines.append("当前判定: WAIT — 输出审核提示（review_gate.md 话术）后停止等待")
             return {"pass": False, "label": "人工确认门(审核)", "lines": lines, "via": None}
-        # 连跑/轻量：标注待审核自动放行（审计痕迹）
         state_store.log_event(st, "auto_release", detail="review gate auto-passed (%s mode), pending human review" % mode)
         lines.append("%s模式：标注「待人工审核」自动放行（审计痕迹：review_pending=true；交付报告须声明本轮未人工审核）" %
                      ("连跑" if mode == "auto" else "轻量"))
         return {"pass": True, "label": "人工确认门(审核)", "lines": lines, "via": "auto_release"}
-    if phase["id"] == 15:
+    if phase["id"] == 15 or phase["id"] == spec.last_phase:
         if mode in ("auto", "light") and st.get("excel") == "asked_yes":
             lines.append("用户已声明要 Excel：自动放行生成")
             return {"pass": True, "label": "许可门(Excel)", "lines": lines, "via": "declared"}
@@ -586,8 +833,10 @@ def _human_gate_decision(st, phase):
 
 def cmd_confirm(a):
     """用户在人工门给出肯定答复（审核通过/同意Excel/澄清已答复）。"""
-    st, path = _load_or_die(a.workdir)
-    phase = P.get_phase(st["current_phase"])
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, path = _load_or_die(a.workdir, a.workflow, req_id)
+    phase = spec.get_phase(st["current_phase"])
     if phase["gate"] not in ("confirm", "license"):
         _die("当前阶段(Phase %d)不是人工门，confirm 无效；请执行 `gate`" % phase["id"])
 
@@ -596,37 +845,39 @@ def cmd_confirm(a):
         st["status"] = "GATE_PASSED"
         state_store.log_event(st, "review_approved")
         state_store.save(path, st)
+        # gate-PASS 副作用：manifest complete
+        _manifest_side_effect(st, phase, spec, a.workdir)
         extra = (
             "审核已通过。按顺序执行后置动作（review_gate.md/knowledge.md/phase0_manifest.md 时机四）：\n"
-            "  1) 整表更新 MANIFEST：状态=已完成、更新时间、用例文件清单\n"
-            "  2) 生成/更新知识总结 case-design-out/Knowledge_<需求标识>.md（13维度，project_cases.py 投影读用例）\n"
+            "  1) MANIFEST 已由 Runtime 在本次 confirm 时自动置已完成（模型禁止 Write/Edit MANIFEST.md）\n"
+            "  2) 生成/更新知识总结 %s/Knowledge_%s.md（13维度，project_cases.py 投影读用例）\n"
             "  3) 执行: %s set --knowledge done（此时会跑 verify_knowledge.py 结构校验，不过则拒绝登记）\n"
             "  4) 执行: %s next（进入 Excel 许可门）\n"
-            "若知识总结已生成，直接执行第 3/4 步。" % (_rt_cmd(), _rt_cmd())
+            "若知识总结已生成，直接执行第 3/4 步。" % (spec.output_dir, req_id, _rt_cmd(), _rt_cmd())
         )
         print("CONFIRM ACCEPTED: Phase 14 审核通过")
         print()
         print(extra)
         return
 
-    if phase["id"] == 15:
+    if phase["id"] == 15 or phase["id"] == spec.last_phase:
         # 用户同意 Excel → 跑生成门禁（gen_excel.py）
         print("用户已许可生成 Excel，执行生成门禁...")
         ok_all = True
         for chk in phase.get("gate_checks", []):
-            ok, detail = _run_check(chk, st)
+            ok, detail = _run_check(chk, st, spec)
             print(("  [PASS] " if ok else "  [FAIL] ") + detail)
             ok_all = ok_all and ok
         if ok_all:
-            if 15 not in st["completed"]:
-                st["completed"].append(15)
+            if spec.last_phase not in st["completed"]:
+                st["completed"].append(spec.last_phase)
             st["status"] = "DONE"
             st["excel"] = "generated"
-            state_store.log_event(st, "gate_pass", phase=15, detail="via=user_license")
+            state_store.log_event(st, "gate_pass", phase=spec.last_phase, detail="via=user_license")
             state_store.save(path, st)
             print("\n流程 DONE：Excel 已生成并通过校验。执行临时文件清理复核后输出交付摘要。")
         else:
-            st["failed_gates"]["15"] = {"at": state_store._now()}
+            st["failed_gates"][str(spec.last_phase)] = {"at": state_store._now()}
             state_store.log_event(st, "excel_fail")
             state_store.save(path, st)
             print("\nEXCEL GATE: FAIL — 按 references/excel.md 生成失败处理：显式输出失败报告，禁止口头声明已生成。")
@@ -636,34 +887,39 @@ def cmd_confirm(a):
     st["status"] = "GATE_PASSED"
     state_store.log_event(st, "gate_pass", phase=phase["id"], detail="via=user_confirm")
     state_store.save(path, st)
+    # gate-PASS 副作用：manifest update ledger
+    _manifest_side_effect(st, phase, spec, a.workdir)
     print("CONFIRM ACCEPTED: Phase %d (%s) 人工门禁通过 → 执行 `next`" % (phase["id"], phase["name"]))
 
 
 def cmd_reject(a):
     """用户在许可门拒绝（不生成 Excel）→ 流程完成。"""
-    st, path = _load_or_die(a.workdir)
-    phase = P.get_phase(st["current_phase"])
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, path = _load_or_die(a.workdir, a.workflow, req_id)
+    phase = spec.get_phase(st["current_phase"])
     if phase["gate"] != "license":
         _die("当前阶段不是许可门，reject 无效")
     st["excel"] = "declined"
     st["status"] = "DONE"
-    if 15 not in st["completed"]:
-        st["completed"].append(15)
+    if spec.last_phase not in st["completed"]:
+        st["completed"].append(spec.last_phase)
     state_store.log_event(st, "license_rejected", detail="user declined excel")
     state_store.save(path, st)
     print("已记录：用户不生成 Excel。流程 DONE。执行临时文件清理复核后输出交付摘要。")
 
 
 def cmd_fail(a):
-    """门禁失败/审核反馈问题 → 回退到受影响最深阶段重走（起点判定由模型按 output_write.md 执行）。"""
-    st, path = _load_or_die(a.workdir)
-    target = P.find_phase_by_name(a.to)
+    """门禁失败/审核反馈问题 → 回退到受影响最深阶段重走。"""
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, path = _load_or_die(a.workdir, a.workflow, req_id)
+    target = spec.find_phase_by_name(a.to)
     if target is None:
         _die("无法解析回退目标阶段: %s（可用阶段号或名称关键词）" % a.to)
     cur = st["current_phase"]
     if target["id"] > cur:
         _die("禁止前进式 fail（目标 Phase %d > 当前 Phase %d）" % (target["id"], cur))
-    # 回退：清除 target 及其后的完成记录
     st["completed"] = [c for c in st["completed"] if c < target["id"]]
     st["current_phase"] = target["id"]
     st["status"] = "RUNNING"
@@ -674,31 +930,35 @@ def cmd_fail(a):
     print("按 output_write.md 修改流程起点判定：从本阶段起依次顺序执行至 Phase 14，不得跳阶段；")
     print("修改范围限定（只改问题点，无问题用例原样保留）。")
     print()
-    print(_card(st, target))
+    print(_card(st, target, spec))
 
 
-def _run_knowledge_gate(st):
+def _run_knowledge_gate(st, spec):
     """执行知识沉淀门禁（verify_knowledge.py 结构校验），返回 (ok, detail)。"""
-    for chk in P.KNOWLEDGE_GATE:
-        ok, detail = _run_check(chk, st)
+    for chk in spec.knowledge_gate:
+        ok, detail = _run_check(chk, st, spec)
         if not ok:
             return (False, detail)
     return (True, "verify_knowledge 通过")
 
 
 def cmd_set(a):
-    st, path = _load_or_die(a.workdir)
+    """登记判定结果/用户意图。
+
+    C/Risk2: 移除 --req-id（消除危险的状态目录迁移操作；req_id 由 bootstrap 派生，
+    start 时确定，不可后续 set 改写——否则状态目录与产物文件名失配）。
+    保留 --depth/--input-kind/--mode/--knowledge/--excel。
+    """
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, path = _load_or_die(a.workdir, a.workflow, req_id)
     changed = []
-    if a.req_id is not None:
-        st["req_id"] = a.req_id
-        changed.append("req_id=%s" % a.req_id)
     if a.depth is not None:
         if a.depth not in state_store.DEPTHS:
             _die("depth 取值须为 %s" % "/".join(state_store.DEPTHS))
         st["depth"] = a.depth
-        st["skipped_phases"] = P.DEPTH_SKIPS.get(a.depth, [])
-        # 防御：若已处于被裁剪阶段，回退到最近有效阶段
-        eff = P.effective_phases(a.depth)
+        st["skipped_phases"] = spec.depth_skips.get(a.depth, [])
+        eff = spec.effective_phases(a.depth)
         if st["current_phase"] not in eff:
             st["current_phase"] = max([e for e in eff if e <= st["current_phase"]] or [0])
         st["completed"] = [c for c in st["completed"] if c in eff]
@@ -713,16 +973,14 @@ def cmd_set(a):
         changed.append("run_mode=%s" % a.mode)
     if a.knowledge is not None:
         if a.knowledge == "done":
-            # 知识沉淀门禁：登记前必须真实通过 verify_knowledge.py 结构校验（防口头登记）
-            ok, detail = _run_knowledge_gate(st)
+            ok, detail = _run_knowledge_gate(st, spec)
             if not ok:
                 _die("知识总结门禁未过，拒绝登记 knowledge=done：\n%s" % detail)
             st["knowledge"] = "done"
             changed.append("knowledge=done（verify_knowledge 通过）")
         elif a.knowledge == "na":
-            # 知识沉淀为 Phase 14 审核通过后的强制后置动作，不允许声明"不适用"跳过
             _die("knowledge 不支持 na：知识总结为审核通过后的强制后置动作（references/knowledge.md 31.1），"
-                 "须生成 case-design-out/Knowledge_<需求标识>.md 后登记 done")
+                 "须生成 %s/Knowledge_%s.md 后登记 done" % (spec.output_dir, req_id))
         else:
             _die("knowledge 取值仅支持 done（na 不允许：知识沉淀不可跳过）")
     if a.excel is not None:
@@ -736,12 +994,16 @@ def cmd_set(a):
 
 
 def cmd_plan(a):
-    st, path = _load_or_die(a.workdir, need=False)
+    spec = _spec(a)
+    req_id = (a.req_id or "").strip()
+    st = None
+    if req_id:
+        st, _ = _load_or_die(a.workdir, a.workflow, req_id, need=False)
     depth = (st or {}).get("depth") or "heavy"
-    print("执行计划（depth=%s；阶段裁剪=%s）:" % (depth, P.DEPTH_SKIPS.get(depth, [])))
+    print("执行计划（workflow=%s, depth=%s；阶段裁剪=%s）:" % (spec.name, depth, spec.depth_skips.get(depth, [])))
     cur = (st or {}).get("current_phase")
-    for pid in P.effective_phases(depth):
-        ph = P.get_phase(pid)
+    for pid in spec.effective_phases(depth):
+        ph = spec.get_phase(pid)
         mark = ""
         if st:
             if pid in st["completed"]:
@@ -755,9 +1017,11 @@ def cmd_plan(a):
 
 def cmd_verify(a):
     """离线自证校验：状态文件 schema + 迁移合法性 + 产出物一致性（test_runtime.py 复用）。"""
-    st, path = _load_or_die(a.workdir)
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, path = _load_or_die(a.workdir, a.workflow, req_id)
     problems = []
-    eff = P.effective_phases(st.get("depth") or "heavy")
+    eff = spec.effective_phases(st.get("depth") or "heavy")
     if st["current_phase"] not in eff:
         problems.append("current_phase %d 不在有效阶段序列" % st["current_phase"])
     for c in st["completed"]:
@@ -766,7 +1030,7 @@ def cmd_verify(a):
         if c > st["current_phase"]:
             problems.append("completed 含未来阶段 %d" % c)
     if st["status"] in ("WAIT_USER_CONFIRM", "WAIT_LICENSE"):
-        g = P.get_phase(st["current_phase"])["gate"]
+        g = spec.get_phase(st["current_phase"])["gate"]
         if (st["status"] == "WAIT_USER_CONFIRM" and g != "confirm") or \
            (st["status"] == "WAIT_LICENSE" and g != "license"):
             problems.append("status 与阶段 gate 类型不符")
@@ -774,80 +1038,194 @@ def cmd_verify(a):
         for p_ in problems:
             print("FAIL " + p_)
         sys.exit(1)
-    print("STATE VERIFY OK: phase=%d status=%s completed=%s" % (st["current_phase"], st["status"], st["completed"]))
+    print("STATE VERIFY OK: workflow=%s req_id=%s phase=%d status=%s completed=%s"
+          % (st["workflow"], st.get("req_id"), st["current_phase"], st["status"], st["completed"]))
 
 
 def cmd_reset(a):
-    path = state_store.default_state_path(a.workdir)
-    if os.path.exists(path):
-        os.remove(path)
-        print("已删除运行状态: %s（产出物文件不受影响）" % path)
+    """删除分区运行状态（不影响产出物）。--legacy 清理旧 .runtime/。"""
+    spec = _spec(a)
+    if a.legacy:
+        legacy = os.path.join(a.workdir, state_store.LEGACY_RUNTIME_DIR)
+        if os.path.isdir(legacy):
+            shutil.rmtree(legacy)
+            print("已清理旧 runtime 目录: %s" % legacy)
+        else:
+            print("无旧 runtime 目录可清理: %s" % legacy)
+        return
+    req_id = _require_req_id(a)
+    part = os.path.join(a.workdir, state_store.QAMASTER_ROOT, spec.name, req_id)
+    if os.path.isdir(part):
+        shutil.rmtree(part)
+        print("已删除分区状态目录: %s（产出物文件不受影响）" % part)
     else:
-        print("无运行状态可删除")
+        print("无分区状态可删除: %s" % part)
+
+
+def cmd_manifest(a):
+    """MANIFEST.md 共享索引维护（Runtime 独占，全程持 FileLock）。模型禁止直接 Write/Edit。"""
+    spec = _spec(a)
+    workdir = a.workdir
+    mp = _manifest_path(workdir, spec)
+    action = a.action
+    if action == "list":
+        # 只读，无需锁
+        rows = manifest.load_rows(mp)
+        if not rows:
+            print("MANIFEST 为空或不存在: %s" % mp)
+            return
+        print(json.dumps({"workflow": spec.name, "manifest": mp, "rows": rows},
+                         ensure_ascii=False, indent=2))
+        return
+    if action == "reconcile":
+        with locking.FileLock(mp, timeout=30):
+            ok, msg, cnt = manifest.reconcile(mp, workdir, spec.output_dir)
+        print("MANIFEST RECONCILE: %s (%s, %d rows)" % ("OK" if ok else "FAIL", msg, cnt))
+        return
+    # add/update/complete 需 --req-id，全程持锁
+    req_id = _require_req_id(a)
+    with locking.FileLock(mp, timeout=30):
+        if action == "add":
+            ok, msg = manifest.add(mp, req_id, workdir=workdir, output_dir=spec.output_dir)
+        elif action == "update":
+            fields = {}
+            if a.name is not None:
+                fields["name"] = a.name
+            if a.design_file is not None:
+                fields["design_file"] = a.design_file
+            if a.ledger_file is not None:
+                fields["ledger_file"] = a.ledger_file
+            if a.testcase_files is not None:
+                fields["testcase_files"] = a.testcase_files
+            if a.knowledge_file is not None:
+                fields["knowledge_file"] = a.knowledge_file
+            if a.status is not None:
+                fields["status"] = a.status
+            if not fields:
+                _die("manifest update 需至少一个 --<field>")
+            ok, msg = manifest.update(mp, req_id, **fields)
+        elif action == "complete":
+            ok, msg = manifest.complete(mp, req_id)
+        else:
+            _die("未知 manifest 动作: %s" % action)
+    print("MANIFEST %s: %s — %s" % (action, "OK" if ok else "FAIL", msg))
+    if not ok:
+        sys.exit(1)
 
 
 def main():
     _utf8()
-    ap = argparse.ArgumentParser(prog="qamaster_runtime", description="qamaster Runtime Controller（流程状态机）")
+    _register_workflows()
+    ap = argparse.ArgumentParser(prog="qamaster_runtime", description="qamaster Runtime Controller（通用 workflow 状态机）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def _wd(sp):
         sp.add_argument("--workdir", default=os.getcwd(), help="用户工作目录（产出物与状态根），默认当前目录")
 
-    sp = sub.add_parser("start", help="启动/恢复流程")
-    sp.add_argument("--req-id", default="")
+    def _wf(sp):
+        sp.add_argument("--workflow", default=DEFAULT_WORKFLOW, help="workflow 名（默认 case-design）")
+
+    def _ri(sp, required=False):
+        sp.add_argument("--req-id", default="", required=required,
+                        help="需求标识（由 bootstrap 派生；分区状态定位用）")
+
+    # bootstrap
+    sp = sub.add_parser("bootstrap", help="派生需求标识（不创状态，幂等）")
+    sp.add_argument("--user-input", default="", help="原始用户输入（文件路径或内联文本）")
+    _ri(sp)
+    _wf(sp)
+    _wd(sp)
+    sp.set_defaults(fn=cmd_bootstrap)
+
+    sp = sub.add_parser("start", help="启动/恢复流程（req_id 必需）")
+    _ri(sp, required=True)
     sp.add_argument("--mode", default="full", choices=list(state_store.RUN_MODES))
     sp.add_argument("--user-input", default="", help="原始用户输入（记录审计，不解析）")
     sp.add_argument("--fresh", action="store_true", help="忽略已有状态强制重启")
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_start)
 
-    sp = sub.add_parser("status", help="查看当前状态")
+    sp = sub.add_parser("status", help="查看状态（--req-id 单需求 | --all 全量）")
+    sp.add_argument("--all", action="store_true", help="列出该 workflow 所有在途需求")
     sp.add_argument("--card", action="store_true", help="同时输出当前阶段契约卡")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_status)
 
     sp = sub.add_parser("next", help="推进到下一阶段（仅当前阶段已过 gate）")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_next)
 
     sp = sub.add_parser("gate", help="执行当前阶段出口门禁")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_gate)
 
     sp = sub.add_parser("confirm", help="人工门：用户已确认/答复/许可")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_confirm)
 
     sp = sub.add_parser("reject", help="许可门：用户拒绝（不生成 Excel）")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_reject)
 
     sp = sub.add_parser("fail", help="门禁失败/审核反馈 → 回退重走")
     sp.add_argument("--to", required=True, help="回退目标阶段（阶段号或名称关键词）")
     sp.add_argument("--reason", default="")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_fail)
 
-    sp = sub.add_parser("set", help="登记判定结果/用户意图（req-id/depth/input-kind/mode/knowledge/excel）")
-    sp.add_argument("--req-id", default=None)
+    sp = sub.add_parser("set", help="登记判定结果/用户意图（depth/input-kind/mode/knowledge/excel）")
     sp.add_argument("--depth", default=None)
     sp.add_argument("--input-kind", default=None, choices=list(state_store.INPUT_KINDS))
-    sp.add_argument("--mode", default=None)
+    sp.add_argument("--mode", default=None, choices=list(state_store.RUN_MODES))
     sp.add_argument("--knowledge", default=None, choices=["done"])
     sp.add_argument("--excel", default=None, choices=["asked_yes", "asked_no", "generated", "declined", "na"])
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_set)
 
+    sp = sub.add_parser("manifest", help="MANIFEST 索引维护（Runtime 独占，模型禁止 Write/Edit）")
+    sp.add_argument("action", choices=["add", "update", "complete", "list", "reconcile"])
+    sp.add_argument("--name", default=None)
+    sp.add_argument("--design-file", default=None)
+    sp.add_argument("--ledger-file", default=None)
+    sp.add_argument("--testcase-files", default=None)
+    sp.add_argument("--knowledge-file", default=None)
+    sp.add_argument("--status", default=None, choices=["进行中", "已完成", "已归档"])
+    _ri(sp)
+    _wf(sp)
+    _wd(sp)
+    sp.set_defaults(fn=cmd_manifest)
+
     sp = sub.add_parser("plan", help="查看执行计划（按深度裁剪后的阶段序列）")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_plan)
 
     sp = sub.add_parser("verify", help="离线自证校验状态一致性")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_verify)
 
     sp = sub.add_parser("reset", help="删除运行状态（不影响产出物）")
+    sp.add_argument("--legacy", action="store_true", help="清理旧 case-design-out/.runtime/ 目录")
+    _ri(sp)
+    _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_reset)
 

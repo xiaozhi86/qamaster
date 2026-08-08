@@ -22,6 +22,8 @@ QA Master 提供两个核心能力，覆盖「需求评审 → 测试用例设�
 ## ✨ 特性
 
 - **规格先行（SDD + TDD）**：先建模规则/状态/规格，再设计测试，禁止直接写用例。
+- **Runtime 受控·模型无关**：0-14(+Excel) 阶段流程由内置 Python 状态机（`runtime/`）裁决，**模型只负责思考、不掌流程控制权**——阶段迁移/质量门禁/人工确认全部代码化，**任何模型（Claude / GPT / GLM / Gemini / DeepSeek）都不可绕过**；`gate` 由确定性检查 + 校验脚本判定，禁止模型自证（声明≠核实）。详见下方「架构」节。
+- **同工程多需求并行**：状态按 `(workflow, req_id)` **分区隔离**，同一项目下多个需求/会话同时推进互不覆盖；多需求共享索引 `MANIFEST.md` 由 Runtime 在 gate PASS 时自动维护（跨平台 FileLock 串行化，模型禁写）；`status --all` 查看全部在途需求。详见下方 FAQ「同一个工程能同时处理多个需求吗？」。
 - **风险优先**：按 P0–P3 风险分级，优先覆盖资金/支付/权限/状态流转/数据一致性等核心链路。
 - **多角色协同**：case-design 引入开发/产品/业务视角（澄清路由 + 审核门禁，不增提问往返）；requirement-review 用 7 个专家 Agent 并行评审。
 - **阶段出口校验，agent-loop 式有界纠错**：第3/5/8阶段在写前于**内存内**跑机器检查（`verify_cases.py run_inmemory`，≤2 轮有界自修，零临时文件）；第5/8阶段另加**有界对抗式 critique 循环**（≤2 轮，查机器查不出的"P0 漏标""漏测用例"，检查14 含**界面结构遗漏**盲区）；第11阶段写前 LLM 自查（≤3 轮）+ 第13阶段写后回读。机器判定与主观对抗分层、5 个有界循环各自独立计数不嵌套——缺陷在阶段出口就地拦住，不聚合到写后才反向捕获。
@@ -168,12 +170,14 @@ flowchart TD
 ## 🏗️ 架构：Agent Runtime Engineering（模型无关的流程强制）
 
 > **模型负责思考，Runtime 负责控制。** 自 v0.6 起，case-design 的 0-14(+Excel) 阶段流程不再依赖模型的指令遵循能力，而由内置 Python 状态机（`runtime/`）裁决：阶段迁移、质量门禁、人工确认点全部代码化，**任何模型（Claude / GPT / GLM / Gemini / DeepSeek）都不可绕过**。
+>
+> Runtime 已演化为**通用 workflow 引擎**（`runtime/workflows/registry.py` + `WorkflowSpec`）：状态按 `(workflow, req_id)` 分区，天然支持**同一工程多需求并行**（每个需求独立 `state.json`/检查点，互不覆盖）；新增独立 skill 只需注册自己的阶段机即继承隔离 + 强控。多需求共享索引 `MANIFEST.md` 由 Runtime 在 gate PASS 时自动维护，是 gate 通过的**确定性副作用**——协调权属 Runtime 不属模型，强化"与模型无关"。
 
 ```mermaid
 flowchart TD
     U[用户 /case-design] --> CMD[commands/case-design.md]
     CMD --> RT[runtime/qamaster_runtime.py<br/>Runtime Controller CLI]
-    RT --> SM[state_store.py<br/>原子 JSON 状态机<br/>case-design-out/.runtime/state.json]
+    RT --> SM[state_store.py<br/>原子 JSON 状态机<br/>.qamaster/case-design/&lt;req_id&gt;/state.json]
     RT --> PH[phases.py<br/>16 阶段注册表<br/>流程定义单一事实源]
     RT -->|颁发契约卡| LLM[LLM Worker<br/>只做当前阶段的思考与产物]
     LLM -->|gate| RT
@@ -194,13 +198,13 @@ flowchart TD
 | 机制 | 实现 | 防什么 |
 |---|---|---|
 | 非法跳转拦截 | `next` 只允许 current+1（按深度裁剪序列），否则 RUNTIME_ERROR | 模型跳阶段/合并阶段 |
-| 机器质量门 | Phase 0（REQ+MANIFEST 落盘）、Phase 13（verify_md+verify_cases 回读）、Phase 15（gen_excel 生成+校验） | 产物缺失/不合格却自称完成 |
+| 机器质量门 | Phase 0（REQ 落盘）、Phase 13（verify_md+verify_cases 回读）、Phase 15（gen_excel 生成+校验）；多需求索引 `MANIFEST.md` 由 Runtime 在 gate PASS 时自动维护（模型禁止写） | 产物缺失/不合格却自称完成 |
 | 人工确认门 | Phase 1 澄清 / Phase 14 审核 / Phase 15 Excel 许可；完整模式必须用户 confirm | 跳过澄清/默认审核通过/未经许可生成 Excel |
-| 断点续跑 | 状态落盘 `case-design-out/.runtime/state.json`；二次 `start` 恢复而非重置；上下文压缩后 `status` 恢复权威状态 | 长会话状态丢失、重复生成覆盖 |
+| 断点续跑 | 状态按 (workflow,req_id) 分区落盘 `.qamaster/case-design/<req_id>/state.json`；二次 `start` 恢复而非重置；`status --all` 查看全部在途需求 | 长会话状态丢失、重复生成覆盖、多需求互相覆盖 |
 | 审核反馈回退 | `fail --to <阶段>` 回退到受影响最深阶段，从起点依次重走到 Phase 14 | 修改场景跳阶段 |
-| 自证测试 | `scripts/test_runtime.py`：57 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行 | Runtime 自身正确性 |
+| 自证测试 | `scripts/test_runtime.py`：122 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行、多需求并发隔离、legacy 迁移、MANIFEST 并发/重建 | Runtime 自身正确性 |
 
-> 设计方案见 [`qamaster-Agent-Runtime-Engineering-Refactor-Design-v1.0.0.md`](qamaster-Agent-Runtime-Engineering-Refactor-Design-v1.0.0.md)。
+> 设计方案见 [`qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md`](qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md)。
 
 ---
 
@@ -410,10 +414,15 @@ pip3 install openpyxl     # macOS / Linux
 
 ```
 .
-├─ runtime/                         # ★ Agent Runtime（流程状态机，模型无关的流程强制）
-│  ├─ qamaster_runtime.py           # Runtime Controller CLI（start/status/next/gate/confirm/reject/fail/set/plan/verify）
-│  ├─ state_store.py                # 权威状态存储（原子 JSON 读写）
-│  └─ phases.py                     # 0-14(+Excel) 阶段注册表（流程定义单一事实源）
+├─ runtime/                         # ★ Agent Runtime（流程状态机，模型无关的流程强制；多需求并行 + 通用 workflow 引擎）
+│  ├─ qamaster_runtime.py           # Runtime Controller CLI（bootstrap/start/status/next/gate/confirm/reject/fail/set/manifest/plan/verify/reset）
+│  ├─ state_store.py                # 权威状态存储（按 workflow/req_id 分区 + 原子 JSON 读写 + legacy 迁移）
+│  ├─ phases.py                     # 0-14(+Excel) 阶段注册表（流程定义单一事实源）
+│  ├─ locking.py                    # 跨平台 FileLock（msvcrt/fcntl，stdlib；MANIFEST 并发串行化）
+│  ├─ manifest.py                   # MANIFEST.md 共享索引 read-modify-write（Runtime 独占）
+│  └─ workflows/                    # 通用 workflow 注册表（新增 skill 注册自己的阶段机即继承隔离 + 强控）
+│     ├─ registry.py                # WorkflowSpec + register/get_workflow
+│     └─ case_design.py             # 适配 phases.py 为 WorkflowSpec
 ├─ skills/                          # 业务规范单一事实源（不随平台复制）
 │  ├─ case-design/                  # 测试用例设计 skill
 │  │  ├─ SKILL.md                   # 常驻核心（frontmatter + Runtime 控制协议 + 主流程 + ref 索引）
@@ -432,7 +441,7 @@ pip3 install openpyxl     # macOS / Linux
 ├─ codex/prompts/                   # Codex 自定义 prompt（拷到 ~/.codex/prompts/）
 ├─ .cursor/rules/                   # 平台三：Cursor rule
 ├─ scripts/check_plugin.py          # 插件结构自检（含 Runtime 完整性校验）
-├─ scripts/test_runtime.py          # Runtime 自证测试（57 项断言，无 LLM）
+├─ scripts/test_runtime.py          # Runtime 自证测试（122 项断言，无 LLM）
 └─ .github/workflows/check-plugin.yml  # CI
 ```
 
@@ -449,13 +458,13 @@ python scripts/test_runtime.py
 
 `check_plugin.py` 校验三平台适配层、skills 结构与 **Runtime 完整性**：`plugin.json` / `marketplace.json` 字段、各 `SKILL.md` frontmatter、`commands/` 与 `.cursor/rules/` frontmatter、Codex 适配必要文件、`runtime/` 核心文件存在性 + 阶段注册表（编号 0-15 连续、人工门/许可门类型、引用细则存在）、以及不应入库的 `__pycache__`/`.pyc`。CI 还会字节编译 runtime 与 skill 脚本做语法检查。
 
-`test_runtime.py` 为 Runtime 自证测试（无 LLM，57 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪。
+`test_runtime.py` 为 Runtime 自证测试（无 LLM，122 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪，**以及多需求并行隔离（同 workdir 两 req 状态/检查点互不覆盖 + 降级对账不误报）、MANIFEST 并发更新、Phase 0 gate PASS 自动建索引、legacy 状态迁移、bootstrap 幂等、manifest reconcile 重建**。
 
 本地运行完整检查：
 
 ```bash
 python scripts/check_plugin.py            # 插件结构自检（含 Runtime 完整性）
-python scripts/test_runtime.py            # Runtime 自证测试（57 项断言，无 LLM）
+python scripts/test_runtime.py            # Runtime 自证测试（122 项断言，无 LLM）
 python -m py_compile runtime/*.py skills/case-design/scripts/*.py   # 脚本语法检查
 python skills/case-design/scripts/verify_cases.py --dump-rules      # 打印校验规则契约
 ```
@@ -481,6 +490,9 @@ skill 会做写前规模评估：默认单文件；单次 Write 预估 > 24000 t
 
 **Q：阶段出口校验会不会拖慢或卡死？**
 不会无限循环。5 个有界循环（第5机器 gate / 第5 critique / 第8机器 gate / 第8 critique / 第11自查）各自 ≤2~3 轮独立计数、不嵌套；机器 gate 的自修是确定性修复（补序号、改枚举、补固定列），命中即修即过，token 增量小；critique 是真正花 token 的对抗式遍历，但只 2 轮且只重型需求跑满。2 轮未过即升级阻断转人工，不空转。详见上方「阶段出口校验机制」。
+
+**Q：同一个工程能同时处理多个需求吗？**
+可以，且互不干扰。Runtime 状态按 `(workflow, req_id)` **分区**：每个需求有独立的 `.qamaster/case-design/<需求标识>/state.json` 与检查点目录，互不覆盖。多个 Claude Code 客户端/会话处理不同需求时，各自走 `bootstrap → start --req-id <需求标识>` 推进自己的状态机，互不干扰。多需求共享索引 `case-design-out/MANIFEST.md` 由 Runtime 在跨平台 FileLock（`locking.py`）下串行维护——gate PASS 时自动 `add / update / complete`，模型禁止直接写。`status --workflow case-design --all` 查看全部在途需求；`manifest reconcile` 可从磁盘产物重建失步的索引。
 
 ---
 

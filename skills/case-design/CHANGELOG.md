@@ -6,6 +6,36 @@
 
 # 发布说明（面向使用者）
 
+## v0.9.0（2026-08-08，多需求并行 + 通用 Workflow 引擎 + MANIFEST 收归 Runtime）
+
+**本次发布解决单工程只能处理一个需求、且 MANIFEST 索引由模型维护两大架构缺口**。v0.6–v0.8 把质量门禁/覆盖硬门/阶段出口校验逐层代码化；v0.9.0 把"流程控制层"本身从单例改造为按需求分区，并把多需求共享索引的协调权从模型收回 Runtime——**强化"流程由 Runtime 严格控制、与模型无关"铁律到索引层**。
+
+**根因**：旧 Runtime 状态固定为 `<workdir>/case-design-out/.runtime/state.json`（单例，只按 workdir 参数化），同工程下两个客户端处理不同需求会在 `state.json` 上互相 clobber（current_phase/req_id 被覆盖）、checkpoint 按阶段号互相覆盖、MANIFEST"整表 Write"丢行。Phase 0 既派生 req_id 又写 REQ.md，存在"先有鸡还是先有蛋"。
+
+**核心修复一：状态按 (workflow, req_id) 分区（无锁隔离）**
+- `state_store.default_state_path(workdir, workflow, req_id)` → `<workdir>/.qamaster/<workflow>/<req_id>/state.json`：每个在途需求独立 state.json + checkpoint 目录，**无需锁即可避免 clobber**；`save()` 的原子 `os.replace` 保留（仅防单写者中断/AV 锁）。
+- 新增 `list_active_reqs`（供 `status --all` + bootstrap 碰撞检查）；新增 `migrate_legacy_state`（旧 `.runtime/state.json` 惰性迁移到分区路径，req_id 非空迁移、空则拒绝并保留原处待 `reset --legacy`，幂等崩溃安全）；`SCHEMA_VERSION` 2→3。
+
+**核心修复二：req_id 派生协议（bootstrap → start，消除先有鸡还是先有蛋）**
+- 新 `bootstrap` 子命令：从文件路径（经 `extract_doc.py`）/内联文本派生 req_id（清洗 CJK+alnum+`-`、碰撞加 `-YYYYMMDD`），**不创建状态**（幂等可重跑）；检测到在途状态输出 `RESUME`（start 走 resume 分支不重建，C8：created_at 不变）。
+- `start --req-id` 改为**必需**；`commands/case-design.md` 内部链式 `bootstrap → start`，对用户单步透明。`set --req-id` **移除**（消除阶段内改 req_id 的危险目录迁移）。
+
+**核心修复三：MANIFEST 收归 Runtime（铁律 4 强化）**
+- 新 `manifest` 子命令（`add/update/complete/list/reconcile`），全程在跨平台 `FileLock`（`runtime/locking.py`，msvcrt/fcntl，stdlib）下 read-modify-write（原子 `os.replace`），多需求并发更新不损坏不丢行。
+- **gate-PASS 确定性副作用**：Phase 0 PASS→`add`（需求名称从 `REQ_<id>.md` 首个 `#` 标题自动抽取）；Phase 1 confirm→`update` 台账列；Phase 13 PASS→`update` 用例文件列（glob `TestCases_<id>*.md`）；Phase 14 confirm→`complete`。模型**禁止 Write/Edit MANIFEST.md**；失步 `manifest reconcile` 从磁盘 `REQ_/TestCases_` 重建（C6 兜底）。
+- C1：从 Phase 0/13 `gate_checks` 移除 `exists MANIFEST.md`（MANIFEST 是 Runtime 产物，不再是模型门禁责任）；C2：`_audit_degraded_artifacts` glob 限定当前 req_id，多需求下不误报对方用例。
+
+**核心修复四：通用 Workflow 引擎（扩展点）**
+- 新 `runtime/workflows/`（`registry.py` WorkflowSpec + register/get_workflow；`case_design.py` 适配 `phases.py`）。新 skill 注册自己的阶段机即继承隔离 + 强控；状态路径 `<workdir>/.qamaster/<workflow>/<req_id>/` 天然隔离不同 skill。`--workflow` 路由（默认 case-design 向后兼容）；显式 `register()`（无 import 副作用）。
+
+**清理**：删除空的 `runtime/transaction/`（WAL 不再需要，`FileLock + os.replace` 足够）。
+
+**变更文件**：`runtime/locking.py`、`runtime/manifest.py`、`runtime/workflows/{__init__,registry,case_design}.py`（新）；`runtime/{state_store,phases,qamaster_runtime}.py`（分区/迁移/bootstrap/manifest/gate 副作用/C1-C8）；`commands/case-design.md`、`skills/case-design/SKILL.md`、`references/{phase0_manifest,modeling,dedup_coverage,output_write}.md`、`scripts/{test_runtime,check_plugin}.py`、`.gitignore`、`AGENTS.md`、`README.md`、本 CHANGELOG。
+
+**升级方式**：`git pull` 后跑 `python scripts/test_runtime.py`（122 项全过）与 `python scripts/check_plugin.py`。已有 `.runtime/state.json`（schema≤2 + req_id 非空）在首次 `start` 时自动迁移到分区路径；req_id 为空需 `reset --legacy` 清理。已有合规用例集不受影响。
+
+---
+
 ## v0.8.0（2026-08-05，覆盖率硬门加固 + 设计文档追溯源 + 契约驱动触发放宽）
 
 **本次发布解决覆盖率校验维度不足 + 设计文档非正式追溯源两大缺口**（设计依据 `COVERAGE_HARDENING_DESIGN-v1.0.0.md`）。v0.7.0 闭环了"引用悬空/编号跳号/台账传递/待确认泄漏"；v0.8.0 闭环 v0.7.0 未覆盖的三个缺口：**测试点级覆盖无硬门、设计文档测试要点非正式追溯源、critique 不扫安全/脱敏盲区**。
@@ -65,7 +95,7 @@
 - `qamaster_runtime.py`：契约卡 `_card` 增 PRIOR_ARTIFACTS 段（按 consumes 注入上游制品指针）；`_run_check` 增 `phase_gate` kind + gate PASS 回填 artifacts；`cmd_gate` auto FAIL 计 `gate_rounds`，≥3 次强制人工提示（堵 silent infinite-retry）。
 - `verify_cases.py`：增 `--phase-gate <N> <checkpoint>` CLI 模式 + `run_phase_gate`，复用 `collect_all_findings` 保证写前/写后口径一致。
 
-**沉淀检查点机制**：Phase 3/5/7/8/10 结束写 `case-design-out/.runtime/checkpoint_<N>.md`（runtime 受控临时件，Phase 13 后清理），让沉淀机器可见，不违反"禁止增量写 TestCases.md"红线。
+**沉淀检查点机制**：Phase 3/5/7/8/10 结束写 `.qamaster/case-design/<req_id>/checkpoint_<N>.md`（runtime 受控临时件，按 `(workflow, req_id)` 分区隔离，Phase 13 后清理），让沉淀机器可见，不违反"禁止增量写 TestCases.md"红线。
 
 **回归安全**：文件入口 `verify_cases.py <file> [req] [--ledger ..]` stdout/退出码字节级不变（新检查追加在 hard_violations/soft 桶，[FAIL] 行格式一致）；既有合规用例集在新门禁下仍 PASS（仅"覆盖不足/引用悬空/编号跳号/违背台账/待确认泄漏"被拦下）。`test_runtime.py` 由 17 组扩为 19 组（90+ 项全过），新增 [18] phase-gate 7 抓 TP7、[19] phase-gate 8 抓 R28 + 台账门禁抓 Q5。
 
