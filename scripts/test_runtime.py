@@ -454,6 +454,7 @@ def main():
     test_kb_business_relevance_gate_filters()
     test_kb_business_verify_id_patterns()
     test_kb_business_separate_from_lessons()
+    test_kb_query_top_preview()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -1611,6 +1612,60 @@ def test_kb_capture_never_blocks_correction():
 
 def P_gate_of(st):
     return _RT_PHASES.get_phase(st["current_phase"])["gate"]
+
+
+def test_kb_query_top_preview():
+    """kb query --top K 真正按 K 取条数（flag 不再撒谎）；真实注入路径仍默认 top-3。
+
+    种 4 条同阶段 endorsed、REQ 相关（surface≥2）的经验 → 全过双门，候选 4 条。
+    --top 2 取 2；默认 --top 3 取 3；--top 5 取 4（封顶于种子数）。真实注入（直接调 helper）
+    仍默认 top=3，与 query 的 top 解耦——验证注入路径不受预览 flag 影响。
+    """
+    print("\n[kb] kb query --top 预览标志真正生效（默认注入仍 top-3 硬上限）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-top-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        # 4 条 phase=5 endorsed，trigger 各含 ≥2 个 REQ 子串（并发/幂等/重复提交），全过双门
+        dims = [("并发幂等", ["并发", "幂等", "重复提交"]),
+                ("异常处理", ["并发", "幂等"]),
+                ("上下游依赖", ["并发", "重复提交"]),
+                ("权限与敏感数据", ["幂等", "重复提交"])]
+        recs = []
+        for i, (dim, trig) in enumerate(dims):
+            fp = kb_store.fingerprint({"phase": "5", "dimension": dim})
+            recs.append(_kb_rec(fp, 5, dim, "endorsed", 1, trig,
+                                "top-preview 经验 %d" % i, source_req="A"))
+        _kb_seed(workdir, recs)
+
+        def _count(out):
+            return out.count("- [Phase 5")
+
+        # --top 2 → 2 条
+        r2 = run(workdir, "kb", "query", "--phase", "5", "--against", rid, "--top", "2", req_id=rid)
+        n2 = _count(r2.stdout)
+        check("kb query --top 2 返回 2 条（flag 生效）", n2 == 2, "n2=%d\n%s" % (n2, r2.stdout[-400:]))
+        check("--top 2 文案印 top=2", "top=2" in r2.stdout, r2.stdout[-200:])
+        # 默认 --top 3 → 3 条
+        r3 = run(workdir, "kb", "query", "--phase", "5", "--against", rid, req_id=rid)
+        n3 = _count(r3.stdout)
+        check("kb query 默认 top=3 返回 3 条", n3 == 3, "n3=%d" % n3)
+        # --top 5 → 4 条（封顶种子数）
+        r5 = run(workdir, "kb", "query", "--phase", "5", "--against", rid, "--top", "5", req_id=rid)
+        n5 = _count(r5.stdout)
+        check("kb query --top 5（仅 4 条种子）返回 4 条", n5 == 4, "n5=%d" % n5)
+        # 真实注入路径：直接调 helper（不经 query），默认 top=3 → 4 候选截 3
+        st = _kb_state(workdir, rid)
+        phase5 = spec.get_phase(5)
+        block = rt._prior_kb_block(st, phase5, spec)  # 默认 top=3
+        check("真实注入路径默认 top-3（4 候选截 3，不受 query flag 影响）",
+              block.count("- [Phase 5") == 3, "应 3 条: %d" % block.count("- [Phase 5"))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 # =============================================================================

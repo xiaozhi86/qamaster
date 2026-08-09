@@ -391,7 +391,7 @@ def _render_lessons_block(cands, tag, footer=""):
     return "\n".join(lines)
 
 
-def _prior_kb_block(st, phase, spec, kind="lesson"):
+def _prior_kb_block(st, phase, spec, kind="lesson", top=3):
     """预防式检索+注入：开工前按 REQ 相关性 + 双门注入 ##PRIOR_LESSONS##。
 
     双门：①相关性门（surface≥2 或 module 标题命中）②信任门（endorsed 或 occ≥3）。
@@ -421,10 +421,10 @@ def _prior_kb_block(st, phase, spec, kind="lesson"):
         score = 3 * surface + 4 * (1 if title_hit else 0) + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
         cands.append((score, r))
     cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
-    return _render_lessons_block(cands[:3], tag="PRIOR_LESSONS") if cands else ""
+    return _render_lessons_block(cands[:top], tag="PRIOR_LESSONS") if cands else ""
 
 
-def _relevant_lessons_on_fail(st, phase, fail_context, spec):
+def _relevant_lessons_on_fail(st, phase, fail_context, spec, top=3):
     """反应式失败定向应用：检测到问题时按失败上下文文本 surface 命中查 KB，注入 ##RELEVANT_LESSONS##。
 
     比预防式更锐：用失败文本（FAIL 明细 / 人类 reason）做命中，"和这次栽的跟头最像"的经验排最前。
@@ -454,11 +454,11 @@ def _relevant_lessons_on_fail(st, phase, fail_context, spec):
         cands.append((score, r))
     cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
     return _render_lessons_block(
-        cands[:3], tag="RELEVANT_LESSONS",
+        cands[:top], tag="RELEVANT_LESSONS",
         footer="本门失败/本次纠正疑似与此历史经验相关·请据此修正，参考而非硬约束") if cands else ""
 
 
-def _prior_business_kb_block(st, phase, spec):
+def _prior_business_kb_block(st, phase, spec, top=3):
     """预防式业务知识检索+注入：开工前（Phase 0）按 REQ 相关性 + 双门注入 ##PRIOR_BUSINESS_KB##。
 
     镜像 _prior_kb_block，3 处差异：path="business"（KB_business.md）、
@@ -490,11 +490,11 @@ def _prior_business_kb_block(st, phase, spec):
         score = 3 * surface + 4 * (1 if title_hit else 0) + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
         cands.append((score, r))
     cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
-    return _render_lessons_block(cands[:3], tag="PRIOR_BUSINESS_KB",
+    return _render_lessons_block(cands[:top], tag="PRIOR_BUSINESS_KB",
                                  footer="本需求命中上述历史业务知识触发词；据此参考历史沉淀，参考而非硬约束") if cands else ""
 
 
-def _relevant_business_kb_on_fail(st, phase, fail_context, spec):
+def _relevant_business_kb_on_fail(st, phase, fail_context, spec, top=3):
     """反应式业务知识定向应用：检测到问题时按失败上下文文本 surface 命中查 business KB，
     注入 ##RELEVANT_BUSINESS_KB##。
 
@@ -523,7 +523,7 @@ def _relevant_business_kb_on_fail(st, phase, fail_context, spec):
         score = 5 * hit_fail + 3 * hit_req + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
         cands.append((score, r))
     cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
-    return _render_lessons_block(cands[:3], tag="RELEVANT_BUSINESS_KB",
+    return _render_lessons_block(cands[:top], tag="RELEVANT_BUSINESS_KB",
                                  footer="本门失败/本次纠正疑似与此历史业务知识相关·请据此参考，参考而非硬约束") if cands else ""
 
 
@@ -1585,19 +1585,19 @@ def cmd_kb(a):
         if (a.kind or "lesson") == "business":
             # business 检索路径（phase 无关；Phase 0 预防 / 失败反应同一 helper）
             if a.context:
-                block = _relevant_business_kb_on_fail(st_q, phase, a.context, spec)
+                block = _relevant_business_kb_on_fail(st_q, phase, a.context, spec, top=a.top or 3)
                 _print_block("RELEVANT_BUSINESS_KB（反应式·失败定向·会注入）", block or "(无命中)")
             else:
-                block = _prior_business_kb_block(st_q, phase, spec)
+                block = _prior_business_kb_block(st_q, phase, spec, top=a.top or 3)
                 _print_block("PRIOR_BUSINESS_KB（预防式·Phase 0·会注入）", block or "(无命中)")
             print("  （top=%d；信任门：endorsed 或 occ≥3；相关性门：surface≥2 或标题命中）"
                   % (a.top or 3))
             return
         if a.context:
-            block = _relevant_lessons_on_fail(st_q, phase, a.context, spec)
+            block = _relevant_lessons_on_fail(st_q, phase, a.context, spec, top=a.top or 3)
             _print_block("RELEVANT_LESSONS（反应式·失败定向·会注入）", block or "(无命中)")
         else:
-            block = _prior_kb_block(st_q, phase, spec, kind="lesson")
+            block = _prior_kb_block(st_q, phase, spec, kind="lesson", top=a.top or 3)
             _print_block("PRIOR_LESSONS（预防式·开工前·会注入）", block or "(无命中)")
         print("  （top=%d；信任门：endorsed 或 occ≥3；相关性门：surface≥2 或标题命中）"
               % (a.top or 3))
