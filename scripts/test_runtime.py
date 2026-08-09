@@ -431,6 +431,30 @@ def main():
     test_manifest_reconcile()
     test_probe_p3_p1()
 
+    # KB 经验库自证（自我进化·机制与模型无关·13 项）
+    test_kb_noop_preserves_baseline()
+    test_kb_autocapture_silent_draft_not_injected()
+    test_kb_surface_map_via_subprocess()
+    test_kb_dim_trigger_union()
+    test_kb_fingerprint_coarse_recurrence()
+    test_kb_preventive_dual_gate()
+    test_kb_reactive_failure_targeted()
+    test_kb_reactive_respects_trust_gate()
+    test_kb_endorse_and_supersede()
+    test_kb_threshold_recurrence_injected()
+    test_kb_concurrent_add()
+    test_kb_distill_replays_history()
+    test_kb_capture_never_blocks_correction()
+
+    # KB 业务历史知识库（MVP2b·机制与模型无关·7 项）
+    test_kb_business_noop()
+    test_kb_business_reconcile_indexes()
+    test_kb_business_preventive_injects_at_phase0()
+    test_kb_business_reactive_injects_on_fail()
+    test_kb_business_relevance_gate_filters()
+    test_kb_business_verify_id_patterns()
+    test_kb_business_separate_from_lessons()
+
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
         for name, detail in failed:
@@ -1071,8 +1095,794 @@ def test_manifest_reconcile():
         shutil.rmtree(workdir_rc, ignore_errors=True)
 
 
+# ===== KB 经验库自证（自我进化·机制与模型无关·13 项）=====
+# 铁律守护：无 KB 文件 → 完全 no-op → 与基线逐字节一致；KB 影响一律软上下文，非硬门。
+# 信任门：endorsed 或 occ≥3；相关性门：surface≥2 或标题命中（预防）/ 失败文本命中≥1 或 REQ 命中≥2（反应）。
+
+def _kb_path_of(workdir):
+    return os.path.join(workdir, "case-design-out", "KB_lessons.md")
+
+
+def _kb_business_path_of(workdir):
+    return os.path.join(workdir, "case-design-out", "KB_business.md")
+
+
+def _kb_seed(workdir, records):
+    """直接落盘 KB_lessons.md（绕过 upsert 指纹，精确控制 id/status/phase/occ）。"""
+    import kb_store
+    kb_store._save_records(_kb_path_of(workdir), records)
+
+
+def _kb_seed_business(workdir, records):
+    """直接落盘 KB_business.md（business 文件，横幅随 records kind 推断）。"""
+    import kb_store
+    kb_store._save_records(_kb_business_path_of(workdir), records)
+
+
+def _kb_rec(rid, phase, dim, status, occ, trigger, raw_text,
+            source_req="kb-seed", module="", superseded_by=None):
+    """构造一条完整 KB 记录 dict（字段与 kb_store._DEFAULT_REC 对齐）。"""
+    return {
+        "kind": "lesson", "id": rid, "phase": str(phase), "dimension": dim,
+        "error_type": "人工纠正", "module": module, "source_req": source_req,
+        "source_reqs": [source_req], "captured": "2026-08-09",
+        "supersedes": [], "superseded_by": list(superseded_by or []),
+        "occurrences": occ, "status": status, "trigger": list(trigger),
+        "raw_text": raw_text, "variants": [],
+    }
+
+
+def _kb_biz_rec(rid, dim, status, occ, trigger, raw_text,
+                source_req="kb-biz", module="订单", superseded_by=None):
+    """构造一条 business KB 记录 dict（kind=business，phase=14，error_type=业务知识）。
+    结构键=(module,dimension)；指纹前缀 KB-business-。"""
+    return {
+        "kind": "business", "id": rid, "phase": "14", "dimension": dim,
+        "error_type": "业务知识", "module": module, "source_req": source_req,
+        "source_reqs": [source_req], "captured": "2026-08-09",
+        "supersedes": [], "superseded_by": list(superseded_by or []),
+        "occurrences": occ, "status": status, "trigger": list(trigger),
+        "raw_text": raw_text, "variants": [],
+    }
+
+
+def _kb_state(workdir, rid, name=None):
+    """构造最小 state 供 KB 检索 helper（workdir + req_id）。"""
+    return {"workdir": workdir, "req_id": rid, "name": name or rid}
+
+
+def _seed_state(workdir, rid, current_phase, completed):
+    """直接落分区 state.json（跳过昂贵推进），供 KB fail/patch 测试构造前置态。
+
+    KB 测试聚焦经验库机制，不需真实跑完 Phase 0-7；直接落一个合法 schema=3
+    状态使 `fail --to <N>` / `patch --to <N>` 的目标<当前阶段合法。
+    """
+    sp = _STATE.default_state_path(workdir, WORKFLOW, rid)
+    os.makedirs(os.path.dirname(sp), exist_ok=True)
+    st = _STATE.new_state(WORKFLOW, rid, workdir)
+    st["current_phase"] = current_phase
+    st["completed"] = list(completed)
+    st["depth"] = "heavy"
+    st["run_mode"] = "full"
+    st["input_kind"] = "requirement"
+    _STATE.save(sp, st)
+    return sp
+
+
+def _kb_req_file(workdir, rid, text):
+    """落 case-design-out/REQ_<id>.md，供 surface 命中（镜像 runtime _read_req_text）。"""
+    w(workdir, os.path.join("case-design-out", "REQ_%s.md" % rid), text)
+
+
+# 并发幂等类的 REQ 正文（含真实 surface 词，使 _prior_kb_block 相关性门可达 surface≥2）
+_KB_REQ_CONCURRENCY = """# %s
+
+## 订单创建
+
+用户提交订单，系统并发扣减库存，重复提交需幂等。状态置为待支付。
+"""
+
+
+def test_kb_noop_preserves_baseline():
+    """无 KB_lessons.md → 预防式/反应式均返 ''（no-op，护基线 150/0 逐字节一致）。"""
+    print("\n[kb] 无 KB 文件 → 双链路 no-op（护基线 150/0）")
+    import qamaster_runtime as rt
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-noop-")
+    try:
+        phase = spec.get_phase(5)
+        st = _kb_state(workdir, "noop-req")
+        check("无 KB 文件 → 预防式返回空串",
+              rt._prior_kb_block(st, phase, spec) == "", "应 no-op")
+        check("无 KB 文件 → 反应式返回空串",
+              rt._relevant_lessons_on_fail(st, phase, "并发超卖", spec) == "", "应 no-op")
+        # 反应式对空 fail_context 也应 no-op
+        check("无 KB 文件 → 反应式空 context 返回空串",
+              rt._relevant_lessons_on_fail(st, phase, "", spec) == "", "应 no-op")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_autocapture_silent_draft_not_injected():
+    """fail --reason：KB 出现 draft(occ=1)，stdout 无捕获噪声，预防式/反应式都不注入。"""
+    print("\n[kb] 自动捕获静默 draft(occ=1) 不注入（护既有 substring 断言）")
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-capture-")
+    try:
+        import qamaster_runtime as rt
+        from case_design import spec as _cd_spec
+        spec = _cd_spec()
+        rid = "并发需求-20260809"
+        _seed_state(workdir, rid, 7, [0, 1, 2, 3, 4, 5, 6])
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        # fail --to 5 --reason 含并发 surface 词（确保捕获后 dim=并发幂等）
+        reason = "漏标并发超卖 P0，因为下单重复提交必须覆盖幂等"
+        r = run(workdir, "fail", "--to", "5", "--reason", reason, req_id=rid, expect_rc=0)
+        kb_p = _kb_path_of(workdir)
+        check("fail 后 KB_lessons.md 被创建", os.path.isfile(kb_p), "KB 文件应自动沉淀")
+        import kb_store
+        recs = kb_store.load_records(kb_p)
+        check("KB 沉淀一条 draft 记录", len(recs) == 1 and recs[0]["status"] == "draft",
+              "recs=%s" % [(x.get("status"), x.get("occurrences")) for x in recs])
+        check("draft 记录 occ=1", recs[0].get("occurrences") == 1, "occ=%s" % recs[0].get("occurrences"))
+        check("捕获静默（stdout 无经验沉淀 WARN/噪声）",
+              "经验沉淀" not in r.stdout and "KB ADD" not in r.stdout,
+              "stdout 含捕获噪声: %s" % r.stdout[:300])
+        check("捕获 reason verbatim 落 raw_text",
+              recs[0].get("raw_text") == reason, "raw=%s" % recs[0].get("raw_text"))
+        # 落 draft/occ=1 → 双链路都不注入（信任门）
+        st = _kb_state(workdir, rid)
+        phase5 = spec.get_phase(5)
+        check("draft/occ=1 → 预防式不注入",
+              rt._prior_kb_block(st, phase5, spec) == "", "应不过信任门")
+        check("draft/occ=1 → 反应式不注入",
+              rt._relevant_lessons_on_fail(st, phase5, reason, spec) == "", "应不过信任门")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_surface_map_via_subprocess():
+    """verify_cases.py --dump-surface-map 合法 JSON、5 类齐全；get_surface_map memoize。"""
+    print("\n[kb] surface map 经子进程取（单一真源零漂移 + memoize）")
+    import kb_store
+    script = os.path.join(SKILL_SCRIPTS, "verify_cases.py")
+    proc = subprocess.run([sys.executable, script, "--dump-surface-map"],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=30)
+    check("--dump-surface-map 退出码 0", proc.returncode == 0, "rc=%d" % proc.returncode)
+    m = json.loads(proc.stdout)
+    expected = {"状态机流转", "权限与敏感数据", "异常处理", "上下游依赖", "并发幂等"}
+    check("surface map 含 5 类齐全", set(m.keys()) == expected,
+          "keys=%s" % set(m.keys()))
+    check("并发幂等类非空", len(m.get("并发幂等", [])) > 0, "并发幂等=%s" % m.get("并发幂等"))
+    # get_surface_map 走子进程并 memoize（同 skill_dir 第二次命中缓存）
+    import qamaster_runtime as rt
+    skill_dir = os.path.join(rt.PLUGIN_ROOT, "skills", "case-design")
+    m1 = kb_store.get_surface_map(skill_dir)
+    check("get_surface_map 返回 5 类", set(m1.keys()) == expected, "keys=%s" % set(m1.keys()))
+    # 清缓存后再调一次，确认稳定
+    kb_store._surf_cache.pop(skill_dir, None)
+    m2 = kb_store.get_surface_map(skill_dir)
+    check("get_surface_map 重复调用一致", m1 == m2, "两次结果不一致")
+
+
+def test_kb_dim_trigger_union():
+    """REQ+reason 含并发 surface 词：dim=并发幂等，trigger=各类命中并集。"""
+    print("\n[kb] 维度/触发词派生（dim=命中最多类，trigger=全类并集）")
+    import qamaster_runtime as rt
+    import kb_store
+    skill_dir = os.path.join(rt.PLUGIN_ROOT, "skills", "case-design")
+    surfmap = kb_store.get_surface_map(skill_dir)
+    req_text = "用户提交订单，系统并发扣减库存，重复提交需幂等。"
+    reason = "漏标并发超卖 P0，因为重复提交必须覆盖幂等"
+    dim, trigger = rt._derive_dim_trigger(req_text, reason, surfmap)
+    check("dim=并发幂等", dim == "并发幂等", "dim=%s" % dim)
+    # 并发/幂等/重复提交 至少在 trigger 并集
+    check("trigger 并集含并发", "并发" in trigger, "trigger=%s" % trigger)
+    check("trigger 并集含幂等", "幂等" in trigger, "trigger=%s" % trigger)
+    check("trigger 并集含重复提交", "重复提交" in trigger, "trigger=%s" % trigger)
+    # 无任何命中 → 通用 + 空 trigger
+    dim2, trig2 = rt._derive_dim_trigger("完全无关的普通文案", "", surfmap)
+    check("无命中 → dim=通用", dim2 == "通用", "dim=%s" % dim2)
+    check("无命中 → trigger=空", trig2 == [], "trig=%s" % trig2)
+
+
+def test_kb_fingerprint_coarse_recurrence():
+    """同(phase,dim)不同 source_req 两次：一条 occ=2、variants 两条、trigger 并集。"""
+    print("\n[kb] 指纹去重（同(phase,dim)跨需求 occ 累积 + trigger 并集）")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-fp-")
+    try:
+        kb_p = _kb_path_of(workdir)
+        base = {"kind": "lesson", "phase": "5", "dimension": "并发幂等",
+                "error_type": "人工纠正", "module": "", "captured": "2026-08-09",
+                "status": "draft", "occurrences": 1, "raw_text": ""}
+        r1 = dict(base, source_req="订单A-20260809", raw_text="漏标并发超卖",
+                  trigger=["并发", "重复提交", "幂等"])
+        r2 = dict(base, source_req="秒杀B-20260809", raw_text="秒杀场景漏幂等",
+                  trigger=["并发", "重复扣减", "幂等"])
+        kb_store.upsert_lesson(kb_p, r1)
+        kb_store.upsert_lesson(kb_p, r2)
+        recs = kb_store.load_records(kb_p)
+        check("去重后仅一条记录", len(recs) == 1, "len=%d" % len(recs))
+        rec = recs[0]
+        # 预期指纹 = KB-lesson- + sha1("5|并发幂等")[:12]
+        expect_id = kb_store.fingerprint({"phase": "5", "dimension": "并发幂等"})
+        check("id=指纹(phase,dim)", rec["id"] == expect_id, "id=%s expect=%s" % (rec["id"], expect_id))
+        check("occ=2（跨需求累积）", rec["occurrences"] == 2, "occ=%s" % rec["occurrences"])
+        check("source_reqs 含两需求",
+              set(rec["source_reqs"]) == {"订单A-20260809", "秒杀B-20260809"},
+              "reqs=%s" % rec["source_reqs"])
+        check("trigger=并集", set(rec["trigger"]) == {"并发", "重复提交", "幂等", "重复扣减"},
+              "trigger=%s" % rec["trigger"])
+        check("variants 累积两条", len(rec["variants"]) == 2, "variants=%s" % rec["variants"])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_preventive_dual_gate():
+    """4 条种子：endorsed+surface≥2 / draft occ=1+surface≥2[不注入] / 错阶段 / 被废止。仅 endorsed 注入。"""
+    print("\n[kb] 预防式双门（相关+信任）：仅 endorsed 那条注入")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-prev-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        fp_endorsed = kb_store.fingerprint({"phase": "5", "dimension": "并发幂等"})
+        fp_draft = kb_store.fingerprint({"phase": "5", "dimension": "异常处理"})
+        fp_wrongphase = kb_store.fingerprint({"phase": "7", "dimension": "并发幂等"})
+        fp_superseded = kb_store.fingerprint({"phase": "5", "dimension": "上下游依赖"})
+        fp_new = kb_store.fingerprint({"phase": "5", "dimension": "权限与敏感数据"})
+        recs = [
+            _kb_rec(fp_endorsed, 5, "并发幂等", "endorsed", 1,
+                    ["并发", "幂等", "重复提交"], "endorsed 并发经验", source_req="A"),
+            _kb_rec(fp_draft, 5, "异常处理", "draft", 1,
+                    ["并发", "幂等", "重复提交", "参数非法"], "draft 异常类 occ=1", source_req="A"),
+            _kb_rec(fp_wrongphase, 7, "并发幂等", "endorsed", 1,
+                    ["并发", "幂等"], "endorsed 但错阶段", source_req="A"),
+            _kb_rec(fp_superseded, 5, "上下游依赖", "endorsed", 1,
+                    ["上游", "失败", "重试"], "endorsed 但被废止", source_req="A",
+                    superseded_by=[fp_new]),
+        ]
+        _kb_seed(workdir, recs)
+        st = _kb_state(workdir, rid)
+        phase5 = spec.get_phase(5)
+        block = rt._prior_kb_block(st, phase5, spec)
+        check("预防式注入非空", bool(block), "应注入 endorsed 那条")
+        check("注入含 endorsed 并发经验原文", "endorsed 并发经验" in block, block)
+        check("注入标签 PRIOR_LESSONS", "##PRIOR_LESSONS##" in block, block)
+        check("draft/occ=1 不注入（异常类）", "draft 异常类 occ=1" not in block, "信任门失效")
+        check("错阶段不注入", "endorsed 但错阶段" not in block, "阶段门失效")
+        check("被废止不注入", "endorsed 但被废止" not in block, "废止门失效")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_reactive_failure_targeted():
+    """endorsed Phase-5 并发经验：fail_detail 含触发词 → 注入；不含 → ''。"""
+    print("\n[kb] 反应式失败定向（失败文本命中=强信号）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-react-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        fp = kb_store.fingerprint({"phase": "5", "dimension": "并发幂等"})
+        _kb_seed(workdir, [_kb_rec(fp, 5, "并发幂等", "endorsed", 1,
+                                   ["并发", "幂等", "重复提交", "重复扣减"],
+                                   "并发超卖必须覆盖幂等", source_req="A")])
+        st = _kb_state(workdir, rid)
+        phase5 = spec.get_phase(5)
+        # 失败文本含触发词 → 注入
+        hit = rt._relevant_lessons_on_fail(st, phase5, "并发扣减导致重复提交超卖", spec)
+        check("失败文本命中 → 反应式注入", bool(hit), "应注入")
+        check("反应式标签 RELEVANT_LESSONS", "##RELEVANT_LESSONS##" in hit, hit)
+        check("反应式含经验原文", "并发超卖必须覆盖幂等" in hit, hit)
+        check("反应式含修正页脚", "请据此修正" in hit, hit)
+        # 失败文本不含触发词、且 REQ 也不含触发词 → ''（hit_fail=0 且 hit_req<2）
+        rid2 = "界面需求-20260809"
+        _kb_req_file(workdir, rid2, "# %s\n\n## 界面布局\n\n按钮对齐与配色规范\n" % rid2)
+        st2 = _kb_state(workdir, rid2)
+        miss = rt._relevant_lessons_on_fail(st2, phase5, "界面按钮样式不对齐", spec)
+        check("失败文本无命中 → 不注入", miss == "", "应 no-op: %s" % miss)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_reactive_respects_trust_gate():
+    """draft/occ=1：反应式不注入（信任门）。"""
+    print("\n[kb] 反应式尊重信任门（draft/occ=1 不注入）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-trust-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        fp = kb_store.fingerprint({"phase": "5", "dimension": "并发幂等"})
+        _kb_seed(workdir, [_kb_rec(fp, 5, "并发幂等", "draft", 1,
+                                   ["并发", "幂等", "重复提交"],
+                                   "draft 并发经验 occ=1", source_req="A")])
+        st = _kb_state(workdir, rid)
+        phase5 = spec.get_phase(5)
+        block = rt._relevant_lessons_on_fail(st, phase5, "并发重复提交超卖", spec)
+        check("draft/occ=1 反应式不注入", block == "", "信任门失效: %s" % block)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_endorse_and_supersede():
+    """draft→endorsed：预防/反应均注入；supersede 后均消失。"""
+    print("\n[kb] endorse 注入 + supersede 失效")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-endorse-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        fp_old = kb_store.fingerprint({"phase": "5", "dimension": "并发幂等"})
+        fp_new = kb_store.fingerprint({"phase": "5", "dimension": "异常处理"})
+        _kb_seed(workdir, [_kb_rec(fp_old, 5, "并发幂等", "draft", 1,
+                                   ["并发", "幂等", "重复提交"],
+                                   "draft 待背书并发经验", source_req="A")])
+        # endorse（走 kb 命令，验证整链路）
+        run(workdir, "kb", "endorse", "--id", fp_old, req_id=rid, expect_rc=0)
+        st = _kb_state(workdir, rid)
+        phase5 = spec.get_phase(5)
+        prior = rt._prior_kb_block(st, phase5, spec)
+        check("endorse 后预防式注入", "draft 待背书并发经验" in prior, prior)
+        react = rt._relevant_lessons_on_fail(st, phase5, "并发重复提交", spec)
+        check("endorse 后反应式注入", "draft 待背书并发经验" in react, react)
+        # supersede：老被新取代 → 两链路都不再注入老经验
+        _kb_seed(workdir, [_kb_rec(fp_old, 5, "并发幂等", "endorsed", 1,
+                                   ["并发", "幂等", "重复提交"],
+                                   "draft 待背书并发经验", source_req="A",
+                                   superseded_by=[fp_new]),
+                            _kb_rec(fp_new, 5, "异常处理", "endorsed", 1,
+                                    ["参数非法", "并发"], "新异常类经验", source_req="A")])
+        prior2 = rt._prior_kb_block(st, phase5, spec)
+        check("supersede 后老经验预防式不注入",
+              "draft 待背书并发经验" not in prior2, "废止失效: %s" % prior2)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_threshold_recurrence_injected():
+    """draft occ≥3 后预防/反应均注入（无需背书，跨需求置信门）。"""
+    print("\n[kb] occ≥3 阈值门（无需背书即可注入）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-thresh-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        fp = kb_store.fingerprint({"phase": "5", "dimension": "并发幂等"})
+        # occ=3 但仍 draft（三个不同 source_req 累积）
+        rec = _kb_rec(fp, 5, "并发幂等", "draft", 3,
+                      ["并发", "幂等", "重复提交"],
+                      "draft occ=3 跨需求并发经验", source_req="A")
+        rec["source_reqs"] = ["A", "B", "C"]
+        _kb_seed(workdir, [rec])
+        st = _kb_state(workdir, rid)
+        phase5 = spec.get_phase(5)
+        prior = rt._prior_kb_block(st, phase5, spec)
+        check("occ≥3 draft 预防式注入（无需背书）",
+              "draft occ=3 跨需求并发经验" in prior, prior)
+        react = rt._relevant_lessons_on_fail(st, phase5, "并发重复提交超卖", spec)
+        check("occ≥3 draft 反应式注入（无需背书）",
+              "draft occ=3 跨需求并发经验" in react, react)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_concurrent_add():
+    """12 线程并发捕获：FileLock 串行、无损坏、去重正确。镜像 test_manifest_concurrent_update。"""
+    print("\n[kb] 并发捕获（FileLock 串行化，无损坏无丢条）")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-conc-")
+    try:
+        kb_p = _kb_path_of(workdir)
+        os.makedirs(os.path.dirname(kb_p), exist_ok=True)
+        errors = []
+        base_rec = {"kind": "lesson", "phase": "5", "dimension": "并发幂等",
+                    "error_type": "人工纠正", "module": "", "captured": "2026-08-09",
+                    "status": "draft", "occurrences": 1, "raw_text": "",
+                    "trigger": ["并发", "幂等", "重复提交"]}
+        # 6 个不同 source_req × 2 = 12 次并发 upsert，全部同指纹 → 应合并成 1 条 occ=6
+        reqs = ["并发A-%d" % i for i in range(6)] + ["秒杀B-%d" % i for i in range(6)]
+
+        def worker(rid):
+            try:
+                rec = dict(base_rec, source_req=rid, raw_text="并发超卖 from %s" % rid)
+                with locking.FileLock(kb_p, timeout=30):
+                    kb_store.upsert_lesson(kb_p, rec)
+            except Exception as e:  # noqa
+                errors.append("%s: %s" % (rid, e))
+
+        import locking
+        threads = [threading.Thread(target=worker, args=(rid,)) for rid in reqs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        check("并发捕获无异常", not errors, str(errors[:3]))
+        recs = kb_store.load_records(kb_p)
+        check("并发后仅一条记录（指纹去重）", len(recs) == 1, "len=%d" % len(recs))
+        rec = recs[0]
+        check("occ=12（12 个不同 source_req 累积）",
+              rec["occurrences"] == 12, "occ=%s" % rec["occurrences"])
+        check("source_reqs 含全部 12 需求",
+              len(rec["source_reqs"]) == 12, "reqs=%d" % len(rec["source_reqs"]))
+        check("variants 累积 12 条", len(rec["variants"]) == 12,
+              "variants=%d" % len(rec["variants"]))
+        check("trigger 并集稳定",
+              set(rec["trigger"]) == {"并发", "幂等", "重复提交"}, "trigger=%s" % rec["trigger"])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_distill_replays_history():
+    """经 fail/patch/gate_fail 后 kb distill：stdout 含全部 reason（含 gate_fail，零模型）。"""
+    print("\n[kb] distill 回放纠正历史（含 gate_fail，零模型）")
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-distill-")
+    try:
+        rid = "回放需求-20260809"
+        _seed_state(workdir, rid, 7, [0, 1, 2, 3, 4, 5, 6])
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        # fail（落 rollback）
+        run(workdir, "fail", "--to", "5", "--reason", "fail原因:并发超卖",
+            req_id=rid, expect_rc=0)
+        # 推进 current_phase 到 7（fail 已设到 5，需 next 回到 7 供 patch）
+        # 直接重置 state：patch --to 5 需 current_phase>5
+        sp = _STATE.default_state_path(workdir, WORKFLOW, rid)
+        st = _STATE.load(sp)
+        st["current_phase"] = 7
+        st["completed"] = [0, 1, 2, 3, 4, 5, 6]
+        _STATE.save(sp, st)
+        # patch（落 patch 指令）
+        run(workdir, "patch", "--to", "5", "--reason", "patch原因:幂等漏标",
+            req_id=rid, expect_rc=0)
+        # 手工注入一条 gate_fail 历史（runtime gate_fail 写 history.detail=fail_detail）
+        st = _STATE.load(sp)
+        _STATE.log_event(st, "gate_fail", phase=7, detail="gate_fail原因:覆盖不全")
+        _STATE.save(sp, st)
+        # distill 回放
+        r = run(workdir, "kb", "distill", "--req-id", rid, req_id=rid, expect_rc=0)
+        check("distill 含 fail 原因", "fail原因:并发超卖" in r.stdout, r.stdout[-600:])
+        check("distill 含 patch 原因", "patch原因:幂等漏标" in r.stdout, r.stdout[-600:])
+        check("distill 含 gate_fail 原因", "gate_fail原因:覆盖不全" in r.stdout, r.stdout[-600:])
+        check("distill 标注零模型", "零模型" in r.stdout, r.stdout[-600:])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_capture_never_blocks_correction():
+    """KB 文件锁占用时 fail 仍成功（best-effort，仅 WARN 不阻断）。"""
+    print("\n[kb] 捕获不阻断纠正（锁占用 → WARN，fail 仍成功）")
+    import locking
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-block-")
+    try:
+        rid = "不阻断需求-20260809"
+        _seed_state(workdir, rid, 7, [0, 1, 2, 3, 4, 5, 6])
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        kb_p = _kb_path_of(workdir)
+        os.makedirs(os.path.dirname(kb_p), exist_ok=True)
+        # 预创建 KB 文件并长期持锁（30s 内不释放）
+        with open(kb_p, "w", encoding="utf-8") as f:
+            f.write("# 占位")
+        held = {"ok": False}
+
+        def hold():
+            try:
+                with locking.FileLock(kb_p, timeout=30):
+                    held["ok"] = True
+                    time.sleep(8)  # 占住锁
+            except Exception:
+                pass
+
+        import time
+        t = threading.Thread(target=hold)
+        t.start()
+        # 等待持锁
+        for _ in range(50):
+            if held["ok"]:
+                break
+            time.sleep(0.05)
+        # fail 在锁占用下仍应 rc=0（best-effort 捕获，不阻断纠正）
+        r = run(workdir, "fail", "--to", "5", "--reason", "并发重复提交超卖",
+                req_id=rid, expect_rc=0)
+        check("锁占用下 fail 仍成功（rc=0）", r.returncode == 0, "rc=%d" % r.returncode)
+        check("fail 仍输出 ROLLBACK", "ROLLBACK" in r.stdout, r.stdout[:300])
+        t.join(timeout=15)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def P_gate_of(st):
     return _RT_PHASES.get_phase(st["current_phase"])["gate"]
+
+
+# =============================================================================
+# MVP2b 业务历史知识库（business KB）· 7 项自证
+# 约束：No-op 基线（无 Knowledge/无 KB_business.md → 注入返 ''，护 206/0）/ 纯软上下文
+# （永不硬门）/ 单一真源零漂移（trigger 复用 surface map）/ 复用不 fork（kind=business
+# 共享 kb_store parse/serialize/upsert/fingerprint/retrieve）/ 模型禁写 / 零 schema/门变更。
+# =============================================================================
+
+def test_kb_business_noop():
+    """无 Knowledge 文件/无 KB_business.md → 预防式(Phase 0)/反应式均返 ''（no-op，护 206/0）。"""
+    print("\n[kb-biz] 无 Knowledge/无 KB_business → 双链路 no-op（护 206/0 逐字节一致）")
+    import qamaster_runtime as rt
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbbiz-noop-")
+    try:
+        phase0 = spec.get_phase(0)
+        phase5 = spec.get_phase(5)
+        st = _kb_state(workdir, "biz-noop-req")
+        check("无 KB_business → 预防式(Phase 0)返回空串",
+              rt._prior_business_kb_block(st, phase0, spec) == "", "应 no-op")
+        check("无 KB_business → 反应式返回空串",
+              rt._relevant_business_kb_on_fail(st, phase5, "并发超卖", spec) == "", "应 no-op")
+        check("无 KB_business → 反应式空 context 返回空串",
+              rt._relevant_business_kb_on_fail(st, phase5, "", spec) == "", "应 no-op")
+        # 无 Knowledge 文件 → reconcile 为 no-op（返回 ok=False，count=0，不落 KB_business.md）
+        r = run(workdir, "kb", "reconcile", "--kind", "business", req_id="biz-noop-req")
+        check("无 Knowledge 文件 → reconcile no-op（count=0）",
+              "business 记录 0 条" in r.stdout, r.stdout[:300])
+        check("reconcile no-op 不创建 KB_business.md",
+              not os.path.isfile(_kb_business_path_of(workdir)), "不应落盘")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_business_reconcile_indexes():
+    """种 Knowledge_<rid>.md → kb reconcile --kind business → KB_business.md 落盘；
+    记录 kind=business/status=endorsed/module=元数据"更新模块"/dimension=Knowledge 维度标题/
+    id 形如 KB-business-<12hex>。"""
+    print("\n[kb-biz] reconcile 聚合 Knowledge_*.md → KB_business.md（只索引不生成）")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbbiz-reconcile-")
+    try:
+        rid = "自证需求"
+        # 落盘 KNOWLEDGE_MD fixture（元数据"更新模块：订单"，含并发扣减库存维度文本）
+        w(workdir, os.path.join("case-design-out", "Knowledge_%s.md" % rid), KNOWLEDGE_MD)
+        r = run(workdir, "kb", "reconcile", "--kind", "business", req_id="biz-rec", expect_rc=0)
+        check("reconcile rc=0", r.returncode == 0, "rc=%d" % r.returncode)
+        check("reconcile 输出 OK + 计数",
+              "KB RECONCILE: OK" in r.stdout and "business 记录" in r.stdout, r.stdout[:300])
+        bp = _kb_business_path_of(workdir)
+        check("KB_business.md 被创建", os.path.isfile(bp), "应落盘")
+        recs = kb_store.load_records(bp)
+        check("reconcile 产出多条 business 记录", len(recs) >= 5, "recs=%d" % len(recs))
+        # 跳过"本需求不涉及"的维度（权限模型/配置项 fixture 标注）-> 业务流程/异常处理等应入
+        dims = {x.get("dimension") for x in recs}
+        check("含业务流程维度", "业务流程" in dims, "dims=%s" % dims)
+        check("含异常处理维度", "异常处理" in dims, "dims=%s" % dims)
+        check("跳过'本需求不涉及'维度（权限模型）", "权限模型" not in dims, "应跳过")
+        # 全量结构断言
+        for x in recs:
+            check("记录 kind=business", x.get("kind") == "business", "kind=%s" % x.get("kind"))
+            check("记录 status=endorsed", x.get("status") == "endorsed", "status=%s" % x.get("status"))
+            check("记录 module=元数据'更新模块'(订单)", x.get("module") == "订单", "module=%s" % x.get("module"))
+            check("id 形如 KB-business-<12hex>", x.get("id", "").startswith("KB-business-")
+                  and len(x.get("id", "")) == len("KB-business-") + 12, "id=%s" % x.get("id"))
+        # verify_kb 结构校验通过
+        vkb = os.path.join(SKILL_SCRIPTS, "verify_kb.py")
+        proc = subprocess.run([sys.executable, vkb, bp], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+        check("verify_kb 对 KB_business.md 退出码 0", proc.returncode == 0,
+              "rc=%d\n%s" % (proc.returncode, proc.stdout[-400:]))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_business_preventive_injects_at_phase0():
+    """endorsed business 记录(trigger 含并发/库存扣减) + REQ 含同词 → Phase 0 预防式注入
+    ##PRIOR_BUSINESS_KB##；helper phase 无关(任何阶段返同一块)；trigger 零重叠的 REQ → ''。
+    _card 仅在 Phase 0 注入 PRIOR_BUSINESS_KB（开工前一次性业务背景）。"""
+    print("\n[kb-biz] 预防式业务知识注入（Phase 0；相关性门；_card 仅 Phase 0）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbbiz-prev-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        fp = kb_store.fingerprint({"kind": "business", "module": "订单", "dimension": "异常处理"})
+        _kb_seed_business(workdir, [_kb_biz_rec(
+            fp, "异常处理", "endorsed", 1, ["并发", "幂等", "重复提交", "库存扣减"],
+            "下单扣库存须覆盖并发重复提交幂等", source_req="A", module="订单")])
+        st = _kb_state(workdir, rid)
+        phase0 = spec.get_phase(0)
+        phase5 = spec.get_phase(5)
+        block0 = rt._prior_business_kb_block(st, phase0, spec)
+        check("Phase 0 预防式注入非空", bool(block0), "应注入 endorsed 那条")
+        check("注入标签 PRIOR_BUSINESS_KB", "##PRIOR_BUSINESS_KB##" in block0, block0)
+        check("注入含业务知识原文", "下单扣库存须覆盖并发重复提交幂等" in block0, block0)
+        check("注入含'参考而非硬约束'（纯软上下文）", "参考而非硬约束" in block0, block0)
+        # helper phase 无关：Phase 5 同样返回该块（gating 在 _card，非 helper）
+        block5 = rt._prior_business_kb_block(st, phase5, spec)
+        check("business helper phase 无关（Phase 5 同样命中）",
+              "##PRIOR_BUSINESS_KB##" in block5, "应不受 phase 过滤")
+        # _card 仅 Phase 0 注入 PRIOR_BUSINESS_KB
+        st_card = {"workdir": workdir, "req_id": rid, "depth": "heavy", "run_mode": "full"}
+        card0 = rt._card(st_card, phase0, spec)
+        check("_card Phase 0 含 PRIOR_BUSINESS_KB", "PRIOR_BUSINESS_KB" in card0, "Phase 0 应注入")
+        card5 = rt._card(st_card, phase5, spec)
+        check("_card 非 Phase 0 不含 PRIOR_BUSINESS_KB",
+              "PRIOR_BUSINESS_KB" not in card5, "仅 Phase 0 注入: %s" % card5[-300:])
+        # 相关性门：trigger 零重叠的 REQ → ''
+        rid2 = "界面需求-20260809"
+        _kb_req_file(workdir, rid2, "# %s\n\n## 界面布局\n\n按钮对齐与配色规范\n" % rid2)
+        st2 = _kb_state(workdir, rid2)
+        miss = rt._prior_business_kb_block(st2, phase0, spec)
+        check("trigger 零重叠 → 预防式不注入", miss == "", "相关性门失效: %s" % miss)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_business_reactive_injects_on_fail():
+    """endorsed business 记录 + gate_fail fail_detail 含触发词 → 反应式注入 ##RELEVANT_BUSINESS_KB##；
+    fail_detail 无命中且 REQ 无命中 → ''。"""
+    print("\n[kb-biz] 反应式业务知识定向（失败文本命中=强信号）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbbiz-react-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        fp = kb_store.fingerprint({"kind": "business", "module": "订单", "dimension": "异常处理"})
+        _kb_seed_business(workdir, [_kb_biz_rec(
+            fp, "异常处理", "endorsed", 1, ["并发", "幂等", "重复提交", "库存扣减", "超卖"],
+            "并发超卖须覆盖幂等扣减", source_req="A", module="订单")])
+        st = _kb_state(workdir, rid)
+        phase5 = spec.get_phase(5)
+        # 失败文本含触发词 → 注入
+        hit = rt._relevant_business_kb_on_fail(st, phase5, "并发扣减导致重复提交超卖", spec)
+        check("失败文本命中 → 反应式注入", bool(hit), "应注入")
+        check("反应式标签 RELEVANT_BUSINESS_KB", "##RELEVANT_BUSINESS_KB##" in hit, hit)
+        check("反应式含业务知识原文", "并发超卖须覆盖幂等扣减" in hit, hit)
+        check("反应式含参考页脚", "参考而非硬约束" in hit, hit)
+        # 失败文本不含触发词、REQ 也不含触发词 → ''
+        rid2 = "界面需求-20260809"
+        _kb_req_file(workdir, rid2, "# %s\n\n## 界面布局\n\n按钮对齐与配色规范\n" % rid2)
+        st2 = _kb_state(workdir, rid2)
+        miss = rt._relevant_business_kb_on_fail(st2, phase5, "界面按钮样式不对齐", spec)
+        check("失败文本无命中 → 反应式不注入", miss == "", "应 no-op: %s" % miss)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_business_relevance_gate_filters():
+    """business 记录 endorsed（信任门恒过）但 trigger 与 REQ 零重叠 → 预防+反应均不注入。
+    证明：信任过 ≠ 注入；相关性门是真正过滤器（business 信任模型下尤其关键）。"""
+    print("\n[kb-biz] 相关性门过滤（endorsed 信任恒过但 trigger 零重叠 → 不注入）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbbiz-relgate-")
+    try:
+        rid = "界面需求-20260809"
+        _kb_req_file(workdir, rid, "# %s\n\n## 界面布局\n\n按钮对齐与配色规范\n" % rid)
+        fp = kb_store.fingerprint({"kind": "business", "module": "订单", "dimension": "异常处理"})
+        _kb_seed_business(workdir, [_kb_biz_rec(
+            fp, "异常处理", "endorsed", 5, ["并发", "幂等", "库存扣减", "超卖"],  # 信任门过(occ=5)
+            "并发超卖业务知识（trigger 与本需求零重叠）", source_req="A", module="订单")])
+        st = _kb_state(workdir, rid)
+        phase0 = spec.get_phase(0)
+        phase5 = spec.get_phase(5)
+        check("endorsed+occ=5 但零重叠 → 预防式不注入",
+              rt._prior_business_kb_block(st, phase0, spec) == "", "相关性门失效（预防）")
+        check("endorsed+occ=5 但零重叠 → 反应式不注入",
+              rt._relevant_business_kb_on_fail(st, phase5, "按钮配色不对齐", spec) == "",
+              "相关性门失效（反应）")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_business_verify_id_patterns():
+    """verify_kb.py 对 KB-business-<12hex> id 通过；business 文件中 KB-lesson-<12hex> 报错
+    （kind 派发 pattern）；malformed business id 报错。"""
+    print("\n[kb-biz] verify_kb id 模式 kind 派发（business 文件拒 lesson id）")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbbiz-idpat-")
+    try:
+        vkb = os.path.join(SKILL_SCRIPTS, "verify_kb.py")
+        # (1) 合法 business id → 退出码 0
+        fp_ok = kb_store.fingerprint({"kind": "business", "module": "订单", "dimension": "异常处理"})
+        _kb_seed_business(workdir, [_kb_biz_rec(
+            fp_ok, "异常处理", "endorsed", 1, ["并发"], "合法 business 记录",
+            source_req="A", module="订单")])
+        bp = _kb_business_path_of(workdir)
+        proc = subprocess.run([sys.executable, vkb, bp], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+        check("合法 business id → verify_kb 退出码 0", proc.returncode == 0,
+              "rc=%d\n%s" % (proc.returncode, proc.stdout[-300:]))
+        # (2) business 文件中混入 lesson id（kind=business 但 id=KB-lesson-…）→ 报错
+        bad = _kb_biz_rec("KB-lesson-deadbeefdead", "异常处理", "endorsed", 1, ["并发"],
+                          "kind=business 但 id 用了 lesson 前缀", source_req="A", module="订单")
+        _kb_seed_business(workdir, [bad])
+        proc2 = subprocess.run([sys.executable, vkb, bp], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace")
+        check("business 记录用 lesson id → verify_kb 报错", proc2.returncode == 1,
+              "rc=%d（应非0）" % proc2.returncode)
+        check("报错指向 id 不符 KB-business-",
+              "不符 KB-business" in proc2.stdout, proc2.stdout[-300:])
+        # (3) malformed business id → 报错
+        malformed = _kb_biz_rec("KB-business-NOHEX", "异常处理", "endorsed", 1, ["并发"],
+                                "malformed business id", source_req="A", module="订单")
+        _kb_seed_business(workdir, [malformed])
+        proc3 = subprocess.run([sys.executable, vkb, bp], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace")
+        check("malformed business id → verify_kb 报错", proc3.returncode == 1,
+              "rc=%d（应非0）" % proc3.returncode)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_business_separate_from_lessons():
+    """KB_lessons.md + KB_business.md 共存：lessons helper 不读 business 记录、
+    business helper 不读 lessons 记录（kind 隔离，分文件）。"""
+    print("\n[kb-biz] 与 lessons 库分离（kind 隔离，分文件互不污染）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbbiz-sep-")
+    try:
+        rid = "并发需求-20260809"
+        _kb_req_file(workdir, rid, _KB_REQ_CONCURRENCY % rid)
+        # lessons 库：endorsed Phase-5 并发经验
+        fp_lesson = kb_store.fingerprint({"kind": "lesson", "phase": "5", "dimension": "并发幂等"})
+        _kb_seed(workdir, [_kb_rec(fp_lesson, 5, "并发幂等", "endorsed", 1,
+                                   ["并发", "幂等", "重复提交"],
+                                   "LESSONS-ONLY 经验原文", source_req="A")])
+        # business 库：endorsed 业务知识（同 REQ 相关）
+        fp_biz = kb_store.fingerprint({"kind": "business", "module": "订单", "dimension": "异常处理"})
+        _kb_seed_business(workdir, [_kb_biz_rec(
+            fp_biz, "异常处理", "endorsed", 1, ["并发", "幂等", "库存扣减"],
+            "BUSINESS-ONLY 业务知识原文", source_req="A", module="订单")])
+        st = _kb_state(workdir, rid)
+        phase0 = spec.get_phase(0)
+        phase5 = spec.get_phase(5)
+        # lessons helper 只读 KB_lessons.md
+        prior_lesson = rt._prior_kb_block(st, phase5, spec, kind="lesson")
+        check("lessons 预防式含 LESSONS 原文", "LESSONS-ONLY" in prior_lesson, prior_lesson)
+        check("lessons 预防式不含 BUSINESS 原文", "BUSINESS-ONLY" not in prior_lesson,
+              "lessons helper 误读 business: %s" % prior_lesson)
+        react_lesson = rt._relevant_lessons_on_fail(st, phase5, "并发重复提交超卖", spec)
+        check("lessons 反应式不含 BUSINESS 原文", "BUSINESS-ONLY" not in react_lesson,
+              "lessons 反应式误读 business")
+        # business helper 只读 KB_business.md
+        prior_biz = rt._prior_business_kb_block(st, phase0, spec)
+        check("business 预防式含 BUSINESS 原文", "BUSINESS-ONLY" in prior_biz, prior_biz)
+        check("business 预防式不含 LESSONS 原文", "LESSONS-ONLY" not in prior_biz,
+              "business helper 误读 lessons: %s" % prior_biz)
+        react_biz = rt._relevant_business_kb_on_fail(st, phase5, "并发重复提交超卖", spec)
+        check("business 反应式不含 LESSONS 原文", "LESSONS-ONLY" not in react_biz,
+              "business 反应式误读 lessons")
+        # 文件确实分离
+        check("KB_lessons.md 与 KB_business.md 分文件",
+              os.path.isfile(_kb_path_of(workdir)) and os.path.isfile(_kb_business_path_of(workdir))
+              and _kb_path_of(workdir) != _kb_business_path_of(workdir), "文件未分离")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

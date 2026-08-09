@@ -422,8 +422,10 @@
 * `case-design-out/Clarification_Ledger_<需求标识>.md` —— 澄清台账（跨会话保留）
 * `case-design-out/Knowledge_<需求标识>.md` —— 知识总结（审核通过后生成/更新）
 * `case-design-out/REQ_<需求标识>.md` —— 用户提供的原始需求文档（**强制落盘**，第0阶段步骤零落盘，为 #4/#5 反向追溯唯一可靠基准；见 `references/phase0_manifest.md` 步骤零）
+* `case-design-out/KB_lessons.md` —— 自我进化经验库（跨需求共享，Runtime 在 `fail`/`patch` 纠正时自动沉淀 draft、经人工 `kb endorse` 背书后注入 `##PRIOR_LESSONS##`/`##RELEVANT_LESSONS##`；**模型禁止 Write/Edit**，进化机制与模型无关铁律；维护用 `python runtime/qamaster_runtime.py kb <action>`）
+* `case-design-out/KB_business.md` —— 业务历史知识库（跨需求共享，Runtime 经 `kb reconcile --kind business` 聚合各需求 Phase 14 的 `Knowledge_*.md` 元数据+维度文本；**只索引不生成**，聚合/打标/检索/注入全 stdlib；**模型禁止 Write/Edit**，业务知识内容归属人类；Phase 0 预防式注入 `##PRIOR_BUSINESS_KB##`、失败时反应式注入 `##RELEVANT_BUSINESS_KB##`，均为软上下文参考而非硬约束）
 * 用户提供的业务/测试知识库文件
-* **`scripts/` 下的自带可复用脚本（`verify_md.py`、`verify_cases.py`、`verify_knowledge.py`、`project_cases.py`、`gen_excel.py`）为 skill 资产，位于 skill 安装目录、不在 `case-design-out/` 内，禁止删除**（`gen_excel.py` 为 Excel 生成永久脚本，替代旧 ad-hoc 用完即删脚本；仅解析 .md 的中间产物仍属临时文件需清理）
+* **`scripts/` 下的自带可复用脚本（`verify_md.py`、`verify_cases.py`、`verify_knowledge.py`、`verify_kb.py`、`project_cases.py`、`gen_excel.py`）为 skill 资产，位于 skill 安装目录、不在 `case-design-out/` 内，禁止删除**（`gen_excel.py` 为 Excel 生成永久脚本，替代旧 ad-hoc 用完即删脚本；仅解析 .md 的中间产物仍属临时文件需清理）
 
 ## 清理时机（强制）
 * **即时清理**：每个临时文件在"完成其用途后、进入下一步前"立即删除，禁止等到流程末尾批量清理

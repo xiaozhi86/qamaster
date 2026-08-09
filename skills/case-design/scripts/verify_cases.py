@@ -3145,6 +3145,14 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] in ("--dump-rules", "--rules"):
         dump_rules()
         return 0
+    # v0.8.1：--dump-surface-map 导出 _CLARIFY_CATEGORIES 词表（供 kb_store 子进程取，单一真源零漂移）
+    if len(sys.argv) >= 2 and sys.argv[1] == "--dump-surface-map":
+        try:
+            print(json.dumps(_CLARIFY_CATEGORIES, ensure_ascii=False))
+        except Exception as e:
+            print("dump-surface-map 失败: %s" % e, file=sys.stderr)
+            return 1
+        return 0
     # v0.7.0：--phase-gate <N> <checkpoint.md> [--req ..] [--ledger ..]
     if len(sys.argv) >= 2 and sys.argv[1] == "--phase-gate":
         return run_phase_gate(sys.argv[2:])

@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wor
 import state_store  # noqa: E402
 import locking  # noqa: E402
 import manifest  # noqa: E402
+import kb_store  # noqa: E402
 from registry import get_workflow, list_workflows  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -101,6 +102,34 @@ def _checkpoint_path(workdir, spec, req_id, phase):
 
 def _manifest_path(workdir, spec):
     return os.path.join(workdir, spec.output_dir, "MANIFEST.md")
+
+
+def _kb_path(workdir, spec, kind="lessons"):
+    """KB 文件路径（镜像 _manifest_path）。kind=lessons -> KB_lessons.md。
+
+    与 MANIFEST.md 同目录、同纪律：仅 Runtime 在 FileLock 下写，模型禁止 Write/Edit。
+    """
+    name = "KB_%s.md" % kind
+    return os.path.join(workdir, spec.output_dir, name)
+
+
+def _read_req_text(workdir, spec, req_id):
+    """读取 case-design-out/REQ_<id>.md 正文（供 surface 命中）。失败返回 ""。"""
+    if not req_id:
+        return ""
+    p = os.path.join(workdir, spec.output_dir, "REQ_%s.md" % req_id)
+    if not os.path.isfile(p):
+        return ""
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _manifest_name(st):
+    """从 state 取需求名称（MANIFEST name 代理，仅溯源展示不参与聚类）。失败回退 req_id。"""
+    return st.get("name") or st.get("req_id") or ""
 
 
 def _load_or_die(workdir, workflow, req_id, need=True):
@@ -285,6 +314,219 @@ def _prior_artifacts_block(st, phase, spec):
     return "\n".join(lines)
 
 
+def _derive_dim_trigger(req_text, reason, surfmap):
+    """从 REQ 正文 + 纠正 reason 派生 (dimension, trigger_words)。
+
+    dimension = 命中 surface 词最多的类别（无命中→"通用"）；
+    trigger = 全类命中词的并集（检索用，跨需求累积）。纯 stdlib，零模型。
+    """
+    combined = (req_text or "") + " " + (reason or "")
+    best, best_hit = "通用", 0
+    trigger_union = []
+    for cat, words in (surfmap or {}).items():
+        hits = [w for w in words if w in combined]
+        if hits:
+            trigger_union += hits
+        if len(hits) > best_hit:
+            best, best_hit = cat, len(hits)
+    return best, sorted(set(trigger_union))
+
+
+def _maybe_capture_lesson(st, phase, reason, spec):
+    """纠正发生时自动沉淀候选经验(draft)。纯 Runtime，零模型，静默，幂等，best-effort。
+
+    挂载点：cmd_fail（log_event 前）/ cmd_patch（append 后）。不挂 gate_fail（无人类文本）。
+    要点：①静默（除 WARN 外无 stdout，护既有 substring 断言）；②best-effort（锁超时/写失败
+    跳过，纠正永远成功）；③不写 per-req history（KB 文件自带审计）；④落 draft/occ=1，
+    不过信任门→预防/反应都不注入→输出与无 KB 时一致（护 150/0）。
+    """
+    if not (reason and reason.strip()):
+        return None
+    req_id = st.get("req_id", "")
+    workdir = st.get("workdir", os.getcwd())
+    req_text = _read_req_text(workdir, spec, req_id)
+    surfmap = kb_store.get_surface_map(os.path.join(PLUGIN_ROOT, spec.skill_dir))
+    dim, trigger = _derive_dim_trigger(req_text, reason, surfmap)
+    rec = {
+        "kind": "lesson", "phase": str(phase) if phase is not None else "",
+        "dimension": dim, "error_type": "人工纠正",
+        "module": _manifest_name(st), "source_req": req_id,
+        "captured": kb_store._today(), "raw_text": reason.strip(),
+        "status": "draft", "occurrences": 1, "trigger": trigger,
+    }
+    try:
+        with locking.FileLock(_kb_path(workdir, spec, "lessons"), timeout=30):
+            kb_store.upsert_lesson(_kb_path(workdir, spec, "lessons"), rec)
+    except Exception:
+        # 锁超时/写失败：绝不阻断纠正本身（best-effort）
+        import traceback
+        print("  [WARN] 经验沉淀失败(不阻断): %s"
+              % traceback.format_exc().splitlines()[-1])
+    return None
+
+
+def _render_lessons_block(cands, tag, footer=""):
+    """渲染经验块（人类原话 verbatim）。cands=[(score, rec), ...]，已排序截断。"""
+    if not cands:
+        return ""
+    lines = ["##%s##（历史经验·Runtime 自动检索注入，参考而非硬约束）" % tag]
+    for score, r in cands:
+        phase = r.get("phase", "?")
+        dim = r.get("dimension", "?")
+        etype = r.get("error_type", "人工纠正")
+        raw = r.get("raw_text") or "(无原文)"
+        src_reqs = r.get("source_reqs") or []
+        occ = r.get("occurrences", 1)
+        src_desc = src_reqs[0] if src_reqs else (r.get("source_req") or "?")
+        if len(src_reqs) > 1:
+            src_desc = "%s 等 %d 需求" % (src_reqs[0], len(src_reqs))
+        trig = r.get("trigger") or []
+        trig_str = "/".join(trig[:8]) if trig else "(无)"
+        lines.append("  - [Phase %s·%s·%s] %s" % (phase, dim, etype, raw))
+        lines.append("    （来源 %s，命中 %d 次；触发词: %s）" % (src_desc, occ, trig_str))
+    if footer:
+        lines.append("  适用原则：%s" % footer)
+    else:
+        lines.append("  适用原则：本需求命中上述经验触发词；据此自查是否同样出错，命中则补，不命中则忽略。")
+    return "\n".join(lines)
+
+
+def _prior_kb_block(st, phase, spec, kind="lesson"):
+    """预防式检索+注入：开工前按 REQ 相关性 + 双门注入 ##PRIOR_LESSONS##。
+
+    双门：①相关性门（surface≥2 或 module 标题命中）②信任门（endorsed 或 occ≥3）。
+    draft/occ=1 过不了信任门→不注入→与无 KB 时一致（护 150/0）。
+    No-op：无 KB 文件、或无记录同时过双门 → 返回 ""。
+    """
+    p = _kb_path(st.get("workdir", os.getcwd()), spec, "lessons")
+    if not os.path.isfile(p):
+        return ""
+    recs = kb_store.load_records(p)
+    rtext = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    phase_id = phase.get("id") if isinstance(phase, dict) else phase
+    cands = []
+    for r in recs:
+        if r.get("superseded_by"):
+            continue
+        if str(r.get("phase", "")) != str(phase_id):
+            continue
+        surface = sum(1 for w in r.get("trigger", []) if w in rtext)
+        title_hit = bool(r.get("module")) and r["module"] in rtext
+        relevant = surface >= 2 or title_hit
+        if not relevant:
+            continue
+        trusted = (r.get("status") == "endorsed") or (r.get("occurrences", 1) >= 3)
+        if not trusted:
+            continue
+        score = 3 * surface + 4 * (1 if title_hit else 0) + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
+        cands.append((score, r))
+    cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
+    return _render_lessons_block(cands[:3], tag="PRIOR_LESSONS") if cands else ""
+
+
+def _relevant_lessons_on_fail(st, phase, fail_context, spec):
+    """反应式失败定向应用：检测到问题时按失败上下文文本 surface 命中查 KB，注入 ##RELEVANT_LESSONS##。
+
+    比预防式更锐：用失败文本（FAIL 明细 / 人类 reason）做命中，"和这次栽的跟头最像"的经验排最前。
+    不解析 check 名（规避中文标签/1200 截断）。同信任门。相关性门：失败文本命中≥1 或 REQ 命中≥2。
+    No-op：无 KB / 无信任经验 / 失败文本无命中 → 返回 "" → gate_fail 输出与今天一致。
+    """
+    p = _kb_path(st.get("workdir", os.getcwd()), spec, "lessons")
+    if not os.path.isfile(p) or not (fail_context or "").strip():
+        return ""
+    recs = kb_store.load_records(p)
+    req_text = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    phase_id = phase.get("id") if isinstance(phase, dict) else phase
+    cands = []
+    for r in recs:
+        if r.get("superseded_by"):
+            continue
+        if str(r.get("phase", "")) != str(phase_id):
+            continue
+        trusted = (r.get("status") == "endorsed") or (r.get("occurrences", 1) >= 3)
+        if not trusted:
+            continue
+        hit_fail = sum(1 for w in r.get("trigger", []) if w in fail_context)
+        hit_req = sum(1 for w in r.get("trigger", []) if w in req_text)
+        if not (hit_fail >= 1 or hit_req >= 2):
+            continue
+        score = 5 * hit_fail + 3 * hit_req + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
+        cands.append((score, r))
+    cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
+    return _render_lessons_block(
+        cands[:3], tag="RELEVANT_LESSONS",
+        footer="本门失败/本次纠正疑似与此历史经验相关·请据此修正，参考而非硬约束") if cands else ""
+
+
+def _prior_business_kb_block(st, phase, spec):
+    """预防式业务知识检索+注入：开工前（Phase 0）按 REQ 相关性 + 双门注入 ##PRIOR_BUSINESS_KB##。
+
+    镜像 _prior_kb_block，3 处差异：path="business"（KB_business.md）、
+    tag="PRIOR_BUSINESS_KB"、**不按 phase 过滤**（business 知识 phase 无关——Knowledge
+    记录统一标 phase=14，但业务背景对所有阶段有意义，故全记录为候选）。
+    双门同 lessons：相关性（surface≥2 或 module 标题命中）+ 信任（endorsed 或 occ≥3，
+    business 起步 endorsed → 信任门恒过，靠相关性门过滤）。
+    仅在 Phase 0 注入（开工前一次性业务背景，非每阶段）——调用方 _card 控制时机。
+    No-op：无 KB_business.md、或无记录过双门 → 返回 "" → 卡片与无 KB 时逐字节一致。
+    """
+    p = _kb_path(st.get("workdir", os.getcwd()), spec, "business")
+    if not os.path.isfile(p):
+        return ""
+    recs = kb_store.load_records(p)
+    rtext = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    cands = []
+    for r in recs:
+        if r.get("superseded_by"):
+            continue
+        # business phase 无关：不按 phase 过滤
+        surface = sum(1 for w in r.get("trigger", []) if w in rtext)
+        title_hit = bool(r.get("module")) and r["module"] in rtext
+        relevant = surface >= 2 or title_hit
+        if not relevant:
+            continue
+        trusted = (r.get("status") == "endorsed") or (r.get("occurrences", 1) >= 3)
+        if not trusted:
+            continue
+        score = 3 * surface + 4 * (1 if title_hit else 0) + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
+        cands.append((score, r))
+    cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
+    return _render_lessons_block(cands[:3], tag="PRIOR_BUSINESS_KB",
+                                 footer="本需求命中上述历史业务知识触发词；据此参考历史沉淀，参考而非硬约束") if cands else ""
+
+
+def _relevant_business_kb_on_fail(st, phase, fail_context, spec):
+    """反应式业务知识定向应用：检测到问题时按失败上下文文本 surface 命中查 business KB，
+    注入 ##RELEVANT_BUSINESS_KB##。
+
+    镜像 _relevant_lessons_on_fail，3 处差异：path="business"、tag="RELEVANT_BUSINESS_KB"、
+    **不按 phase 过滤**。信任门同（business endorsed 恒过）。相关性门：hit_fail≥1 或 hit_req≥2。
+    在 gate_fail/fail/patch 任意阶段触发——失败定向递送相关历史业务知识。
+    No-op：无 KB_business / 无信任经验 / 失败文本无命中 → 返回 ""。
+    """
+    p = _kb_path(st.get("workdir", os.getcwd()), spec, "business")
+    if not os.path.isfile(p) or not (fail_context or "").strip():
+        return ""
+    recs = kb_store.load_records(p)
+    req_text = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    cands = []
+    for r in recs:
+        if r.get("superseded_by"):
+            continue
+        # business phase 无关：不按 phase 过滤
+        trusted = (r.get("status") == "endorsed") or (r.get("occurrences", 1) >= 3)
+        if not trusted:
+            continue
+        hit_fail = sum(1 for w in r.get("trigger", []) if w in fail_context)
+        hit_req = sum(1 for w in r.get("trigger", []) if w in req_text)
+        if not (hit_fail >= 1 or hit_req >= 2):
+            continue
+        score = 5 * hit_fail + 3 * hit_req + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
+        cands.append((score, r))
+    cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
+    return _render_lessons_block(cands[:3], tag="RELEVANT_BUSINESS_KB",
+                                 footer="本门失败/本次纠正疑似与此历史业务知识相关·请据此参考，参考而非硬约束") if cands else ""
+
+
 def _run_check(chk, st, spec):
     """执行单条确定性检查，返回 (ok, detail)。"""
     workdir = st["workdir"]
@@ -376,8 +618,12 @@ def _run_check(chk, st, spec):
     return (False, "未知检查类型: %s" % kind)
 
 
-def _card(st, phase, spec, extra=""):
-    """渲染阶段契约卡（发送给模型的唯一控制协议）。"""
+def _card(st, phase, spec, extra="", correction_context=None):
+    """渲染阶段契约卡（发送给模型的唯一控制协议）。
+
+    correction_context: 非空时（cmd_fail/cmd_patch 传入人类 reason）追加反应式
+    ##RELEVANT_LESSONS## 块——失败定向经验。无 KB/无信任经验/无命中 → no-op。
+    """
     eff = spec.effective_phases(st.get("depth") or "heavy")
     idx = eff.index(phase["id"]) + 1 if phase["id"] in eff else 0
     total = len(eff)
@@ -467,6 +713,31 @@ def _card(st, phase, spec, extra=""):
         lines.append("  修复要求：在当前阶段产物中就地修正上述前置产物切片（如补漏标的风险/规则/测试点），")
         lines.append("  并在重写本阶段产物时把修正同步进来；修正完成后执行 `patch --clear` 清除指令。")
         lines.append("  与 fail --to 区别：patch 不回退 current_phase，避免整阶段重跑；仅当前阶段产物会重写。")
+    # v0.9.0: 预防式注入 ##PRIOR_LESSONS##（开工前提醒"这类坑以前栽过"）
+    # 双门（相关+信任）不过 → _prior_kb_block 返回 "" → 卡片与无 KB 时逐字节一致（护 150/0）
+    les = _prior_kb_block(st, phase, spec, kind="lesson")
+    if les:
+        lines.append("")
+        lines.append(les)
+    # v0.11.0: 预防式注入 ##PRIOR_BUSINESS_KB##（仅 Phase 0 开工前业务背景，phase 无关）
+    # No-op：无 KB_business.md / 无记录过双门 → 返回 "" → 卡片与无 KB 时逐字节一致
+    if str(phase.get("id")) == "0":
+        bus = _prior_business_kb_block(st, phase, spec)
+        if bus:
+            lines.append("")
+            lines.append(bus)
+    # v0.9.0: 反应式注入 ##RELEVANT_LESSONS##（cmd_fail/cmd_patch 经 correction_context 传入 reason）
+    # 失败定向：用人类 reason 做 surface 命中，"和这次栽的跟头最像"的经验排最前。同双门，不过 → no-op
+    if correction_context:
+        rel = _relevant_lessons_on_fail(st, phase, correction_context, spec)
+        if rel:
+            lines.append("")
+            lines.append(rel)
+        # v0.11.0: 反应式注入 ##RELEVANT_BUSINESS_KB##（失败定向业务知识，phase 无关）
+        relb = _relevant_business_kb_on_fail(st, phase, correction_context, spec)
+        if relb:
+            lines.append("")
+            lines.append(relb)
     if extra:
         lines.append("")
         lines.append(extra)
@@ -848,9 +1119,22 @@ def cmd_gate(a):
         rounds = st["gate_rounds"].get(str(phase["id"]), 0) + 1
         st["gate_rounds"][str(phase["id"])] = rounds
         st["failed_gates"][str(phase["id"])] = {"at": state_store._now(), "rounds": rounds}
-        state_store.log_event(st, "gate_fail", detail="; ".join(d for ok, d in results if not ok))
+        fail_detail = "; ".join(d for ok, d in results if not ok)
+        state_store.log_event(st, "gate_fail", detail=fail_detail)
         state_store.save(path, st)
         print("\nGATE RESULT: FAIL — 禁止进入下一阶段。请按上方 [FAIL] 项原地修复后重跑 `gate`。")
+        # v0.9.0: 反应式失败定向应用——用 fail_detail 文本查 KB，递送对症经验供模型修正
+        # 不解析 check 名（规避中文标签/1200 截断）；无 KB/无信任经验/无命中 → no-op（护 150/0）
+        rel = _relevant_lessons_on_fail(st, phase, fail_detail, spec)
+        if rel:
+            print("")
+            print(rel)
+        # v0.11.0: 反应式业务知识定向——失败上下文查 business KB（phase 无关）
+        # No-op：无 KB_business / 无信任经验 / 无命中 → 不打印
+        relb = _relevant_business_kb_on_fail(st, phase, fail_detail, spec)
+        if relb:
+            print("")
+            print(relb)
         if rounds >= 3:
             print("【有界返修·v0.7.0】Phase %d 门禁连续失败 %d 次，疑似系统性问题：" % (phase["id"], rounds))
             print("  请人工介入审查 [FAIL] 项，或执行 `fail --to <更早阶段> --reason \"...\"` 回退重走。")
@@ -983,13 +1267,17 @@ def cmd_fail(a):
     st["current_phase"] = target["id"]
     st["status"] = "RUNNING"
     st["confirm_rounds"] = st.get("confirm_rounds", 0) + 1
+    # v0.9.0: 纠正发生 → 自动沉淀候选经验(draft)，纯 Runtime/静默/best-effort
+    # 不阻断纠正（锁失败仅 WARN）；落 draft/occ=1 不过信任门→预防/反应都不注入（护 150/0）
+    _maybe_capture_lesson(st, target["id"], a.reason, spec)
     state_store.log_event(st, "rollback", phase=target["id"], detail=a.reason or "")
     state_store.save(path, st)
     print("ROLLBACK: 已回退到 Phase %d (%s)，原因: %s" % (target["id"], target["name"], a.reason or ""))
     print("按 output_write.md 修改流程起点判定：从本阶段起依次顺序执行至 Phase 14，不得跳阶段；")
     print("修改范围限定（只改问题点，无问题用例原样保留）。")
     print()
-    print(_card(st, target, spec))
+    # correction_context 传入 reason → _card 追加反应式 ##RELEVANT_LESSONS## 块（失败定向）
+    print(_card(st, target, spec, correction_context=a.reason))
 
 
 def cmd_patch(a):
@@ -1029,6 +1317,8 @@ def cmd_patch(a):
     directive = {"target_phase": target["id"], "target_name": target["name"],
                  "from_phase": cur, "reason": a.reason}
     st["patch_directives"].append(directive)
+    # v0.9.0: 纠正发生 → 自动沉淀候选经验(draft)，纯 Runtime/静默/best-effort
+    _maybe_capture_lesson(st, target["id"], a.reason, spec)
     state_store.log_event(st, "patch", phase=cur,
                           detail="→ Phase %d %s：%s" % (target["id"], target["name"], a.reason[:80]))
     state_store.save(path, st)
@@ -1036,7 +1326,8 @@ def cmd_patch(a):
     print("  原因: %s" % a.reason)
     print("  (不回退 current_phase=%d；指令将由当前/后续阶段契约卡的 ##PATCH_FEEDBACK## 段注入)" % cur)
     print()
-    print(_card(st, spec.get_phase(cur), spec))
+    # correction_context 传入 reason → _card 追加反应式 ##RELEVANT_LESSONS## 块（失败定向）
+    print(_card(st, spec.get_phase(cur), spec, correction_context=a.reason))
 
 
 def _run_knowledge_gate(st, spec):
@@ -1219,6 +1510,184 @@ def cmd_manifest(a):
         sys.exit(1)
 
 
+def cmd_kb(a):
+    """KB_lessons.md 自我进化经验库维护（Runtime 独占，全程持 FileLock）。
+
+    镜像 cmd_manifest 纪律：模型禁止直接 Write/Edit KB_lessons.md（进化机制与模型
+    无关铁律；经验内容归属人类）。捕获已由 fail/patch 自动触发，本命令族供人
+    背书/废止/清理/检索/回放/补录。纯 Runtime，零模型调用。
+
+    审计：KB 文件本身即审计源（含 captured/source_reqs/occurrences）；仅在 req_id
+    能定位到分区 state 时，best-effort 追加 history（不阻断 kb 写入本身）。
+    """
+    spec = _spec(a)
+    workdir = a.workdir
+    # v0.11.0: --kind 选 KB 文件（lesson -> KB_lessons.md；business -> KB_business.md）。
+    # 默认 lesson（既有行为）。reconcile 仅对 business 有效（lesson 由 fail/patch 自动捕获）。
+    kind = (a.kind or "lesson")
+    if kind == "all":
+        # list/reconcile 之外不支持 all；此处统一按 lesson 取主路径，list 内部再读双文件
+        kind = "lesson"
+    p = _kb_path(workdir, spec, "business" if kind == "business" else "lessons")
+    action = a.action
+
+    def _audit(req_id, event, detail):
+        """best-effort：有分区 state 则 log_event，无则跳过（KB 文件已留痕）。"""
+        if not req_id:
+            return
+        sp = os.path.join(workdir, state_store.QAMASTER_ROOT, spec.name, req_id, "state.json")
+        if not os.path.isfile(sp):
+            return
+        try:
+            st = state_store.load(sp)
+            state_store.log_event(st, event, detail=detail)
+            state_store.save(sp, st)
+        except Exception:
+            pass  # 审计失败不阻断 kb 操作（KB 文件是事实源）
+
+    def _print_block(title, block):
+        if block:
+            print("")
+            print("===== %s =====" % title)
+            print(block)
+
+    # --- 只读路径（无锁） ---
+    if action == "list":
+        # --kind all：合并读 lessons + business 两文件（business no-op 时退空）
+        if (a.kind or "lesson") == "all":
+            rows = kb_store.list_records(p, status=a.status, phase=a.phase, dimension=a.dimension)
+            pb = _kb_path(workdir, spec, "business")
+            rows += kb_store.list_records(pb, status=a.status, phase=a.phase, dimension=a.dimension)
+            print("KB LIST: lessons+business — %d 条记录" % len(rows))
+        else:
+            rows = kb_store.list_records(p, status=a.status, phase=a.phase, dimension=a.dimension)
+            print("KB LIST: %s — %d 条记录" % (p, len(rows)))
+        print(json.dumps({"workflow": spec.name, "kb": p, "rows": rows},
+                         ensure_ascii=False, indent=2))
+        return
+    if action == "show":
+        if not a.id:
+            _die("kb show 需 --id <经验id>")
+        rec = kb_store.get_record(p, a.id)
+        if rec is None:
+            _die("经验 id 不存在: %s" % a.id)
+        print(json.dumps({"workflow": spec.name, "kb": p, "record": rec},
+                         ensure_ascii=False, indent=2))
+        return
+    if action == "query":
+        # 只读预览：针对某 req/文件，打印"会注入什么"（预防式或反应式），供人预览/校准
+        req_id = a.against or ""
+        # 构造临时 state 供检索 helper
+        st_q = {"workdir": workdir, "req_id": req_id}
+        phase = spec.get_phase(int(a.phase)) if a.phase else None
+        if phase is None:
+            _die("kb query 需 --phase <N>（指定阶段号）")
+        if (a.kind or "lesson") == "business":
+            # business 检索路径（phase 无关；Phase 0 预防 / 失败反应同一 helper）
+            if a.context:
+                block = _relevant_business_kb_on_fail(st_q, phase, a.context, spec)
+                _print_block("RELEVANT_BUSINESS_KB（反应式·失败定向·会注入）", block or "(无命中)")
+            else:
+                block = _prior_business_kb_block(st_q, phase, spec)
+                _print_block("PRIOR_BUSINESS_KB（预防式·Phase 0·会注入）", block or "(无命中)")
+            print("  （top=%d；信任门：endorsed 或 occ≥3；相关性门：surface≥2 或标题命中）"
+                  % (a.top or 3))
+            return
+        if a.context:
+            block = _relevant_lessons_on_fail(st_q, phase, a.context, spec)
+            _print_block("RELEVANT_LESSONS（反应式·失败定向·会注入）", block or "(无命中)")
+        else:
+            block = _prior_kb_block(st_q, phase, spec, kind="lesson")
+            _print_block("PRIOR_LESSONS（预防式·开工前·会注入）", block or "(无命中)")
+        print("  （top=%d；信任门：endorsed 或 occ≥3；相关性门：surface≥2 或标题命中）"
+              % (a.top or 3))
+        return
+    if action == "distill":
+        # 只读回放：该 req 全部 rollback/patch/gate_fail（含 gate_fail 修正信息，零模型）
+        req_id = _require_req_id(a)
+        st, _ = _load_or_die(workdir, a.workflow, req_id)
+        history = st.get("history") or []
+        rows = [h for h in history if h.get("event") in ("rollback", "patch", "gate_fail", "patch_clear")]
+        print("KB DISTILL: %s 回放 %d 条纠正事件（供人决定是否手工 add-lesson/endorse）" % (req_id, len(rows)))
+        for h in rows:
+            ts = h.get("ts", "")
+            ev = h.get("event", "")
+            ph = h.get("phase", "")
+            det = h.get("detail", "")
+            print("  - [%s] %s phase=%s: %s" % (ts, ev, ph, det))
+        print("  （自动捕获已在 fail/patch 触发；gate_fail 修正信息仅此处回放，零模型）")
+        return
+
+    # --- 写路径（持 FileLock） ---
+    if action == "reconcile":
+        # v0.11.0: business 专用——从 Knowledge_*.md 聚合业务知识索引到 KB_business.md。
+        # lesson 无 reconcile（由 fail/patch 自动捕获）。镜像 cmd_manifest reconcile 纪律。
+        if (a.kind or "lesson") != "business":
+            _die("kb reconcile 仅对 --kind business 有效（lessons 经 fail/patch 自动捕获）")
+        skill_dir = os.path.join(PLUGIN_ROOT, spec.skill_dir)
+        with locking.FileLock(p, timeout=30):
+            ok, msg, cnt = kb_store.reconcile_business(
+                p, workdir, spec.output_dir, skill_dir)
+        print("KB RECONCILE: %s — %s（business 记录 %d 条）"
+              % ("OK" if ok else "NO-OP/FAIL", msg, cnt))
+        if not ok:
+            # no-op（无 Knowledge 文件/目录）不判失败退出，只提示
+            return
+        return
+    if action == "add-lesson":
+        if not a.phase:
+            _die("kb add-lesson 需 --phase <N>")
+        if not a.summary:
+            _die("kb add-lesson 需 --summary <经验原文>（人类原话 verbatim）")
+        trig = []
+        if a.trigger:
+            trig = [t.strip() for t in a.trigger.split("/") if t.strip()]
+        rec = {
+            "kind": "lesson", "phase": str(a.phase), "dimension": a.dimension or "通用",
+            "error_type": "人工纠正", "module": a.module or "",
+            "source_req": a.source_req or "manual", "captured": kb_store._today(),
+            "raw_text": a.summary.strip(), "status": a.status or "draft",
+            "occurrences": 1, "trigger": trig,
+        }
+        with locking.FileLock(p, timeout=30):
+            fp = kb_store.upsert_lesson(p, rec)
+        _audit(a.req_id, "kb_add_lesson", detail="id=%s dim=%s" % (fp, rec["dimension"]))
+        print("KB ADD-LESSON: OK — id=%s（指纹去重：同类已合并则 occ++）" % fp)
+        return
+    if action == "endorse":
+        if not a.id:
+            _die("kb endorse 需 --id <经验id>")
+        with locking.FileLock(p, timeout=30):
+            ok, msg = kb_store.endorse(p, a.id)
+        _audit(a.req_id, "kb_endorse", detail="id=%s" % a.id)
+        print("KB ENDORSE: %s — %s" % ("OK" if ok else "FAIL", msg))
+        if not ok:
+            sys.exit(1)
+        return
+    if action == "supersede":
+        if not a.id or not a.by:
+            _die("kb supersede 需 --id <老id> --by <新id>")
+        with locking.FileLock(p, timeout=30):
+            ok, msg = kb_store.supersede(p, a.id, a.by)
+        _audit(a.req_id, "kb_supersede", detail="%s by %s" % (a.id, a.by))
+        print("KB SUPERSEDE: %s — %s" % ("OK" if ok else "FAIL", msg))
+        if not ok:
+            sys.exit(1)
+        return
+    if action == "prune":
+        with locking.FileLock(p, timeout=30):
+            if a.id:
+                ok, msg, cnt = kb_store.prune(p, rec_id=a.id)
+            else:
+                ok, msg, cnt = kb_store.prune(p, status=a.status, older_than_days=a.older_than)
+        _audit(a.req_id, "kb_prune", detail="%s removed=%d" % (msg, cnt))
+        print("KB PRUNE: %s — %s（删除 %d 条）" % ("OK" if ok else "FAIL", msg, cnt))
+        if not ok:
+            sys.exit(1)
+        return
+    _die("未知 kb 动作: %s" % action)
+
+
 def main():
     _utf8()
     _register_workflows()
@@ -1324,6 +1793,29 @@ def main():
     _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_manifest)
+
+    sp = sub.add_parser("kb", help="KB 经验库维护（自我进化·Runtime 独占，模型禁止 Write/Edit）")
+    sp.add_argument("action", choices=["list", "show", "query", "distill", "reconcile",
+                                       "add-lesson", "endorse", "supersede", "prune"])
+    sp.add_argument("--kind", default="lesson", choices=["lesson", "business", "all"],
+                    help="KB 种类：lesson=经验库（默认）/business=业务知识库/all=合并读（list）")
+    sp.add_argument("--id", default=None, help="经验 id（show/endorse/supersede --id/prune --id）")
+    sp.add_argument("--by", default=None, help="supersede：新经验 id（--id <老> --by <新>）")
+    sp.add_argument("--against", default=None, help="query：目标需求 id 或文件（预防式检索用）")
+    sp.add_argument("--phase", default=None, help="query/add-lesson：阶段号")
+    sp.add_argument("--context", default=None, help="query：失败/纠正文本（走反应式打分）")
+    sp.add_argument("--top", default=3, type=int, help="query：返回条数上限（默认 3）")
+    sp.add_argument("--dimension", default=None, help="list/add-lesson：业务维度")
+    sp.add_argument("--status", default=None, choices=["draft", "endorsed"], help="list/prune：状态过滤")
+    sp.add_argument("--older-than", default=None, type=int, help="prune：N 天前（配合 --status draft）")
+    sp.add_argument("--summary", default=None, help="add-lesson：经验原文（人类原话 verbatim）")
+    sp.add_argument("--trigger", default=None, help="add-lesson：触发词，'/' 分隔")
+    sp.add_argument("--module", default=None, help="add-lesson：模块/需求名（仅溯源展示）")
+    sp.add_argument("--source-req", default=None, help="add-lesson：来源需求 id")
+    _ri(sp)
+    _wf(sp)
+    _wd(sp)
+    sp.set_defaults(fn=cmd_kb)
 
     sp = sub.add_parser("plan", help="查看执行计划（按深度裁剪后的阶段序列）")
     _ri(sp)

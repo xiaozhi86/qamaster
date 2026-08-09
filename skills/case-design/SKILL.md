@@ -40,13 +40,17 @@ disable-model-invocation: true
   → 增量反哺（G-FB1）：后续阶段发现前置产物有小问题（如漏标风险/规则），用 `patch --to <前置阶段> --reason "..." --req-id <id>` 登记修正指令——不回退重跑整阶段，指令注入当前阶段契约卡 ##PATCH_FEEDBACK## 段，模型就地修正前置产物切片后重写本阶段产物，修正完成 `patch --clear --req-id <id>` 清除。整阶段结构性问题仍用 fail --to 回退重走。
 ```
 
-## 五条铁律（违反即判定执行缺陷）
+## 六条铁律（违反即判定执行缺陷）
 
 1. **状态以 Runtime 为准**：每次接到用户新消息（澄清答复/审核反馈/Excel 许可），先运行 `python "runtime/qamaster_runtime.py" status --req-id <id>` 恢复权威状态，禁止凭对话记忆推断"现在该哪一步"。
 2. **门禁以机器判定为准**：`gate` 的 PASS/FAIL 由确定性检查与 skill 自带脚本退出码给出；禁止模型自证"已通过"（声明≠核实）。
 3. **业务规范不变**：Runtime 只做流程控制；避坑红线（§0）、输入协议（§5）、运行模式（§6.5）、质量门禁、输出协议等全部业务规则仍以本文件 + references/ 为唯一细则来源。
 4. **MANIFEST 由 Runtime 维护**：`case-design-out/MANIFEST.md` 是多需求共享索引，由 Runtime 在 gate PASS 时自动维护（Phase 0 `add` / Phase 1 `update` 台账 / Phase 13 `update` 用例文件 / Phase 14 `complete`）。模型**禁止 Write/Edit MANIFEST.md**——多需求索引的协调权属于 Runtime，不属于模型。失步时执行 `python runtime/qamaster_runtime.py manifest reconcile` 重建。
-5. **gate FAIL 明细自查通道（v0.8.1·截断兜底）**：`gate` 回传给模型的 `detail` 有上限（`fail_lines[:50]` + 尾部 30 行 + `##VERIFY_SUMMARY##` 摘要行）。若 `detail` 末尾被截断、或 `[FAIL] 硬违规:` 后跟的明细不足以定位修复点，模型**必须**直接跑 verify_cases.py 拿全量 stdout 自查，**不要凭空猜测改法盲改**：
+5. **KB 知识库由 Runtime 维护**（经验库 + 业务知识库，分文件、同禁写纪律）：
+   - **经验库 `case-design-out/KB_lessons.md`**：跨需求共享的自我进化经验库（纠正沉淀/预防提醒/反应式失败定向应用），由 Runtime 在 `fail`/`patch` 纠正发生时自动沉淀候选经验(draft)，经人工背书(endorse)后注入。
+   - **业务知识库 `case-design-out/KB_business.md`**：跨需求共享的业务历史知识索引，聚合自每个需求 Phase 14 产出的 `Knowledge_<需求标识>.md`（既有模型产物）的元数据+维度文本。Runtime 经 `kb reconcile --kind business` 索引（非自动触发）；**只索引不生成**——聚合/打标/检索/注入全 stdlib 确定性。开工前（Phase 0）预防式注入 `##PRIOR_BUSINESS_KB##`，检测到问题时反应式注入 `##RELEVANT_BUSINESS_KB##`。
+   - 模型**禁止 Write/Edit `KB_lessons.md` 与 `KB_business.md`**——自我进化机制与模型无关（铁律），经验/业务知识内容归属人类。维护用 `python runtime/qamaster_runtime.py kb <action> [--kind lesson|business|all]`（list/show/query/distill/reconcile/add-lesson/endorse/supersede/prune）。模型只"读到"Runtime 注入的 `##PRIOR_LESSONS##`/`##RELEVANT_LESSONS##`/`##PRIOR_BUSINESS_KB##`/`##RELEVANT_BUSINESS_KB##` 软上下文并据此修正（消费侧，参考而非硬约束，永不作硬门）。
+6. **gate FAIL 明细自查通道（v0.8.1·截断兜底）**：`gate` 回传给模型的 `detail` 有上限（`fail_lines[:50]` + 尾部 30 行 + `##VERIFY_SUMMARY##` 摘要行）。若 `detail` 末尾被截断、或 `[FAIL] 硬违规:` 后跟的明细不足以定位修复点，模型**必须**直接跑 verify_cases.py 拿全量 stdout 自查，**不要凭空猜测改法盲改**：
 
    ```
    python "<PLUGIN_ROOT>/skills/case-design/scripts/verify_cases.py" --phase-gate <N> "<工作目录>/.qamaster/case-design/<需求标识>/checkpoint_<N>.md" --req "<工作目录>/case-design-out/REQ_<需求标识>.md" --ledger "<工作目录>/case-design-out/Clarification_Ledger_<需求标识>.md" --run-mode full
@@ -72,6 +76,7 @@ disable-model-invocation: true
 > **所有需求产出物统一写入当前项目根目录下的 `case-design-out/` 子目录**（即 `<项目根目录>/case-design-out/`），不散落到项目根目录。
 
 * **产出物范围**：索引 `MANIFEST.md`、需求文档 `REQ_<需求标识>.md`、澄清台账 `Clarification_Ledger_<需求标识>.md`、测试用例 `TestCases_<需求标识>.md` / `TestCases_<需求标识>.xlsx`、知识总结 `Knowledge_<需求标识>.md`——全部落盘到 `case-design-out/` 下
+* **Runtime 维护的共享索引（非模型产出物）**：`MANIFEST.md`（多需求索引）、`KB_lessons.md`（自我进化经验库）、`KB_business.md`（业务历史知识库）三者均由 Runtime 在 FileLock 下独占维护，**模型禁止 Write/Edit**（详见 §4/§5）。三者存在与否不影响模型当需求的产出职责——无文件即 no-op（输出与无 KB 时逐字节一致）。
 * **需求文档强制落盘**：`REQ_<需求标识>.md` 在第0阶段步骤零强制落盘（用户内联提供或给路径的需求文档均落盘；纯散文/无标题者落盘前补 `## 二级标题` 分节），为 #4/#5 反向需求追溯提供唯一可靠基准——不落盘则"完整覆盖无遗漏"承诺失效（详见 `references/phase0_manifest.md` 步骤零）
 * **非 Markdown 文档经 `extract_doc.py` 落盘**（v0.9.0·根因5）：用户提供 .docx/.pdf/.pptx/.xlsx/.png 等非 .md 文件路径时，禁止用 Read 工具直读原文（丢页眉/文本框/OCR 顺序），必须运行 `python skills/case-design/scripts/extract_doc.py <文件> --kind req|design --req-id <需求标识> --out-dir case-design-out` 全文抽取落盘；解析降级（`[FAIL]`）即硬阻断请用户补 Markdown/纯文本，不得静默继续（详见 `references/phase0_manifest.md` 步骤零"非 Markdown 文档解析落盘"）
 * **读写统一前缀**：凡读写上述产出物，路径均为 `case-design-out/<文件名>`；索引表路径列填写相对 `case-design-out/` 的文件名（不含目录前缀）
