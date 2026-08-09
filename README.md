@@ -3,7 +3,7 @@
 > 企业级 AI QA 工具集 —— 用「规格先行、测试驱动」的方式，把需求文档自动变成高质量、可执行、可追溯的测试用例，并对需求文档本身做多角色专家评审。
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Version](https://img.shields.io/badge/version-0.1.0-green)
+![Version](https://img.shields.io/badge/version-0.11.0-green)
 ![Python](https://img.shields.io/badge/python-3.7+-blue)
 ![Platforms](https://img.shields.io/badge/platform-Claude%20Code%20%7C%20Codex%20%7C%20Cursor-9cf)
 ![CI](https://github.com/xiaozhi86/qamaster/actions/workflows/check-plugin.yml/badge.svg)
@@ -32,6 +32,7 @@ QA Master 提供两个核心能力，覆盖「需求评审 → 测试用例设�
 - **渐进式加载，省 token**：case-design 常驻核心 ~6K tokens，各阶段细则按需读取 `references/`，回读核对用 `scripts/` 脚本返回摘要，不把整份用例读进上下文；阶段出口机器 gate 在内存内跑同一套校验，零权限弹窗。
 - **脚本化校验，可机器解析**：`verify_md.py`（结构）+ `verify_cases.py`（内容/覆盖，文件入口 + 内存入口 `run_inmemory`）回读核对，Excel 经 `openpyxl` 脚本产出 + 结构验证 + 数据完整性校验。
 - **跨会话可追溯**：澄清台账、知识总结、需求索引跨会话保留，不重复提问已解决问题。
+- **自我进化知识系统**（0.11.0）：内置**双知识库**——**经验库（`KB_lessons.md`）**自动捕获每次 `fail`/`patch` 的错误纠正经验，**业务库（`KB_business.md`）**沉淀每需求 13 维度业务知识；开工前**预防性提醒**、失败处**定向修正**，经**双门（相关性 + 信任）过滤后软注入**（参考而非硬约束），只引相关经验、绝不全量塞入；同一坑被多个需求踩中自动累计加权（越用越准）。机制层纯标准库、**与模型无关**，经验内容归属人类（自动起草为 `draft`，人工 `endorse` 后才注入）。详见下方「自我进化知识系统」节。
 - **按规模自动分级**：重型走完整 15 步、中型合并裁剪、轻型跳过规格建模；运行模式（完整 / 连跑 / 轻量）与流程深度正交；阶段出口 gate 全规模必跑（轻型不跳）。
 - **单事实源配置**：`config/validation_rules.json` 集中校验口径（含边界值 4 值模型），`config/domain_config.json` 支持金融/医疗等垂直领域扩展。
 
@@ -110,6 +111,8 @@ flowchart TD
 | `TestCases_<需求标识>.md` | 15 列标准化用例表（默认单文件） |
 | `TestCases_<需求标识>.xlsx` | 与 .md 字段完全一致，用户确认后生成 |
 | `Knowledge_<需求标识>.md` | 13 维度业务知识沉淀，审核通过后生成 |
+| `KB_lessons.md` | 错误纠正经验库：`fail`/`patch` 自动捕获草稿，人工 `endorse` 后注入（Runtime 维护·模型禁写） |
+| `KB_business.md` | 业务历史知识库：`kb reconcile` 聚合各需求 13 维度知识（Runtime 维护·模型禁写） |
 
 > 详细使用说明见 [`skills/case-design/README.md`](skills/case-design/README.md) 与 [`skills/case-design/一分钟上手.md`](skills/case-design/一分钟上手.md)。
 
@@ -202,7 +205,7 @@ flowchart TD
 | 人工确认门 | Phase 1 澄清 / Phase 14 审核 / Phase 15 Excel 许可；完整模式必须用户 confirm | 跳过澄清/默认审核通过/未经许可生成 Excel |
 | 断点续跑 | 状态按 (workflow,req_id) 分区落盘 `.qamaster/case-design/<req_id>/state.json`；二次 `start` 恢复而非重置；`status --all` 查看全部在途需求 | 长会话状态丢失、重复生成覆盖、多需求互相覆盖 |
 | 审核反馈回退 | `fail --to <阶段>` 回退到受影响最深阶段，从起点依次重走到 Phase 14 | 修改场景跳阶段 |
-| 自证测试 | `scripts/test_runtime.py`：122 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行、多需求并发隔离、legacy 迁移、MANIFEST 并发/重建 | Runtime 自身正确性 |
+| 自证测试 | `scripts/test_runtime.py`：294 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行、多需求并发隔离、legacy 迁移、MANIFEST 并发/重建 | Runtime 自身正确性 |
 
 > 设计方案见 [`qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md`](qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md)。
 
@@ -391,6 +394,49 @@ Q1 按方案A，Q2 按方案B
 
 ---
 
+## 🧬 自我进化知识系统（case-design）
+
+> **铁律：机制与模型无关，经验内容归属人类。** 知识系统的全部机制层（捕获 / 存储 / 检索 / 排序 / 注入 / 去重 / 版本 / 淘汰）100% 用 Python 标准库确定性实现，任何模型都不可绕过；而知识库的**内容**（经验、业务知识）由人类背书——模型只能自动起草（`draft`），背书（`endorse`）与淘汰决策权在人类。
+
+case-design 内置**两个相互独立的知识库**，让"踩过的坑"和"沉淀的业务知识"**自动回流、下次自动规避**：
+
+| 知识库 | 文件 | 收什么 | 怎么进库 |
+|---|---|---|---|
+| **经验库**（MVP1） | `case-design-out/KB_lessons.md` | 每次审核 `fail`/`patch` 的错误纠正经验（出错阶段 + 维度 + 原文 + 触发词） | `fail`/`patch` 时自动捕获为 `draft` 草稿；人工 `kb endorse <id>` 背书后才参与注入 |
+| **业务库**（MVP2b） | `case-design-out/KB_business.md` | 各需求 Phase 14 产出的 13 维度业务知识（按"更新模块"聚合） | `kb reconcile --kind business` 从 `Knowledge_*.md` 聚合，直接以 `endorsed` 入库 |
+
+### 双链注入：预防 + 定向修正
+
+| 注入链 | 时机 | 注入什么 |
+|---|---|---|
+| **预防链**（开工前） | 每张阶段契约卡的 `##PRIOR_LESSONS##`；Phase 0 额外的 `##PRIOR_BUSINESS_KB##` | 与当前阶段/需求**相关且可信**的历史经验 / 业务知识，提前避坑 |
+| **反应链**（失败处） | `gate` 失败 / `fail` / `patch` 时的 `##RELEVANT_LESSONS##` + `##RELEVANT_BUSINESS_KB##` | 命中当前失败上下文的经验，**定向**给出"上次怎么改对的" |
+
+### 双重门：相关性 + 信任（过滤后注入，绝不全量塞入）
+
+知识库不是"整库粘贴"，每条记录要先过**两道门**才进上下文：
+
+- **相关性门**：用「表层维度词」（5 大类高发缺陷维度：状态机流转 / 权限与敏感数据 / 异常处理 / 上下游依赖 / 并发幂等）与当前阶段 / 失败上下文做词面命中判定。**维度词单一事实源、零漂移**：`kb_store` 调 `verify_cases.py --dump-surface-map` 直接读 `_CLARIFY_CATEGORIES`，自身不存任何词表。
+- **信任门**：`endorsed`（人工背书）**或** `occurrences ≥ 3`（被 ≥3 个独立需求踩中）才可信；新草稿（`draft`、`occ=1`）**永远不注入**。
+
+> 过滤后候选为空 → 注入返回空串 → 输出与"没有知识库"时**字节一致**。即**无 KB 文件即零影响**，是回归基线（新增此系统不改变任何既有产出）。
+
+### 跨需求自我进化
+
+同一错误纠正经验，只有当**新的来源需求**被记入时才 `occurrences += 1`（同一需求反复 `fail` 不累加，只追加变体）。越是被多个独立需求踩中的坑，occ 越高、越易过信任门、越优先注入——系统**越用越准**，全程无需任何模型参与判断。
+
+### CLI 人工管理（`kb` 子命令）
+
+```bash
+kb query [--phase N] [--kind lesson|business] [--top K]   # 预览哪些经验会被注入（--top 仅作用于预览；真实注入恒为 top-3 防噪）
+kb endorse <id>                                           # 背书草稿经验，纳入注入候选
+kb reconcile --kind business                              # 从 Knowledge_*.md 重建/汇聚业务库
+```
+
+> 两库均由 Runtime 在跨平台 FileLock + 原子写下维护，**模型禁止 Write/Edit**（与 `MANIFEST.md` 同纪律）；不新增硬门禁、不改状态机 schema（`SCHEMA_VERSION=3`）；注入恒为**软上下文**（"参考而非硬约束"），**永远不是硬门禁**。
+
+---
+
 ## 📦 依赖
 
 | 组件 | 要求 | 说明 |
@@ -420,6 +466,7 @@ pip3 install openpyxl     # macOS / Linux
 │  ├─ phases.py                     # 0-14(+Excel) 阶段注册表（流程定义单一事实源）
 │  ├─ locking.py                    # 跨平台 FileLock（msvcrt/fcntl，stdlib；MANIFEST 并发串行化）
 │  ├─ manifest.py                   # MANIFEST.md 共享索引 read-modify-write（Runtime 独占）
+│  ├─ kb_store.py                   # 自我进化知识库存储（经验库+业务库 解析/序列化/检索/去重/版本；纯标准库·模型无关）
 │  └─ workflows/                    # 通用 workflow 注册表（新增 skill 注册自己的阶段机即继承隔离 + 强控）
 │     ├─ registry.py                # WorkflowSpec + register/get_workflow
 │     └─ case_design.py             # 适配 phases.py 为 WorkflowSpec
@@ -441,7 +488,7 @@ pip3 install openpyxl     # macOS / Linux
 ├─ codex/prompts/                   # Codex 自定义 prompt（拷到 ~/.codex/prompts/）
 ├─ .cursor/rules/                   # 平台三：Cursor rule
 ├─ scripts/check_plugin.py          # 插件结构自检（含 Runtime 完整性校验）
-├─ scripts/test_runtime.py          # Runtime 自证测试（122 项断言，无 LLM）
+├─ scripts/test_runtime.py          # Runtime 自证测试（294 项断言，无 LLM）
 └─ .github/workflows/check-plugin.yml  # CI
 ```
 
@@ -458,13 +505,13 @@ python scripts/test_runtime.py
 
 `check_plugin.py` 校验三平台适配层、skills 结构与 **Runtime 完整性**：`plugin.json` / `marketplace.json` 字段、各 `SKILL.md` frontmatter、`commands/` 与 `.cursor/rules/` frontmatter、Codex 适配必要文件、`runtime/` 核心文件存在性 + 阶段注册表（编号 0-15 连续、人工门/许可门类型、引用细则存在）、以及不应入库的 `__pycache__`/`.pyc`。CI 还会字节编译 runtime 与 skill 脚本做语法检查。
 
-`test_runtime.py` 为 Runtime 自证测试（无 LLM，122 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪，**以及多需求并行隔离（同 workdir 两 req 状态/检查点互不覆盖 + 降级对账不误报）、MANIFEST 并发更新、Phase 0 gate PASS 自动建索引、legacy 状态迁移、bootstrap 幂等、manifest reconcile 重建**。
+`test_runtime.py` 为 Runtime 自证测试（无 LLM，294 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪，**以及多需求并行隔离（同 workdir 两 req 状态/检查点互不覆盖 + 降级对账不误报）、MANIFEST 并发更新、Phase 0 gate PASS 自动建索引、legacy 状态迁移、bootstrap 幂等、manifest reconcile 重建**，以及**自我进化知识库**（经验/业务双库·捕获·预防+反应双链注入·相关性+信任双门过滤·去重·跨需求累计·`kb query --top` 预览，详见下方「自我进化知识系统」节）。
 
 本地运行完整检查：
 
 ```bash
 python scripts/check_plugin.py            # 插件结构自检（含 Runtime 完整性）
-python scripts/test_runtime.py            # Runtime 自证测试（122 项断言，无 LLM）
+python scripts/test_runtime.py            # Runtime 自证测试（294 项断言，无 LLM）
 python -m py_compile runtime/*.py skills/case-design/scripts/*.py   # 脚本语法检查
 python skills/case-design/scripts/verify_cases.py --dump-rules      # 打印校验规则契约
 ```
