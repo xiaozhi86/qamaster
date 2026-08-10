@@ -1489,6 +1489,17 @@ def cmd_set(a):
                 _die("知识总结门禁未过，拒绝登记 knowledge=done：\n%s" % detail)
             st["knowledge"] = "done"
             changed.append("knowledge=done（verify_knowledge 通过）")
+            # RC31 修复：知识总结登记后同步 MANIFEST.knowledge_file（与 Phase1 台账/
+            # Phase13 用例的口径一致）。旧版 _manifest_side_effect 只覆盖 phase 0/1/13/14，
+            # 知识总结是 Phase14 confirm 之后、Phase15 之前的后置动作（不走 phase gate），
+            # 从无分支登记 → MANIFEST"知识总结"列恒为"-"，与实际产物失步，须手动 reconcile 才回填。
+            try:
+                _mp = _manifest_path(a.workdir, spec)
+                with locking.FileLock(_mp, timeout=30):
+                    manifest.update(_mp, req_id, knowledge_file="Knowledge_%s.md" % req_id)
+            except Exception as _e:
+                print("  [WARN] MANIFEST knowledge_file 登记失败（不阻断；可 `manifest reconcile --req-id %s` 修复）: %s"
+                      % (req_id, _e))
         elif a.knowledge == "na":
             _die("knowledge 不支持 na：知识总结为审核通过后的强制后置动作（references/knowledge.md 31.1），"
                  "须生成 %s/Knowledge_%s.md 后登记 done" % (spec.output_dir, req_id))
