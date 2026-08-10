@@ -197,12 +197,16 @@ _CG.update({k: v for k, v in _DOMAIN_CFG.get("coverage_gates", {}).items()})
 
 
 def _gate_mode(raw, default="full"):
-    """归一化硬门取值：full=硬门(exit=1) / auto_light=连跑轻量降级为软告警 / off=关闭。"""
+    """归一化硬门取值：full=硬门(exit=1) / auto_light=连跑轻量降级为软告警 /
+    warn=软告警（RC12 修复：旧版不识别 "warn"，config 配 "warn" 落到 default "full"，
+    把配置的软告警静默升级为硬门）/ off=关闭。"""
     v = str(raw if raw is not None else default).strip().lower()
     if v in ("full", "hard", "on", "true"):
         return "full"
     if v in ("auto_light", "auto", "light", "soft"):
         return "auto_light"
+    if v in ("warn", "warning", "advisory"):
+        return "warn"
     if v in ("off", "none", "false", "disabled"):
         return "off"
     return default
@@ -213,6 +217,11 @@ COVERAGE_GATES = {
     "req_trace_min_ratio": float(_CG.get("req_trace_min_ratio", 1.0)),
     # #7-H：测试点清单每条 TP 被用例关联规则列引用的最低比例（v0.8.0）
     "tp_trace_min_ratio": float(_CG.get("tp_trace_min_ratio", 1.0)),
+    # #5-H RC5 修复：规则建模清单每条 R<n> 被用例"关联规则"列引用的最低比例。
+    # 旧版只有 rule_coverage（token 类目模糊匹配，软提示不进 gate），R 方向反向追溯是
+    # 被遗忘的空白——25 条规则只引 13 条，gate 完全不判 → PASS（需求B 33% 覆盖却过门）。
+    # 此处与 req/tp 同口径，默认 1.0（每条规则须被引用），可按域降级。
+    "rule_trace_min_ratio": float(_CG.get("rule_trace_min_ratio", 1.0)),
     # #8-H：设计文档测试要点章节每条被用例覆盖的最低比例（v0.8.0，DESIGN 落盘时生效）
     "design_doc_trace_min_ratio": float(_CG.get("design_doc_trace_min_ratio", 1.0)),
     # #6-H：变更接口三类覆盖硬门（full/auto_light/off）
@@ -238,11 +247,33 @@ COVERAGE_GATES = {
     "req_trace_presence": _gate_mode(_CG.get("req_trace_presence")),
     # #7-P TP 清单存在性硬门（P7-1 修复）：TP 清单缺失即 exit=1，闭合"不写 TP 清单绕过 #7-H"
     "testpoint_section_presence": _gate_mode(_CG.get("testpoint_section_presence")),
+    # #RH 风险清单存在性硬门（RC16 修复）：风险清单 section 缺失即 exit=1，闭合"漏写风险清单
+    # 绕过 RK 门"——旧版只 p0p1>0 才查，section 完全缺失时 risk_total=0 静默 SKIP（需求B 若
+    # 漏写风险清单 section，gate 不阻断）。与 #4-P REQ 存在性硬门对称。
+    "risk_section_presence": _gate_mode(_CG.get("risk_section_presence")),
     # 5.5b 台账待确认门禁（G-3 类修复·严格检查发现）：check_open_questions_gate 经
     # COVERAGE_GATES.get("open_questions") 读模式（off/full/auto_light），旧版未注册该键→
     # 恒取默认 full，config/domain_config 的取值形同装饰（无法按域关闭/降级待确认硬门）。
     "open_questions": _gate_mode(_CG.get("open_questions")),
+    # RC6 修复：P2/P3 风险被用例引用的最低比例（软门）。旧版 risk_coverage 只统计 P0/P1，
+    # P2/P3 一条用例不引也不阻断 gate（需求B 的 RK16-19 一条不引仍 PASS）。默认 0.0=不阻断，
+    # 进 soft 桶供提示；可按域升至正数（如 0.5）变硬门。
+    "risk_p2p3_min_ratio": float(_CG.get("risk_p2p3_min_ratio", 0.0)),
+    # RC7 修复：每条风险须被用例引用的最低次数（覆盖深度门）。旧版 risk_coverage 只校验
+    # "被引用 ≥1 次"即算覆盖，一条用例粗略引一个 RK 就算覆盖，覆盖深度无门。None=不判；
+    # 形如 {"P0":2,"P1":1} 时低于阈值进 soft 桶（默认）或 gate_fails（按域升硬）。
+    "risk_min_case_refs": _CG.get("risk_min_case_refs") if _CG.get("risk_min_case_refs") is not None else None,
+    # RC8 修复：状态机/边界深度软门（默认 off 仅提示，可按域升 warn/full）。旧版只是 stdout
+    # ⚠ 文本，gate 程序化读不到，需求B 这两项不达标却 PASS。
+    "state_machine_coverage": _gate_mode(_CG.get("state_machine_coverage"), "off"),
+    "boundary_depth_coverage": _gate_mode(_CG.get("boundary_depth_coverage"), "off"),
 }
+
+# RC21·根因21 修复：覆盖门生效阶段从硬编码 (8,10,13) 改为 config 驱动。
+# 旧版 L3112（现 L3565）硬编码 `if a.phase in (8,10,13)` 决定 coverage_gate_failures 是否
+# enforce——phase_gate_map phase 8 没列 coverage_gate_failures 但实际跑了（硬编码），phase 10
+# 列了也跑，config 与实际行为不一致，改 config 不改代码无法调整哪些阶段跑覆盖门。此处读 config。
+COVERAGE_GATE_PHASES = set(_RULES.get("coverage_gate_phases", [8, 10, 13]))
 
 # 敏感数据信号词表（v0.8.0·safety_coverage 硬门触发条件）
 _SENS = _RULES.get("sensitive_signals", {})
@@ -276,6 +307,10 @@ def coverage_gate_failures(findings, run_mode="full"):
     tp_presence_fail = check_testpoint_presence(findings, run_mode=run_mode)
     if tp_presence_fail:
         fails.append(tp_presence_fail)
+    # #RH 风险清单 section 缺失硬门（RC16·闭合"漏写风险清单绕过 RK 门"静默放行）
+    risk_presence_fail = check_risk_section_presence(findings, run_mode=run_mode)
+    if risk_presence_fail:
+        fails.append(risk_presence_fail)
     # #4-H 需求追溯硬门
     unc_req, req_total = traces.get("requirement", [None, 0])
     if unc_req is not None and req_total:
@@ -301,6 +336,25 @@ def coverage_gate_failures(findings, run_mode="full"):
             fails.append(("#6-H 变更接口三类硬门",
                           "变更接口 %d 个、缺契约/规则/场景三类覆盖 %d 个：%s" % (
                               api_total, len(unc_api), "；".join(str(u)[:60] for u in unc_api[:5]))))
+    # #5-H 规则追溯硬门（RC5·根因5 修复·闭环需求B"覆盖33%却PASS"）
+    # 旧版 coverage_gate_failures 查了 REQ/RK(P0P1)/TP/API/DESIGN/safety，唯独不查 R<n> 是否被
+    # 用例引用——rule_coverage 只做 token 类目模糊匹配且为软提示不进 gate，R 的反向追溯是被
+    # 遗忘的空白。25 条规则只引 13 条，gate 完全不判 → PASS。此处按 R<n> ID 精确比对，与 #7-H
+    # 的 TP 门同口径：R 清单存在且未引用比例 < rule_trace_min_ratio 即 exit=1。
+    # v0.9.0·根因6 同口径：#5 不随 auto_light 降级——规则追溯是"是否覆盖业务规则建模"的核心硬门，
+    # 连跑/轻量亦硬判（R 清单不存在时 SKIP，不阻断）。
+    if COVERAGE_GATES.get("rule_trace_min_ratio") is not None:
+        unc_rule_id, total_r = traces.get("rule_id", [None, 0])
+        if unc_rule_id is not None and total_r:
+            ratio = (total_r - len(unc_rule_id)) / float(total_r)
+            if ratio < COVERAGE_GATES["rule_trace_min_ratio"]:
+                fails.append(("#5-H 规则追溯硬门",
+                              "规则 %d 条、未被用例引用 %d 条（引用率 %.0f%% < 阈值 %.0f%%）：%s。"
+                              "修复：补齐对应用例的'关联规则'列引用 R<序号>（如 R1、R2），"
+                              "或确认该规则不在测试范围并登记假设" % (
+                                  total_r, len(unc_rule_id), ratio * 100,
+                                  COVERAGE_GATES["rule_trace_min_ratio"] * 100,
+                                  "、".join(str(u)[:40] for u in unc_rule_id[:8]))))
     # RK P0/P1 风险硬门
     unc_risk, p0p1, _rt = traces.get("risk", [None, 0, 0])
     if COVERAGE_GATES["risk_p0p1"] != "off" and p0p1 and unc_risk:
@@ -308,6 +362,37 @@ def coverage_gate_failures(findings, run_mode="full"):
             fails.append(("RK P0/P1 风险硬门",
                           "P0/P1 风险 %d 条、未被用例引用 %d 条：%s" % (
                               p0p1, len(unc_risk), "；".join(str(u)[:60] for u in unc_risk[:5]))))
+    # RC6·根因6 修复：P2/P3 风险追溯软门（旧版只查 P0/P1，P2/P3 一条不引也不阻断）。
+    # 需求B 的 RK16-19（P2/P3）一条用例不引仍 PASS。此处补 P2/P3 引用比例判定：
+    # 默认阈值 0.0=不阻断，仅当配置升至正数（如 0.5）且未达标时进 fails（按域可升硬）。
+    p2p3_min = COVERAGE_GATES.get("risk_p2p3_min_ratio", 0.0)
+    if p2p3_min and p2p3_min > 0.0:
+        p2p3_stats = traces.get("risk_p2p3", [{}, []])[0] or {}
+        p2p3_total = p2p3_stats.get("total", 0)
+        p2p3_uncovered = p2p3_stats.get("uncovered", 0)
+        if p2p3_total and p2p3_uncovered:
+            ratio = (p2p3_total - p2p3_uncovered) / float(p2p3_total)
+            if ratio < p2p3_min:
+                fails.append(("RK P2/P3 风险追溯门（RC6）",
+                              "P2/P3 风险 %d 条、未被用例引用 %d 条（引用率 %.0f%% < 阈值 %.0f%%）。"
+                              "修复：补齐对应用例的'关联规则'列引用 RK<序号>，或确认不在范围并登记假设"
+                              % (p2p3_total, p2p3_uncovered, ratio * 100, p2p3_min * 100)))
+    # RC7·根因7 修复：风险覆盖深度门（旧版只校验"被引用 ≥1 次"即算覆盖，覆盖深度无门）。
+    # 配置形如 {"P0":2,"P1":1} 时，每条风险被引用次数 < 阈值进 fails（默认 None=不判）。
+    ref_thresholds = COVERAGE_GATES.get("risk_min_case_refs")
+    if ref_thresholds and isinstance(ref_thresholds, dict):
+        _p2p3_stats, ref_counts = traces.get("risk_p2p3", [{}, []])
+        ref_counts = ref_counts or []
+        shallow = []
+        for rid, level, cnt in ref_counts:
+            thr = ref_thresholds.get(level)
+            if thr is not None and cnt < thr:
+                shallow.append("%s[%s] 被引%d次<阈值%d" % (rid, level, cnt, thr))
+        if shallow:
+            fails.append(("RK 覆盖深度门（RC7·软）",
+                          "以下风险被引用次数低于阈值：%s。"
+                          "修复：补齐用例使每条风险被足够条数引用，或确认该风险为低优先级并登记假设"
+                          % "；".join(shallow[:8])))
     # #7-H 测试点追溯硬门（v0.8.0·闭环 36→30 压缩）
     # testpoint_coverage 已有 testpoint_coverage() 函数返回 (unc_tp, tp_total) 入 traces，
     # 这里做硬门判定：TP 清单存在且未覆盖比例 < tp_trace_min_ratio -> exit=1
@@ -340,6 +425,21 @@ def coverage_gate_failures(findings, run_mode="full"):
         s_fails = findings.get("_safety_fails") or []
         if s_fails:
             fails.extend(("#S-H 安全覆盖硬门", f) for f in s_fails)
+    # RC8·根因8 修复：状态机/边界深度软门（默认 off；可按域升 warn/full）。
+    # 旧版只是 stdout ⚠ 文本，gate 程序化读不到，需求B 这两项不达标却 PASS。
+    soft = findings.get("soft", {}) or {}
+    sm_mode = _gate_mode(COVERAGE_GATES.get("state_machine_coverage", "off"), "off")
+    if sm_mode != "off":
+        sm_n, sm_list = soft.get("state_machine", [0, []])
+        if sm_list:
+            tag = "#SM-H 状态机非法流转门（RC8）" if sm_mode == "full" else "#SM-W 状态机非法流转提示（RC8）"
+            fails.append((tag, sm_list[0]))
+    bd_mode = _gate_mode(COVERAGE_GATES.get("boundary_depth_coverage", "off"), "off")
+    if bd_mode != "off":
+        bd_n, bd_list = soft.get("boundary_depth", [0, []])
+        if bd_list:
+            tag = "#BD-H 边界深度门（RC8）" if bd_mode == "full" else "#BD-W 边界深度提示（RC8）"
+            fails.append((tag, bd_list[0]))
     return fails
 
 
@@ -349,32 +449,45 @@ def verify_summary_line(findings, hard_gate_fails=None):
     反编造约束（SKILL.md 交付摘要）：五项脚本校验数值必须摘自本行，禁止凭印象手填；
     未运行本脚本时五项一律填"未执行"，填数值即视为声明脚本已运行（声明与实际不符=输出不合格）。
     hard_gate_fails：coverage_gate_failures 的返回（None=由本行按 full 模式自算）。"""
-    soft = findings["soft"]
-    traces = findings["traces"]
-    unc_req, req_total = traces["requirement"]
-    unc_api, api_total, _ct = traces["interface"]
-    unc_risk, p0p1, _rt = traces["risk"]
+    soft = findings.get("soft", {}) or {}
+    traces = findings.get("traces", {}) or {}
+    # RC11·根因11 修复·防御式读取：旧版直接 soft["completeness"][0] / traces["requirement"]，
+    # 早退路径用 empty_findings（soft 为空 dict）调用 → KeyError 崩溃，stderr 被 runtime 吞掉
+    # （RC10 修复前），模型只看到空输出无从得知脚本挂了。此处全部改 .get() 防御式读取，
+    # 与 empty_findings 预填键双保险——任一未预填也不崩。
+    unc_req, req_total = traces.get("requirement", [None, 0])
+    unc_api, api_total, _ct = traces.get("interface", [[], 0, []])
+    unc_risk, p0p1, _rt = traces.get("risk", [None, 0, 0])
+    # RC5：R<n> 反向追溯数值（section→case），与 req/tp 同口径摘入摘要行
+    _rid = traces.get("rule_id", [None, 0])
+    unc_rule_id, rule_total = _rid[0], _rid[1]
     fields = {
-        "check13": soft["completeness"][0],
-        "check9_schema": ("skip" if soft["schema"][0] is None else soft["schema"][0]),
-        "risk_src_pending": len(findings["risk_source"][1]),
+        "check13": soft.get("completeness", [None, []])[0],
+        "check9_schema": (lambda v: "skip" if v is None else v)(
+            soft.get("schema", [None, []])[0]),
+        "risk_src_pending": len(findings.get("risk_source", [{}, []])[1]),
         "req_total": (req_total if unc_req is not None else "na"),
         "req_uncovered": (len(unc_req) if unc_req is not None else "na"),
         "api_total": api_total,
         "api_uncovered": len(unc_api),
         "risk_p0p1": p0p1,
         "risk_uncovered": (len(unc_risk) if unc_risk else 0),
-        "tp_total": (traces["testpoint"][1] if traces["testpoint"][0] is not None else "na"),
-        "tp_uncovered": (len(traces["testpoint"][0]) if traces["testpoint"][0] is not None else "na"),
-        "design_total": traces["design_doc"][1],
-        "design_uncovered": len(traces["design_doc"][0]),
+        "rule_total": (rule_total if unc_rule_id is not None else "na"),
+        "rule_uncovered": (len(unc_rule_id) if unc_rule_id is not None else "na"),
+        "tp_total": (traces.get("testpoint", [None, 0])[1]
+                     if traces.get("testpoint", [None, 0])[0] is not None else "na"),
+        "tp_uncovered": (len(traces.get("testpoint", [None, 0])[0])
+                        if traces.get("testpoint", [None, 0])[0] is not None else "na"),
+        "design_total": traces.get("design_doc", [[], 0])[1],
+        "design_uncovered": len(traces.get("design_doc", [[], 0])[0]),
         "safety_fail": len(findings.get("_safety_fails") or []),
-        "check15": soft["behavior"][0],
+        "check15": soft.get("behavior", [None, []])[0],
         "tp_risk_orphans": soft.get("tp_risk_orphans", [0, []])[0],
         "rule_source_fake": soft.get("rule_source_fake", [0, []])[0],
         "clarification_gaps": soft.get("clarification_gaps", [0, []])[0],
         "combination_gaps": soft.get("combination_gaps", [0, []])[0],
-        "hard_violations": len(findings["hard_violations"]),
+        "cite_consistency": soft.get("citation_consistency", [0, []])[0],
+        "hard_violations": len(findings.get("hard_violations", [])),
         "gate_fails": (len(hard_gate_fails) if hard_gate_fails is not None
                        else len(coverage_gate_failures(findings))),
     }
@@ -741,18 +854,31 @@ _ASSUMP_CFG = _CG.get("assumption_resolution", _RULES.get("coverage_gates", {}).
 def _parse_section_ids_prose(lines, section_pattern, id_regex):
     """从 prose section（规则建模正文）扫描 ID。返回 set。"""
     in_section = False
+    section_level = None  # RC13：进入 section 时的标题层级，用于判断子标题
     ids = set()
     pat = re.compile(id_regex)
     for ln in lines:
         s = ln.strip()
-        if s.startswith("|") and "用例ID" in s:
-            break
-        if re.match(r"^#+\s*.*(" + section_pattern + ")", s):
+        m_head = re.match(r"^(#+)\s", s)
+        head_level = len(m_head.group(1)) if m_head else None
+        if m_head and re.match(r"^#+\s*.*(" + section_pattern + ")", s):
             in_section = True
+            section_level = head_level
             continue
         if not in_section:
+            # 用例表出现在目标 section 之前 → 顺序写反，提前终止（RC1/RC2）
+            if s.startswith("|") and "用例ID" in s:
+                break
             continue
-        if re.match(r"^#+\s", s):
+        # 已进入 section：遇用例表 → section 自然结束
+        if s.startswith("|") and "用例ID" in s:
+            break
+        # RC13·根因13 修复：遇标题判断是否结束 section。
+        # 旧版 `if re.match(r"^#+\s", s): break` 对任意标题（含 ### 子标题）即 break，
+        # section 内若在 `### 规则建模清单` 下再嵌 `#### 来源说明` 子标题，该子标题之后
+        # 的 R2/R3…全部丢失（与 RC1 叠加，R 方向解析极度脆弱）。改为只对**同级或更高级**
+        # 标题触发 break（section 结束）；更深层子标题则继续在同一 section 内收集。
+        if m_head and section_level is not None and head_level <= section_level:
             break
         for m in pat.finditer(s):
             ids.add(int(m.group(1)))
@@ -840,15 +966,20 @@ def check_traceback_section_inlined(lines, section_ids):
     因 section_ids[prefix]["ids"] 为空而 continue 静默跳过（L769-770）→ D1 悬空引用门禁被
     空指针绕过，用例关联规则列引用 R26/R28 等全部误判为"判过"。
 
-    Phase 8/10 检查点必须内联 R/RK/TP 实体内容（从 checkpoint_3/5/7 复制条目），非写指针。
-    无对应 section 标题则不判（允许 Phase 3 检查点无'风险清单'等）。"""
+    Phase 8/10 检查点必须内联 R/RK/TP/API/SC 实体内容（从 checkpoint_3/5/7/契约卡复制条目），非写指针。
+    无对应 section 标题则不判（允许 Phase 3 检查点无'风险清单'等）。
+    RC17 修复：pairs 补 API/SC——旧版只覆盖 R/RK/TP，API/SC section 标题存在但解析为空时
+    既不 fail 也不 warn（空注册表绕过），需求B 无 API/SC section 却顺利过 #5/#6 门。"""
     violations = []
     # 指针式引用标记（"见 Phase N"/"见 checkpoint"/"参见"等）——真实内联 section 不会含这些
     _POINTER_PAT = re.compile(r"(见\s*Phase|见.*checkpoint|参见.*Phase|同\s*Phase|详见.*Phase)")
     # (section 名正则, 对应 ID 前缀) —— section 名与 collect_section_ids 的 _CR_SECTION_DEFS 对齐
+    # RC17：补 API/SC，与 R/RK/TP 同口径校验"section 存在但无可解析 ID"
     pairs = [("规则建模", "R"),
              ("风险清单|风险分析|风险列表", "RK"),
-             ("测试点清单|测试点列表|测试点建模", "TP")]
+             ("测试点清单|测试点列表|测试点建模", "TP"),
+             ("变更影响清单|接口契约模型|变更接口清单", "API"),
+             ("场景清单|场景列表", "SC")]
     for sec_name, prefix in pairs:
         has_heading = False
         section_body = []
@@ -882,10 +1013,62 @@ def check_traceback_section_inlined(lines, section_ids):
                 why = "含指针式引用'见 Phase N'（指针文本里的 ID 被误解析为真实条目，伪造注册表）"
             else:
                 why = "无可解析 %s ID" % prefix
+            # RC17：实体来源按 prefix 区分（API/SC 来自契约卡/场景清单，非 checkpoint_3/5/7）
+            _SRC = {"R": "checkpoint_3 规则建模", "RK": "checkpoint_5 风险清单",
+                    "TP": "checkpoint_7 测试点清单",
+                    "API": "契约卡/变更影响清单", "SC": "场景清单"}.get(prefix, "checkpoint")
             violations.append("追溯性 section [%s] 存在但%s，D1 悬空引用门禁被绕过。"
-                              "须内联 %s 实体内容（从 checkpoint_3/5/7 复制规则/风险/测试点条目，"
+                              "须内联 %s 实体内容（从 %s 复制条目，"
                               "含 **%s<n>** 加粗项或表格首列 %s<n>），非写指针" % (
-                                  sec_name.split("|")[0], why, prefix, prefix, prefix))
+                                  sec_name.split("|")[0], why, prefix, _SRC, prefix, prefix))
+    return violations
+
+
+# ===== 项 1c：追溯性 section 顺序校验【RC2·需求A卡死真凶助推】=====
+def check_section_order(lines):
+    """校验用例表必须出现在全部追溯性 section（规则建模/风险清单/测试点清单）之后。
+
+    根因 RC2：output_write.md L199 明确"必须在用例表之前包含以下 section"，但机器层此前无校验。
+    当模型把用例表写在追溯性 section 之前，_parse_section_ids_prose 的 break（RC1 修复前是无条件
+    break、修复后仍提前终止）会在用例表表头就 break，永远到不了后面的 R section → 返回空 ids →
+    check_traceback_section_inlined 报"无可解析 R ID"（误导消息，不指向"顺序写反"）→ 模型反复改
+    R section 格式无效（需求A 卡死 7 次的直接诱因）。本检查显式报"顺序写反"，给模型正确修复方向。
+
+    判定：扫描各追溯性 section 标题首行号 vs 用例表首行（`| 用例ID |`）行号，若用例表行号 <
+    任一 section 标题行号 → 进 hard_violations（exit=1）。无对应 section 标题则该 prefix 不参与
+    判定（允许 Phase 3 检查点无'风险清单'/'测试点清单'等）。
+    """
+    # (section 名正则, 对应中文 section 名) —— 与 collect_section_ids 的 _CR_SECTION_DEFS /
+    # check_traceback_section_inlined 的 pairs 对齐
+    order_pairs = [("规则建模|业务规则|规则模型|建模", "规则建模"),
+                   ("风险清单|风险分析|风险列表", "风险清单"),
+                   ("测试点清单|测试点列表|测试点建模", "测试点清单")]
+    table_line = None           # 用例表首行（| 用例ID |）行号
+    section_first_lines = {}    # section 名 -> 首个标题行号
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if table_line is None and s.startswith("|") and "用例ID" in s:
+            table_line = i
+            # 用例表一旦定位，section 标题若仍在后面则顺序写反；但不提前 break——
+            # 继续记录全部 section 标题首行，以便给出完整的"哪些 section 被写反"反馈
+        for sec_pat, sec_label in order_pairs:
+            if sec_label in section_first_lines:
+                continue
+            if re.match(r"^#+\s.*(" + sec_pat + ")", s):
+                section_first_lines[sec_label] = i
+    if table_line is None:
+        return []  # 无用例表，不判（其他检查会报）
+    violations = []
+    for sec_pat, sec_label in order_pairs:
+        sl = section_first_lines.get(sec_label)
+        if sl is None:
+            continue  # 该 section 未出现，不参与顺序判定（其他门管"缺失"）
+        if sl > table_line:
+            violations.append(
+                "用例表（第%d行）出现在追溯性 section [%s]（第%d行）之前——顺序写反。"
+                "追溯性 section（规则建模→风险清单→测试点清单）必须在用例表之前"
+                "（output_write.md L199）。请调整顺序：先写追溯性 section，再写用例表。" % (
+                    table_line + 1, sec_label, sl + 1))
     return violations
 
 
@@ -1368,6 +1551,32 @@ def check_testpoint_presence(findings, run_mode="full"):
     return None
 
 
+def check_risk_section_presence(findings, run_mode="full"):
+    """风险清单 section 缺失硬门禁（RC16 修复·闭合"漏写风险清单 section 不阻断"静默放行）。
+
+    现状 coverage_gate_failures RK 门仅 p0p1>0 才触发；风险清单 section 完全缺失时
+    risk_total=0 → RK 门 SKIP → 模型可借"漏写整个风险清单"绕过风险覆盖门禁。与 REQ section
+    缺失有硬门（#4-P）形成不对称：需求缺失 fail，风险缺失只 stdout ⚠ 不阻断。本检查补该缺口：
+    coverage_gates.risk_section_presence != off 且风险清单缺失（risk_total=0 且文档无标题）
+    且有用例 -> 追加硬门违约。v0.9.0 口径：与 RK 门一致，不随 auto_light 降级。
+    无风险分解的轻型需求须显式登记假设'本需求无风险分解'，不得静默跳过。
+    """
+    mode = _gate_mode(COVERAGE_GATES.get("risk_section_presence", "full"), "full")
+    if mode == "off":
+        return None
+    traces = findings.get("traces", {})
+    _unc_risk, _p0p1, risk_total = traces.get("risk", [None, 0, 0])
+    section_ids = findings.get("section_ids", {}) or {}
+    rk_ids = section_ids.get("RK", {}).get("ids", set()) or set()
+    # risk_total=0 且 RK 注册表空 且有用例 → Phase 5 应落盘的风险清单缺失
+    if risk_total == 0 and not rk_ids and findings.get("n", 0) > 0:
+        return ("#RH 风险清单 section 缺失（RC16）",
+                "风险清单缺失（risk_total=0），RK 风险追溯未校验；Phase 5 须落盘'## 风险清单'"
+                "（每条 RK<序号> 标风险等级/描述/关联模块/风险来源）后重跑，"
+                "或登记假设'本需求无风险分解'并在交付摘要标注'RK 未校验（风险清单缺失）'")
+    return None
+
+
 def parse_rule_categories(lines):
     """从 .md 的'规则建模'section 提取规则类别（粗体标题项）。返回类别列表。
     section 位于用例表之前，标题含'规则建模'/'业务规则'/'规则'。"""
@@ -1375,13 +1584,17 @@ def parse_rule_categories(lines):
     categories = []
     for ln in lines:
         s = ln.strip()
-        if s.startswith("|") and "用例ID" in s:
-            break  # 进入用例表，section 结束
         if re.match(r"^#+\s*.*(规则建模|业务规则|规则模型|建模)", s):
             in_section = True
             continue
         if not in_section:
+            # 用例表出现在目标 section 之前 → 顺序写反，提前终止（RC4，同 RC1）
+            if s.startswith("|") and "用例ID" in s:
+                break
             continue
+        # 已进入 section：遇用例表 → section 自然结束
+        if s.startswith("|") and "用例ID" in s:
+            break  # 进入用例表，section 结束
         # 跳过空行/其他小标题
         if not s or s.startswith("#"):
             continue
@@ -1423,6 +1636,112 @@ def rule_coverage(data_rows, categories):
     return uncovered, len(categories)
 
 
+def parse_rule_content_map(lines):
+    """RC20：从'规则建模'section 提取 {R序号: 内容文本}（粗体标题 + 后续要点行）。
+    用于 case→section 内容一致性软检查（引用 R<n> 但用例名称/GWT 无该规则关键 token → 疑似无关引用）。
+    section 定位与 _parse_section_ids_prose 同口径（RC1/RC13 修复后的 break 规则）。"""
+    in_section = False
+    section_level = None
+    cur_num = None
+    buf = []
+    result = {}
+    head_re = re.compile(r"\*\*R(\d+)[：:]")
+    for ln in lines:
+        s = ln.strip()
+        m_head = re.match(r"^(#+)\s", s)
+        head_level = len(m_head.group(1)) if m_head else None
+        if m_head and re.match(r"^#+\s*.*(规则建模|业务规则|规则模型|建模)", s):
+            in_section = True
+            section_level = head_level
+            continue
+        if not in_section:
+            if s.startswith("|") and "用例ID" in s:
+                break
+            continue
+        if s.startswith("|") and "用例ID" in s:
+            break
+        if m_head and section_level is not None and head_level <= section_level:
+            break
+        # 命中 **R<n>： 标题 → 切换当前规则
+        mh = head_re.match(s) or head_re.search(s)
+        if mh:
+            if cur_num is not None:
+                result[cur_num] = " ".join(buf)
+            cur_num = int(mh.group(1))
+            buf = [s]
+        elif cur_num is not None and s:
+            # 同一规则下的要点行（- 规则内容：... / - [来源:...]）
+            if s.startswith("-") or s.startswith("：") or s.startswith("："):
+                buf.append(s)
+            elif not s.startswith("[") and "[来源" not in s:
+                buf.append(s)
+    if cur_num is not None:
+        result[cur_num] = " ".join(buf)
+    return result
+
+
+def check_citation_content_consistency(data_rows, section_ids, rule_content_map):
+    """RC20·根因20 修复：case→section 内容一致性软检查。
+
+    #5 check_citation_resolution 只校验'用例引用的 R/RK/TP ID 在注册表存在'（方向），不校验
+    用例'关联规则'列里的 R<n> 是否真对应 R section 的规则项内容——模型可写一条用例关联规则填 R1，
+    但 R1 实际内容与用例无关，只要 ID 存在就过 #5。叠加 RC5（R 反向无硬门），R 方向既不查
+    '是否被引'也不查'引得对不对'。本检查为软判定：用例名称/Given/When/Then 须包含所引 R<n>
+    规则项的关键 token，不一致进 soft 桶 warn（复用 rule_coverage token 匹配口径）。
+    返回 (疑似数, 疑似列表)。"""
+    suspects = []
+    if not rule_content_map or not data_rows:
+        return 0, suspects
+    for i, r in enumerate(data_rows, 1):
+        rule_text = r[IDX_RULE] if len(r) > IDX_RULE else ""
+        if not rule_text or _CR_EXTERNAL_PAT.search(rule_text):
+            continue
+        case_text = row_text(r)
+        for m in re.finditer(r"\bR(\d+)(?!\d)", rule_text):
+            num = int(m.group(1))
+            content = rule_content_map.get(num)
+            if not content:
+                continue
+            toks = [t for t in tokens_of(content) if len(t) >= 2]
+            # 过滤过泛的 token（单字/常见词已在 tokens_of 处理；此处再滤纯数字/标点）
+            toks = [t for t in toks if re.search(r"[A-Za-z]{2,}|[一-龥]", t)]
+            if not toks:
+                continue
+            if not any(tok in case_text for tok in toks):
+                suspects.append("行%d: 引用 R%d 但用例名称/GWT 无该规则关键 token（疑似无关引用·RC20）"
+                                % (i, num))
+    return len(suspects), suspects
+
+
+def rule_id_coverage(data_rows, section_ids):
+    """RC5·根因5 修复：R<n> 方向反向追溯（section→case）。与 risk_coverage/testpoint_coverage
+    同口径——R section 每条规则项 R<n> 须被用例'关联规则'列引用。
+
+    旧版只有 rule_coverage（token 类目匹配，软提示不进 gate），R 的反向追溯是被遗忘的空白：
+    25 条规则只引 13 条，gate 完全不判 → PASS（需求B 33% 覆盖却过门）。
+
+    R section 为 prose（**R1: ...**），collect_section_ids 已从正文扫描 R<n> 入注册表。
+    本函数读 section_ids["R"]["ids"]，比对用例关联规则列引用的 R<n> 集合，返回未覆盖列表。
+
+    返回 (未覆盖列表, R总数)。R section 无可解析 ID（如类目式规则建模、或顺序写反致空）→
+    (None, 0)（跳过，不误伤；由 check_traceback_section_inlined / check_section_order
+    管这种结构性缺口）。
+    """
+    r_ids = section_ids.get("R", {}).get("ids", set()) or set()
+    if not r_ids:
+        return None, 0
+    case_rule_texts = [r[IDX_RULE] if len(r) > IDX_RULE else "" for r in data_rows]
+    uncovered = []
+    for n in sorted(r_ids):
+        rid = "R%d" % n
+        # R1 后非数字避免 R10 误匹配 R1（与 risk_coverage 同口径）
+        id_covered = any(re.search(re.escape(rid) + r"(?!\d)", rule_text)
+                         for rule_text in case_rule_texts)
+        if not id_covered:
+            uncovered.append(rid)
+    return uncovered, len(r_ids)
+
+
 def parse_section_rows(lines, title_pattern, header_keywords):
     """找到标题匹配 title_pattern 的 section，解析其后的首个表格，返回数据行列表。
     header_keywords 用于确认表头是目标表格。找不到返回 []。"""
@@ -1460,22 +1779,48 @@ def risk_coverage(data_rows, risk_rows):
     """校验每个 P0/P1 风险是否被用例覆盖。优先 ID 精确匹配（关联规则列含 R<序号>，
     R1 后非数字避免 R10 误匹配），未标注 ID 时降级 token 兜底（标注"疑似"）。
     risk_rows: [[风险ID, 风险等级, 风险描述, ...], ...]
-    返回 (未覆盖列表, P0/P1总数, 风险总数)。无风险清单时返回 (None, 0, 0)。"""
+    返回 (未覆盖列表, P0/P1总数, 风险总数, P2/P3统计, 引用深度统计)。
+    无风险清单时返回 (None, 0, 0, {}, [])。
+    RC6：顺带统计 P2/P3 的引用比例（软门，旧版只查 P0/P1，P2/P3 空白）。
+    RC7：顺带统计每条风险被几条用例引用（覆盖深度，旧版只查≥1 次即算覆盖）。"""
     if not risk_rows:
-        return None, 0, 0
+        return None, 0, 0, {}, []
     case_rule_texts = [r[IDX_RULE] if len(r) > IDX_RULE else "" for r in data_rows]
     case_full_texts = [row_text(r) for r in data_rows]
     uncovered = []
     p0p1_total = 0
+    # RC6：P2/P3 引用统计
+    p2p3_total = 0
+    p2p3_covered = 0
+    # RC7：每条风险被引用的用例条数（覆盖深度）
+    ref_counts = []  # [(rid, level, ref_count)]
     for rr in risk_rows:
         rid = rr[0].strip() if len(rr) > 0 else ""
         level = rr[1].strip() if len(rr) > 1 else ""
         desc = rr[2].strip() if len(rr) > 2 else ""
-        if level not in ("P0", "P1"):
+        is_p0p1 = level in ("P0", "P1")
+        # RC7：统计每条风险被几条用例引用（ID 精确匹配口径）
+        id_refs = 0
+        if rid:
+            id_refs = sum(1 for rt in case_rule_texts
+                          if re.search(re.escape(rid) + r"(?!\d)", rt))
+        # RC6：P2/P3 统计（token 兜底也算覆盖，与 P0/P1 同口径）
+        if not is_p0p1:
+            p2p3_total += 1
+            if id_refs:
+                p2p3_covered += 1
+            else:
+                toks = tokens_of(desc) if desc else ([rid] if rid else [])
+                token_covered = any(any(tok in ct for tok in toks) for ct in case_full_texts)
+                if token_covered:
+                    p2p3_covered += 1
+            ref_counts.append((rid, level, id_refs))
             continue
+        # P0/P1 主路径
         p0p1_total += 1
+        ref_counts.append((rid, level, id_refs))
         # 优先 ID 精确匹配：关联规则列含 rid 且后非数字
-        id_covered = bool(rid) and any(re.search(re.escape(rid) + r"(?!\d)", rule_text) for rule_text in case_rule_texts)
+        id_covered = bool(rid) and id_refs > 0
         if id_covered:
             continue
         # 兜底 token 匹配
@@ -1483,7 +1828,9 @@ def risk_coverage(data_rows, risk_rows):
         token_covered = any(any(tok in ct for tok in toks) for ct in case_full_texts)
         if not token_covered:
             uncovered.append("%s[%s] %s" % (rid, level, desc[:24]))
-    return uncovered, p0p1_total, len(risk_rows)
+    p2p3_stats = {"total": p2p3_total, "covered": p2p3_covered,
+                  "uncovered": p2p3_total - p2p3_covered}
+    return uncovered, p0p1_total, len(risk_rows), p2p3_stats, ref_counts
 
 
 def testpoint_coverage(data_rows, tp_rows):
@@ -1721,14 +2068,20 @@ def design_doc_testpoints_trace(data_rows, design_lines):
     return uncovered, len(items)
 
 
-def involves_sensitive_data(req_doc_lines, design_lines=None):
+def involves_sensitive_data(req_doc_lines, design_lines=None, ledger_facts=None):
     """v0.8.0 safety_coverage 硬门触发条件：REQ/DESIGN 含敏感信号词即触发。
-    返回命中的信号词列表（空=不涉敏感，SKIP）。"""
+    返回命中的信号词列表（空=不涉敏感，SKIP）。
+    RC19·根因19 修复：旧版只扫 req_doc_lines + design_lines，不扫 ledger 台账事实——
+    台账 Q（如需求B 的 Q19 坐席权限、Q21 callid 唯一性）常含敏感业务约束，但安全门不查台账
+    → 台账里的敏感数据要求不触发安全覆盖检查 → #S-H 安全门静默通过。此处入参加 ledger_facts
+    行列表一并扫描。"""
     sources = []
     if req_doc_lines:
         sources.extend(req_doc_lines)
     if design_lines:
         sources.extend(design_lines)
+    if ledger_facts:  # RC19：台账权威事实一并扫描
+        sources.extend(ledger_facts)
     if not sources:
         return []
     text = "".join(sources)
@@ -1736,15 +2089,18 @@ def involves_sensitive_data(req_doc_lines, design_lines=None):
     return hit
 
 
-def safety_coverage_gate(data_rows, req_doc_lines, design_lines=None):
+def safety_coverage_gate(data_rows, req_doc_lines, design_lines=None, ledger_facts=None):
     """v0.8.0 safety_coverage 硬门：涉敏感数据时安全类用例数须 >0。
-    返回违约明细字符串列表（空=通过/SKIP）。"""
-    if not involves_sensitive_data(req_doc_lines, design_lines):
+    返回违约明细字符串列表（空=通过/SKIP）。
+    RC30·根因30 修复：旧版对同一文档调 involves_sensitive_data 两次（L2083 判定 + L2088 取信号），
+    纯性能浪费，文档大时翻倍扫描。此处缓存结果复用。
+    RC19：ledger_facts 透传给 involves_sensitive_data 扫台账敏感约束。"""
+    hit = involves_sensitive_data(req_doc_lines, design_lines, ledger_facts=ledger_facts)  # RC30：单次调用缓存
+    if not hit:
         return []
     safety_cases = [r for r in data_rows if len(r) > IDX_TYPE and r[IDX_TYPE] == "安全"]
     if not safety_cases:
-        return ["#S-H 涉敏感数据但无安全类用例覆盖（触发信号：%s）" %
-                "、".join(involves_sensitive_data(req_doc_lines, design_lines)[:5])]
+        return ["#S-H 涉敏感数据但无安全类用例覆盖（触发信号：%s）" % "、".join(hit[:5])]
     return []
 
 
@@ -1794,7 +2150,11 @@ BEHAVIOR_SIGNALS = list(_BS.get("behavior_signals", []))
 _STATE_TARGET_PAT = re.compile(
     _BS.get("state_target_pattern", r"状态(由|变更为|更新为|变为|置为|保持为)([一-龥A-Za-z0-9]{2,8})"))
 _ASSUMPTION_TAG_PATS = [re.compile(p) for p in _BS.get("assumption_tag_patterns", [r"假设A\d+", r"基于假设"])]
-_CITATION_PAT = re.compile(_BS.get("citation_pattern", r"(R|TP)\d+"))
+# RC28·根因28 修复：fallback 从 r"(R|TP)\d+"（2 前缀）改为 r"(R|RK|TP|API|SC)\d+"（5 前缀），
+# 与 config citation_resolution.citation_pattern 默认值一致。旧版若 behavior_source.citation_pattern
+# 键缺失/config 加载异常，fallback 退化为只匹配 R/TP → RK/API/SC 引用全部漏匹配，相关覆盖检查
+# 静默判"未引用"。消除"config 失效即退化"的单点风险。
+_CITATION_PAT = re.compile(_BS.get("citation_pattern", r"(R|RK|TP|API|SC)\d+"))
 _SOURCE_MARKER_PAT = re.compile(_BS.get("source_marker_pattern", r"来源[:：]"))
 
 # ===== #6 反向接口追溯（契约驱动分支·变更影响清单 -> 用例三类覆盖）=====
@@ -1954,13 +2314,17 @@ def check_rule_source(lines, req_doc_lines=None):
     items = []
     for ln in lines:
         s = ln.strip()
-        if s.startswith("|") and "用例ID" in s:
-            break
         if re.match(r"^#+\s*.*(规则建模|业务规则|规则模型|建模)", s):
             in_section = True
             continue
         if not in_section:
+            # 用例表出现在目标 section 之前 → 顺序写反，提前终止（RC1/RC4）
+            if s.startswith("|") and "用例ID" in s:
+                break
             continue
+        # 已进入 section：遇用例表 → section 自然结束
+        if s.startswith("|") and "用例ID" in s:
+            break
         if not s or s.startswith("#"):
             continue
         if re.match(r"^[-*]?\s*\*\*([^*：:]{2,20})\*\*", s) or re.match(r"^\d+[.、]\s*\*\*?([^*：:（(]{2,20})", s):
@@ -2407,9 +2771,12 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
     if ledger:
         ledger_q_set = set()
         for qid in (ledger.get("resolved", []) + ledger.get("open", []) + ledger.get("assumptions", [])):
-            m = re.match(r"Q(\d+)$", qid.strip())
-            if m:
-                ledger_q_set.add(int(m.group(1)))
+            # RC15·根因15 修复：旧版 re.match(r"Q(\d+)$", qid) 用 $ 行尾锚，要求 QID 独占
+            # 一词；文档写 [来源:台账Q19] 或 Q19、Q20 同行时 Q19]/Q19、 不匹配 → Q19 漏进
+            # 集合 → 规则来源校验误报"台账Q19 未在 ledger 找到"。改为 findall 提取全部 Q<n>
+            # 编号（与 TP/R 解析的 findall 口径一致），从带括号/顿号的多 Q 字符串提取全部编号。
+            for m in re.findall(r"Q(\d+)", qid or ""):
+                ledger_q_set.add(int(m))
         # 空集仍传非 None，表示"台账已传入但无 Q"，此时任何台账Q<n> 引用都判悬空
 
     # 项 1 反向引用完整性【闭环 D1】（硬·exit=1）
@@ -2419,10 +2786,18 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
     # section 标题存在但解析出 0 个 ID → 指针式引用 → D1 被空注册表绕过。Phase 8/10 必须内联。
     traceback_violations = check_traceback_section_inlined(lines, section_ids)
 
+    # 项 1c 追溯性 section 顺序【RC2·需求A卡死真凶助推】（硬·exit=1）
+    # 用例表写在追溯性 section 之前 → _parse_section_ids_prose 提前 break → 返回空 ids →
+    # check_traceback_section_inlined 报"无可解析 R ID"（误导消息）→ 模型反复改格式无效。
+    # 本检查显式报"顺序写反"，给模型正确修复方向（移 section，不是改格式）。
+    section_order_violations = check_section_order(lines)
+
     # v0.8.1: 结构性违规（追溯 section/悬空引用）排在逐行字段违规之前——
     # run_phase_gate 的 phase_filtered[:50] 打印上限下，让"先修结构、再修字段"的
     # 修复优先序前置，避免模型被 100+ 条枚举越界淹没而漏掉追溯性 section 这类根因。
-    hard_violations = traceback_violations + citation_violations + id_violations + field_violations
+    # RC2: section 顺序违规置最前——它是其他"无可解析 ID"误报的根因，优先暴露给模型。
+    hard_violations = (section_order_violations + traceback_violations
+                       + citation_violations + id_violations + field_violations)
 
     # 项 2 section ID 连续性【闭环 D2】（RK/TP/API/SC=full 硬，R=warn 软）
     contig_violations, contig_warnings = check_section_id_contiguity(section_ids, scope="all")
@@ -2490,11 +2865,40 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
     # 覆盖统计
     stats = coverage_stats(data_rows)
 
+    # RC8·根因8 修复：状态机/边界统计从 stdout ⚠ 文本改为进 soft 桶（gate 程序化可读）。
+    # 旧版非法流转=0、边界深度不足只是 print_findings 的 ⚠ 文本，不进 hard_violations、
+    # 不进 coverage_gate_failures、不进 soft 桶——runtime gate 只读 stdout 文本，这些告警
+    # 对判定零影响（需求B 这两项都不达标却 PASS）。此处入 soft 桶供 coverage_gate_failures
+    # 可配软门判据（默认 warn 不阻断，可升级为 full）。
+    sm_flow_total = stats["flow_legal"] + stats["flow_illegal"] + stats["flow_rollback"]
+    sm_warns = []
+    if sm_flow_total > 0 and stats["flow_illegal"] == 0:
+        sm_warns.append("状态机用例>0 但非法流转=0，状态机测试缺核心范式（缺非法流转用例）")
+    boundary_warns = []
+    if stats["bound_total"] > 0:
+        miss = []
+        if stats["bound_min"] == 0: miss.append("最小")
+        if stats["bound_max"] == 0: miss.append("最大")
+        if stats["bound_critical"] == 0: miss.append("临界")
+        if stats["bound_inside"] == 0: miss.append("边界内")
+        if miss:
+            boundary_warns.append("边界用例 %d 条但深度不足，缺 %s 四值覆盖" % (
+                stats["bound_total"], "/".join(miss)))
+
     # 追溯
     categories = parse_rule_categories(lines)
     unc_rule, total_cat = rule_coverage(data_rows, categories)
+    # RC5·根因5 修复：R<n> 方向反向追溯（section→case）。旧版只有 rule_coverage（token
+    # 类目模糊匹配，软提示不进 gate），R 的反向追溯是被遗忘的空白——25 条规则只引 13 条，
+    # gate 完全不判 → PASS（需求B 33% 覆盖却过门）。此处与 risk_coverage/testpoint_coverage
+    # 同口径，按 R<n> ID 精确比对用例"关联规则"列。
+    unc_rule_id, total_r = rule_id_coverage(data_rows, section_ids)
+    # RC20：R<n>→内容映射，供 case→section 内容一致性软检查
+    rule_content_map = parse_rule_content_map(lines)
+    cite_consist_n, cite_consist_list = check_citation_content_consistency(
+        data_rows, section_ids, rule_content_map)
     risk_rows = parse_section_rows(lines, "风险清单|风险分析|风险列表", ["风险ID", "风险等级"])
-    unc_risk, p0p1_total, risk_total = risk_coverage(data_rows, risk_rows)
+    unc_risk, p0p1_total, risk_total, p2p3_stats, risk_ref_counts = risk_coverage(data_rows, risk_rows)
     tp_rows = parse_section_rows(lines, "测试点清单|测试点列表|测试点建模", ["测试点ID", "测试点"])
     unc_tp, tp_total = testpoint_coverage(data_rows, tp_rows)
     unc_api, api_total, ctype_issues = reverse_interface_trace(data_rows, lines)
@@ -2519,7 +2923,10 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
 
     # v0.8.0 #8-H 设计文档测试要点追溯 + safety_coverage 触发判定
     unc_dd, dd_total = design_doc_testpoints_trace(data_rows, design_doc_lines)
-    s_fails = safety_coverage_gate(data_rows, req_doc_lines or [], design_doc_lines or [])
+    # RC19：台账权威事实（facts）透传给安全门，扫描台账里的敏感数据约束（旧版只扫 REQ/DESIGN）
+    _ledger_facts = (ledger.get("facts", []) if ledger else [])
+    s_fails = safety_coverage_gate(data_rows, req_doc_lines or [], design_doc_lines or [],
+                                   ledger_facts=_ledger_facts)
 
     return {
         "n": len(data_rows),
@@ -2540,11 +2947,22 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
             "clarification_gaps": [clarify_n, clarify_list],
             "combination_gaps": [combo_n, combo_list],
             "tp_risk_orphans": [tp_risk_orphan_n, tp_risk_orphan_list],
+            # RC6：P2/P3 风险引用统计（软门，旧版只查 P0/P1，P2/P3 空白）
+            "risk_p2p3": [p2p3_stats, []],
+            # RC7：每条风险被引用次数（覆盖深度，旧版只查≥1 次即算覆盖）
+            "risk_ref_depth": [len(risk_ref_counts), risk_ref_counts],
+            # RC20：case→section 内容一致性（引用 R<n> 但用例无该规则 token → 疑似无关引用）
+            "citation_consistency": [cite_consist_n, cite_consist_list],
+            # RC8：状态机/边界深度统计（从 stdout ⚠ 改为 gate 程序化可读的 soft 桶）
+            "state_machine": [len(sm_warns), sm_warns],
+            "boundary_depth": [len(boundary_warns), boundary_warns],
         },
         "coverage": stats,
         "traces": {
             "rule": [unc_rule, total_cat],
+            "rule_id": [unc_rule_id, total_r],  # RC5：R<n> ID 级反向追溯（section→case）
             "risk": [unc_risk, p0p1_total, risk_total],
+            "risk_p2p3": [p2p3_stats, risk_ref_counts],  # RC6/RC7：P2/P3 比例 + 引用深度
             "testpoint": [unc_tp, tp_total],
             "interface": [unc_api, api_total, ctype_issues],
             "requirement": [unc_req, req_total],
@@ -2562,6 +2980,7 @@ def collect_all_findings(data_rows, lines, req_doc_lines=None, ledger=None, desi
             "check_ids": id_violations,
             "check_fields": field_violations,
             "check_citation_resolution": citation_violations + traceback_violations,
+            "check_section_order": section_order_violations,  # RC2：section 顺序违规子集
             "check_section_id_contiguity:R": [v for v in contig_violations if v.startswith("R清单")],
             "check_section_id_contiguity:RK": [v for v in contig_violations if v.startswith("RK清单")],
             "check_section_id_contiguity:TP": [v for v in contig_violations if v.startswith("TP清单")],
@@ -2925,6 +3344,24 @@ def print_findings(findings, basename, req_doc_lines=None):
             print("  ⚠ 疑似未覆盖 P0/P1 风险（供复核）：%s" % "；".join(unc_risk))
         else:
             print("  全部 P0/P1 风险均有用例覆盖")
+        # RC6：P2/P3 覆盖比例提示（旧版只查 P0/P1）
+        p2p3_stats = (traces.get("risk_p2p3", [{}, []])[0]
+                      if isinstance(traces.get("risk_p2p3", [{}, []]), list)
+                          and traces.get("risk_p2p3", [{}, []]) else {}) or {}
+        p2p3_t = p2p3_stats.get("total", 0)
+        if p2p3_t:
+            p2p3_unc = p2p3_stats.get("uncovered", 0)
+            print("  P2/P3 风险 %d 条，未被用例引用 %d 条（RC6 软门，阈值 %.2f）"
+                  % (p2p3_t, p2p3_unc, COVERAGE_GATES.get("risk_p2p3_min_ratio", 0.0)))
+        # RC7：引用深度提示（旧版只查≥1 次即算覆盖）
+        ref_thresholds = COVERAGE_GATES.get("risk_min_case_refs")
+        if ref_thresholds and isinstance(ref_thresholds, dict):
+            _p2p3_s, ref_counts = traces.get("risk_p2p3", [{}, []])
+            ref_counts = ref_counts or []
+            shallow = ["%s[%s]×%d" % (rid, lv, cnt) for rid, lv, cnt in ref_counts
+                       if ref_thresholds.get(lv) is not None and cnt < ref_thresholds.get(lv)]
+            if shallow:
+                print("  ⚠ 风险覆盖深度不足（RC7，被引用次数低于阈值）：%s" % "；".join(shallow[:8]))
 
     # 测试点追溯（第7阶段测试点清单 → 用例）
     unc_tp, tp_total = traces["testpoint"]
@@ -3072,9 +3509,35 @@ def run_phase_gate(argv):
                   % (a.phase, err or "未找到表头行", a.phase,
                      "+ 追加覆盖分析" if a.phase == 10 else ""))
             # 输出最小摘要块供 runtime 解析不崩
-            empty_findings = {"n": 0, "hard_violations": [], "soft": {}, "coverage": {},
-                              "traces": {"requirement": [None, 0]}, "risk_source": [{}, []],
-                              "section_ids": {}}
+            # RC11·根因11 修复：empty_findings 的 soft 须预填 verify_summary_line 读取的全部键
+            # （completeness/schema/behavior），否则 verify_summary_line 直接 soft["completeness"][0]
+            # → KeyError 崩溃。崩溃走 stderr 被 runtime 吞掉（RC10 修复前），模型只看到空输出，
+            # 无从得知"脚本因 KeyError 挂了"——需求A gate 反复"无输出/空反馈"的隐藏原因之一。
+            # 同时预填 traces 全部键（rule_id/risk/testpoint/interface/design_doc），与 verify_summary_line
+            # 防御式读取对齐。traces.requirement 保持 [None,0] 表示 REQ 缺失。
+            empty_findings = {
+                "n": 0, "hard_violations": [], "coverage": {},
+                "soft": {
+                    "completeness": [None, []], "schema": [None, []],
+                    "behavior": [None, [], False],
+                    "assertions": [0, []], "storage": [0, []], "dups": [0, []],
+                    "overdesign": [0, []], "reqid": [0, []],
+                    "rule_source": [0, []], "rule_source_fake": [0, []],
+                    "behavior_consistency": [0, []], "ledger_propagation": [0, []],
+                    "clarification_gaps": [0, []], "combination_gaps": [0, []],
+                    "tp_risk_orphans": [0, []],
+                    "risk_p2p3": [{}, []], "risk_ref_depth": [0, []],
+                    "citation_consistency": [0, []],
+                    "state_machine": [0, []], "boundary_depth": [0, []],
+                },
+                "traces": {
+                    "requirement": [None, 0], "rule": [None, 0], "rule_id": [None, 0],
+                    "risk": [None, 0, 0], "testpoint": [None, 0],
+                    "interface": [[], 0, []], "design_doc": [[], 0],
+                    "keyword_coverage": {},
+                },
+                "risk_source": [{}, []], "section_ids": {},
+            }
             print(verify_summary_line(empty_findings, hard_gate_fails=[("检查点格式", "Phase %d 无用例表" % a.phase)]))
             print("##PHASE_ARTIFACTS## %d:" % a.phase)
             return 1
@@ -3088,13 +3551,26 @@ def run_phase_gate(argv):
 
     # 按 phase_gate_map 跑对应检查子集（G-3 修复：真分派，废弃子串过滤）
     gate_map = _RULES.get("phase_gate_map", {})
-    phase_checks = gate_map.get(str(a.phase), [])
-    print("GATE: Phase %d — 阶段出口门禁（检查子集: %s）" % (a.phase, ", ".join(phase_checks) or "默认全量"))
+    phase_entry = gate_map.get(str(a.phase), [])
+    # RC23·根因23 修复：phase_gate_map 拆 hard_checks/soft_checks 子列表。旧版软检查
+    # （check_ledger_propagation/check_behavior_consistency）与硬检查并列，hard_by_check 对软
+    # 检查返回空子集 → 列了不阻断但易误导维护者以为"这两个会卡门"。现 hard_checks 参与阻断
+    # 分派，soft_checks 仅作记录不阻断。兼容旧版扁平 list（domain_config 可能仍用旧格式）。
+    if isinstance(phase_entry, dict):
+        phase_checks = phase_entry.get("hard_checks", [])
+        soft_checks = phase_entry.get("soft_checks", [])
+    else:
+        phase_checks = phase_entry  # 旧版扁平 list 兼容
+        soft_checks = []
+    print("GATE: Phase %d — 阶段出口门禁（hard: %s%s）" % (
+        a.phase, ", ".join(phase_checks) or "默认全量",
+        (" | soft(不阻断): " + ", ".join(soft_checks)) if soft_checks else ""))
 
     hard_violations = findings.get("hard_violations", [])
     hard_by_check = findings.get("hard_by_check", {})
-    # 按 phase_gate_map 声明的检查名分派：取各检查对应硬违规子集，去重保序。
+    # 按 phase_gate_map hard_checks 声明的检查名分派：取各检查对应硬违规子集，去重保序。
     # 同一违规可能被多个检查名覆盖（如 collect_all_findings 含全部），去重避免重复报。
+    # soft_checks 不参与分派（hard_by_check 无对应键，列入仅供参考，不阻断 gate）。
     if phase_checks:
         seen = set()
         phase_filtered = []
@@ -3108,13 +3584,14 @@ def run_phase_gate(argv):
         phase_filtered = list(hard_violations)
 
     gate_fails = coverage_gate_failures(findings, run_mode=a.run_mode)
-    # v0.8.0: Phase 8/10/13 启用覆盖硬门（含 TP 追溯）；Phase 8 也判覆盖硬门（不再仅 10/13）
-    if a.phase in (8, 10, 13):
+    # RC21·根因21 修复：覆盖硬门生效阶段改读 config COVERAGE_GATE_PHASES（旧版硬编码 (8,10,13)，
+    # config 与实际行为不一致——phase 8 列表没列 coverage_gate_failures 但硬编码让它跑了）。
+    if a.phase in COVERAGE_GATE_PHASES:
         if gate_fails:
             for name, detail in gate_fails:
                 print("  [FAIL] %s: %s" % (name, detail))
     else:
-        gate_fails = []  # 非 8/10/13 阶段不判覆盖硬门
+        gate_fails = []  # 非 coverage_gate_phases 阶段不判覆盖硬门
 
     ok = True
     if phase_filtered:

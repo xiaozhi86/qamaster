@@ -118,7 +118,7 @@ LLM 对每项检查的结果须按下表决策，禁止卡在"未达标但不知
 
 确认：
 * 本轮全部测试用例已完整生成
-* 已完成第1至第15项自查
+* 已完成第1至第17项自查（RC25 修复：检查16 变更接口三类覆盖 + 检查17 设计文档测试要点覆盖 v0.8.0 已纳入，旧版仍写"15 项"致漏做 16/17）
 * 未出现边生成边写文件行为
 * 已做写前规模评估（输出 token 预算：默认单文件 `case-design-out/TestCases_<需求标识>.md`；单次 Write `content` 预估 > 24000 token 先压缩，压缩后仍超才拆最小 PART `case-design-out/TestCases_<需求标识>_PARTn.md`，不按模块拆）
 * 即将以 `Write` 单次整体写入每个文件（多文件拆分时逐文件各一次 Write，统一写入 `case-design-out/` 下），未用 `Edit`/`MultiEdit`/append 落盘或补齐

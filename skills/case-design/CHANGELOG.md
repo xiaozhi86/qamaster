@@ -6,6 +6,55 @@
 
 # 发布说明（面向使用者）
 
+## v0.11.1（2026-08-10，全代码库穷尽审计修复·30 根因 RC1-RC30）
+
+**本次发布是对 qamaster 全代码库穷尽审计后的系统性修复**，解决两个线上症状：
+- 需求A（规则引擎增加拨打策略编号入参）：Phase 8 gate 连续失败 7 次卡死，模型反复改 R section "格式"无效。
+- 需求B（通话ASR实时转写挂机AI总结催记）：Phase 8 gate PASS + 落盘成功，但实际覆盖仅 ~33%（25 条规则只引 13 条）。
+
+审计定位 30 个根因（RC1-RC8 直接对应两大症状；RC9-RC30 为 22 个系统性缺陷），分三批修复：
+
+**第一批 P0（解两大症状）**
+- RC1/RC4：`_parse_section_ids_prose` 及 3 个同模式 prose 解析器的无条件 break 提前终止——用例表在 R section 之前时永远到不了 R section，返回空 ids。加 `in_section` 守卫。
+- RC2：新增 `check_section_order`——用例表出现在追溯性 section 之前即 hard fail，报"顺序写反"（旧反馈只说"无可解析 R ID"误导模型改格式而非移位置）。
+- RC5：新增 `#5-H 规则追溯硬门`——R<n> 方向反向追溯（section→case），`rule_trace_min_ratio=1.0`，闭合"R 反向追溯被遗忘的空白"（25 条规则只引 13 条 gate 完全不判→PASS）。
+- RC9：有界返修 escalation 真正阻断——`gate_rounds >= 3` 置 `ESCALATION_REQUIRED` 状态，`cmd_next`/`cmd_gate` 拒绝推进，须 `fail --to N` 或 `gate --force`（旧版只 print 不阻断）。
+- RC10：`_run_check` 读取 stderr——脚本崩溃（stderr 非空 + stdout 无 `##VERIFY_SUMMARY##`）标 `[SCRIPT_ERROR]`，区分"内容 FAIL"与"脚本挂了"（旧版 stderr 完全丢弃，崩溃与通过不可区分）。
+- RC11：`empty_findings` 的 soft 预填全部键 + `verify_summary_line` 改防御式 `.get()`——早退路径不再 KeyError 崩溃。
+
+**第二批 P1（预防 + 覆盖深度 + 卡死回路收紧）**
+- RC3：SKILL.md/modeling.md Phase 8 补"追溯性 section 须在用例表之前"。
+- RC6/RC7：`risk_p2p3_min_ratio`（P2/P3 风险追溯软门）+ `risk_min_case_refs`（覆盖深度门，每条风险被引次数阈值）。
+- RC12：`_gate_mode` 增 `"warn"` 第三档——config 配 `R="warn"` 不再静默升级为硬门。
+- RC13：`_parse_section_ids_prose` 遇子标题不再 break——只对同级/更高级标题结束 section，深层子标题继续收集 R2/R3…
+- RC15：`ledger_q_set` 去掉 `$` 行尾锚改 `findall`——`[来源:台账Q19]`/`Q19、Q20` 带括号/顿号不再漏匹配。
+- RC16：新增 `#RH 风险清单 section 缺失`硬门——漏写风险清单不再静默放行。
+- RC17：`check_traceback_section_inlined` pairs 补 API/SC——空注册表不再绕过 D1 悬空引用门。
+- RC18：Phase 14 auto-release 写持久 `review_kind` 审计字段（auto/human）——自动放行可审计。
+- RC20：新增 `check_citation_content_consistency` 软检查——用例引用 R<n> 但名称/GWT 无该规则 token 进 soft 桶。
+
+**第三批 P2/P3（结构对齐 + 文档漂移 + 脆弱性）**
+- RC8：状态机/边界深度统计从 stdout ⚠ 改为进 soft 桶（`state_machine`/`boundary_depth`），可配软门。
+- RC14：FAIL 反馈结构化（硬门优先 + summary 行不截断），统一 phase_gate/script 截断口径。
+- RC19/RC30：`involves_sensitive_data` 加 `ledger_facts` 扫台账敏感约束 + 缓存复用（消除重复调用）。
+- RC21/RC22：覆盖门生效阶段改读 config `coverage_gate_phases`（旧硬编码 8/10/13）；phase 8 清单移除 no-op `testpoint_coverage`、补 `coverage_gate_failures`（名实相符）。
+- RC23：`phase_gate_map` 拆 `hard_checks`/`soft_checks` 子列表——只有 hard_checks 能阻断。
+- RC24-RC27：output_write.md L197 改"硬阻断"与 L199 一致；selfcheck.md 改"17 项"；modeling.md 维度补"界面验证"对齐 config 13 项；补 v0.10/v0.11 CHANGELOG。
+- RC28：`_CITATION_PAT` fallback 从 2 前缀改 5 前缀（与 config 默认一致，消除 config 失效即退化）。
+- RC29：`cmd_fail` 回退重置 `gate_rounds[phase>=target]=0`（"重来"语义）。
+
+## v0.11.0（2026-08-09，经验库 + 业务知识库）
+
+- 新增 **经验库（Lessons KB）**：从历史缺陷/复盘沉淀经验教训，按 P0/P1/P2 分级，Phase 1 澄清时注入相关经验防重蹈覆辙。
+- 新增 **业务知识库（Business KB）**：按业务领域沉淀领域知识，跨需求复用，破"每个需求从零建模"。
+- 运行时增量反哺回路：gate/run 结果回写经验库，形成"执行→反哺→沉淀→复用"闭环。
+- 四项深层软探针 + 规模升级兜底。
+
+## v0.10.0（2026-08-08，并行多任务 + kb query）
+
+- 支持并行处理多任务（多需求同时推进，状态隔离）。
+- `kb query --top` 预览标志修复：让 flag 真正生效。
+
 ## v0.9.0（2026-08-08，多需求并行 + 通用 Workflow 引擎 + MANIFEST 收归 Runtime）
 
 **本次发布解决单工程只能处理一个需求、且 MANIFEST 索引由模型维护两大架构缺口**。v0.6–v0.8 把质量门禁/覆盖硬门/阶段出口校验逐层代码化；v0.9.0 把"流程控制层"本身从单例改造为按需求分区，并把多需求共享索引的协调权从模型收回 Runtime——**强化"流程由 Runtime 严格控制、与模型无关"铁律到索引层**。

@@ -574,17 +574,50 @@ def _run_check(chk, st, spec):
         except Exception as e:
             return (False, "%s: 执行异常 %s" % (chk["label"], e))
         all_lines = (proc.stdout or "").strip().splitlines()
+        # RC10·根因10 修复·stderr 不再丢弃：旧版 capture_output=True 抓了 stderr 但从不读取——
+        # 当 verify_cases.py 因异常崩溃（Python traceback 进 stderr、stdout 为空），runtime 看到空
+        # stdout + 无 [FAIL] 行，既不判 PASS 也无有效线索，模型只收到尾部空输出，"崩溃与检查通过
+        # 但无输出"在 runtime 视角不可区分。需求A gate 反复"无输出/空反馈"的隐藏原因之一。
+        # 此处读取 stderr：非空且 stdout 无 ##VERIFY_SUMMARY## → 判定脚本异常，注入 [SCRIPT_ERROR]。
+        err_lines = (proc.stderr or "").strip().splitlines()
+        has_summary = any(ln.startswith("##VERIFY_SUMMARY##") for ln in all_lines)
+        script_error = bool(err_lines) and not has_summary
         detail = "%s: exit=%d" % (chk["label"], proc.returncode)
+        if script_error:
+            # 脚本异常（非内容 FAIL）：stderr 注入反馈并显式标 [SCRIPT_ERROR]，引导模型先查脚本/环境
+            # 而非改文档。区分"文档内容不对→[FAIL]"与"脚本挂了→[SCRIPT_ERROR]"。
+            detail += ("\n----- [SCRIPT_ERROR] verify_cases.py 异常退出（非内容 FAIL）-----\n"
+                       "stdout 无 ##VERIFY_SUMMARY## 且 stderr 非空 → 疑似脚本崩溃。"
+                       "请先排查脚本异常/环境/路径，勿改文档内容。stderr(前40行):\n"
+                       + "\n".join(err_lines[:40]))
         if proc.returncode != 0:
             fail_lines = [ln for ln in all_lines
                           if ln.strip().startswith("[FAIL]") or ln.lstrip().startswith("- ")]
             summary = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##")]
+            # RC14·根因14 修复·结构化 FAIL 反馈：旧版 fail_lines[:200] 头部截断 + summary[:1200]
+            # 字符截断。verify_cases 按硬门→软门→覆盖门顺序输出，硬门 FAIL 在头部，头部截断尚可；
+            # 但 summary[:1200] 字符截断会切掉尾部关键字段（gate_fails/hard_violations 在末尾，
+            # 是 runtime 判定核心），新增字段后行变长更易越界。改为：硬门 FAIL 全量保留（按类上限
+            # 80，与 verify_cases 自身 50 硬违规打印上限留余量），summary 行不截断（本就一行）。
             if fail_lines:
-                detail += "\n----- phase-gate FAIL 明细 -----\n" + "\n".join(fail_lines[:200])
+                detail += "\n----- phase-gate FAIL 明细（硬门优先）-----\n" + "\n".join(fail_lines[:80])
             elif all_lines:
                 detail += "\n----- 输出(尾部) -----\n" + "\n".join(all_lines[-60:])
             if summary:
-                detail += "\n" + summary[-1][:1200]
+                detail += "\n" + summary[-1]  # RC14：不截断，保留尾部 gate_fails 等关键字段
+            # 脚本异常时补捞 stderr 尾部作为补充线索（即使 stdout 有部分输出）
+            if not script_error and err_lines:
+                detail += "\n----- stderr(尾部) -----\n" + "\n".join(err_lines[-20:])
+            # RC2: 当 fail 反馈含"无可解析.*ID"/"未找到.*section"/"顺序写反"线索时，
+            # 追加 section 顺序诊断提示——闭合"模型反复改 R section 格式无效"的卡死回路
+            # （根因：用例表写在追溯性 section 之前，解析器提前 break 返回空 ids，
+            # 旧反馈只说"无可解析 R ID"误导模型改格式而非移位置）。
+            fb_blob = "\n".join(fail_lines + summary)
+            if any(kw in fb_blob for kw in ("无可解析", "未找到", "section", "顺序写反")):
+                detail += ("\n⚠ section 顺序自检：追溯性 section（规则建模→风险清单→测试点清单）"
+                           "须在用例表之前。若用例表写在这些 section 之前，解析器会在用例表表头"
+                           "提前终止，导致返回空 ID（报'无可解析 R ID'）——此时应调整 section 顺序，"
+                           "而非改 R section 格式。")
         # v0.7.0: gate PASS 时回填 artifacts + 重置 gate_rounds
         if proc.returncode == 0:
             _backfill_artifacts(st, phase, cp, stdout_lines=all_lines)
@@ -601,15 +634,27 @@ def _run_check(chk, st, spec):
         except Exception as e:
             return (False, "%s: 执行异常 %s" % (chk["label"], e))
         all_lines = (proc.stdout or "").strip().splitlines()
+        err_lines = (proc.stderr or "").strip().splitlines()
         tail = all_lines[-40:] if len(all_lines) > 40 else all_lines
         detail = "%s: exit=%d" % (chk["label"], proc.returncode)
+        # RC10·统一：script 类检查同样读取 stderr，异常时标 [SCRIPT_ERROR]
+        has_summary = any(ln.startswith("##VERIFY_SUMMARY##") for ln in all_lines)
+        if err_lines and not has_summary and proc.returncode != 0:
+            detail += ("\n----- [SCRIPT_ERROR] 脚本异常退出（非内容 FAIL）-----\n"
+                       "stdout 无 ##VERIFY_SUMMARY## 且 stderr 非空 → 疑似脚本崩溃。"
+                       "stderr(前40行):\n" + "\n".join(err_lines[:40]))
         if proc.returncode != 0:
             if tail:
                 detail += "\n----- 脚本输出(尾部) -----\n" + "\n".join(tail)
             fail_lines = [ln for ln in all_lines if ln.strip().startswith("[FAIL]")]
             missing_fails = [ln for ln in fail_lines if not any(ln in t for t in tail)]
+            # RC14：统一截断口径——硬门 FAIL 补捞上限与 phase_gate 一致（80），避免 60/200 不一致
             if missing_fails:
-                detail += "\n----- 硬门 FAIL 明细(补捞) -----\n" + "\n".join(missing_fails[:60])
+                detail += "\n----- 硬门 FAIL 明细(补捞) -----\n" + "\n".join(missing_fails[:80])
+            # RC14：script 类检查 FAIL 也回显 summary 行（与 phase_gate 一致），不截断
+            summary = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##")]
+            if summary:
+                detail += "\n" + summary[-1]
         else:
             keep = [ln for ln in all_lines if ln.startswith("##VERIFY_SUMMARY##") or "结论" in ln or "硬门" in ln]
             if keep:
@@ -761,7 +806,12 @@ def _resume_hint(st, spec):
     if st["status"] == "DONE":
         return "状态: DONE（流程已完成）。如需修改，用 `start --fresh` 重启（Runtime 会定位已有产出物）。"
     if st["status"] == "GATE_PASSED":
-        return "状态: GATE_PASSED（当前阶段门禁已通过）\n处理: 执行 `next` 进入下一阶段"
+        # RC18：显示 review_kind 审计字段（auto=自动放行 / human=人工审批），让自动放行可见
+        rk = st.get("review_kind")
+        rk_hint = ""
+        if st.get("current_phase") == 14 and rk == "auto":
+            rk_hint = "（⚠ 本轮 Phase 14 为自动放行 review_kind=auto，未经人工审核；交付报告须声明）"
+        return "状态: GATE_PASSED（当前阶段门禁已通过）%s\n处理: 执行 `next` 进入下一阶段" % rk_hint
     return "状态: RUNNING（阶段产物尚未过出口门禁）"
 
 
@@ -1017,6 +1067,14 @@ def cmd_next(a):
     st, path = _load_or_die(a.workdir, a.workflow, req_id)
     if st["status"] in ("WAIT_USER_CONFIRM", "WAIT_LICENSE"):
         _die("当前处于 %s，必须先过人工门禁（gate/confirm/reject）才能推进" % st["status"])
+    # RC9·v0.11.0：ESCALATION_REQUIRED 状态下禁止推进——有界返修强制阻断。
+    # 必须先 `fail --to <更早阶段>` 回退（重置计数）或 `gate --force`（人工担责）解除。
+    if st.get("status") == "ESCALATION_REQUIRED":
+        rounds_now = st.get("gate_rounds", {}).get(str(st["current_phase"]), 0)
+        _die("当前处于 ESCALATION_REQUIRED（Phase %d 自动门连续失败 %d 次，已阻断推进）。"
+             "请执行 `fail --to <更早阶段> --reason \"...\"` 回退重走（回退会重置计数），"
+             "或 `gate --force` 强制重跑本门（人工担责）。"
+             % (st["current_phase"], rounds_now))
     if st["status"] == "RUNNING":
         _die("当前阶段(Phase %d)尚未通过出口门禁，先执行 `gate`" % st["current_phase"])
     if st["status"] == "DONE":
@@ -1079,6 +1137,12 @@ def cmd_gate(a):
                     print("\nGATE RESULT: FAIL — Excel 生成/校验未过，按 references/excel.md 生成失败处理")
                 return
             st["status"] = "GATE_PASSED"
+            # RC18·根因18 修复：auto/light 模式 Phase 14 自动放行与 full 模式人工审批在 state 里
+            # 此前都置 GATE_PASSED，仅靠 log event 的 detail=auto_release 区分——落盘/下游不读 log，
+            # 事后无法审计哪些是自动放行（需求B 低覆盖文档被 auto 放行却与人工审批无别）。此处写
+            # 持久 review_kind 审计字段，下游/落盘/复盘可读 st["review_kind"] 标注放行类型。
+            if phase["id"] == 14:
+                st["review_kind"] = "auto" if decision.get("via") == "auto_release" else "human"
             state_store.log_event(st, "human_gate_release", phase=phase["id"], detail=decision["via"] or "")
             state_store.save(path, st)
             # gate-PASS 副作用（Phase 14 auto-release 时 manifest complete）
@@ -1092,6 +1156,36 @@ def cmd_gate(a):
         return
 
     # --- 自动门：确定性检查
+    # RC9·根因9 修复·有界返修强制：旧版 rounds>=3 仅 print 两行提示，不改状态、不阻断、
+    # 不回退——"有界返修"名不副实，实际无界。需求A 在 Phase 8 连续失败 7 次，后 4 次每次
+    # 都打印 escalation 却仍允许继续 gate，模型在"改格式→失败→改格式"里无限循环。
+    # 此处当 gate_rounds[当前阶段] >= 3 时置 ESCALATION_REQUIRED 状态阻断推进，必须人工
+    # `fail --to <更早阶段>` 回退重走或显式 `gate --force` 跳过（人工担责）。
+    phase_key = str(phase["id"])
+    rounds_now = st.get("gate_rounds", {}).get(phase_key, 0)
+    if rounds_now >= 3 and st.get("status") != "ESCALATION_REQUIRED":
+        st["status"] = "ESCALATION_REQUIRED"
+        st.setdefault("failed_gates", {})[phase_key] = {
+            "at": state_store._now(), "rounds": rounds_now, "escalated": True}
+        state_store.log_event(st, "escalation_required", phase=phase["id"],
+                              detail="rounds=%d" % rounds_now)
+        state_store.save(path, st)
+    if st.get("status") == "ESCALATION_REQUIRED" and not getattr(a, "force", False):
+        print("【有界返修·v0.11.0 强制】Phase %d 门禁已连续失败 %d 次，状态=ESCALATION_REQUIRED，"
+              "自动门阻断。" % (phase["id"], rounds_now))
+        print("  疑似系统性问题，单点改文档无效。请人工介入：")
+        print("  (1) 审查 [FAIL] 项根因（脚本反馈/stderr/源码），或")
+        print("  (2) 执行 `fail --to <更早阶段> --reason \"...\"` 回退重走（回退会重置计数），或")
+        print("  (3) 确认为已知例外后 `gate --force` 强制重跑本门（人工担责，落审计）。")
+        return
+    if getattr(a, "force", False) and st.get("status") == "ESCALATION_REQUIRED":
+        # 人工强制重跑：解除阻断、落审计、允许本次 gate 重新执行（结果仍按真实判定）
+        state_store.log_event(st, "escalation_force_override", phase=phase["id"],
+                              detail="rounds=%d forced by --force" % rounds_now)
+        st["status"] = "RUNNING"
+        state_store.save(path, st)
+        print("【有界返修·v0.11.0】已按 --force 解除 ESCALATION_REQUIRED 阻断（人工担责，已落审计），"
+              "重跑自动门（结果按真实判定）。")
     results = []
     ok_all = True
     for chk in phase.get("gate_checks", []):
@@ -1136,8 +1230,14 @@ def cmd_gate(a):
             print("")
             print(relb)
         if rounds >= 3:
-            print("【有界返修·v0.7.0】Phase %d 门禁连续失败 %d 次，疑似系统性问题：" % (phase["id"], rounds))
-            print("  请人工介入审查 [FAIL] 项，或执行 `fail --to <更早阶段> --reason \"...\"` 回退重走。")
+            # RC9·v0.11.0：escalation 已在 cmd_gate 入口置 ESCALATION_REQUIRED 并阻断推进。
+            # 此处 gate 本次刚失败、计数刚到阈值：仅打印提示，阻断由下次 gate 入口执行
+            # （避免本次 gate 刚 FAIL 就直接拦截 fail 回退通道——fail --to 仍可用）。
+            print("【有界返修·v0.11.0】Phase %d 门禁累计失败 %d 次，已标记 ESCALATION_REQUIRED。"
+                  % (phase["id"], rounds))
+            print("  下次 `gate` 将被自动门阻断。请人工介入：审查 [FAIL] 根因，或执行 "
+                  "`fail --to <更早阶段> --reason \"...\"` 回退重走（回退会重置计数），"
+                  "或确认例外后 `gate --force` 强制重跑（人工担责）。")
         else:
             print("禁止以任何理由绕过本门禁交付（含『脚本暂未运行/先交付后补验/核心用例先行』）——")
             print("脚本不可运行时按降级协议暂停等待（SKILL.md Runtime 控制协议·降级），不得产出用例文件。")
@@ -1186,6 +1286,8 @@ def cmd_confirm(a):
     if phase["id"] == 14:
         # 审核通过 → 标记门禁已过 → 知识沉淀后置动作指引 → next 进 Excel 许可门
         st["status"] = "GATE_PASSED"
+        # RC18：人工审批显式置 review_kind=human（与 auto_release 的 "auto" 区分，落审计）
+        st["review_kind"] = "human"
         state_store.log_event(st, "review_approved")
         state_store.save(path, st)
         # gate-PASS 副作用：manifest complete
@@ -1267,6 +1369,18 @@ def cmd_fail(a):
     st["current_phase"] = target["id"]
     st["status"] = "RUNNING"
     st["confirm_rounds"] = st.get("confirm_rounds", 0) + 1
+    # RC29·根因29 修复·回退重置计数：fail --to <target> 回退后，对 phase >= target 的阶段
+    # 重置 gate_rounds[phase]=0 并 persist——回退语义是"重新来过"，旧计数器不重置则回退重走
+    # 再失败几次就触发 RC9 的 ESCALATION_REQUIRED（即便回退本应"重来"），违背语义。
+    # 同时解除 ESCALATION_REQUIRED 阻断（回退即人工介入，视为已担责）。
+    gate_rounds = st.get("gate_rounds", {})
+    reset_phases = [p for p in gate_rounds if int(p) >= target["id"]]
+    if reset_phases or st.get("status") == "ESCALATION_REQUIRED":
+        for p in reset_phases:
+            gate_rounds[p] = 0
+        st["gate_rounds"] = gate_rounds
+        state_store.log_event(st, "gate_rounds_reset", phase=target["id"],
+                             detail="phases=%s" % ",".join(reset_phases) if reset_phases else "none")
     # v0.9.0: 纠正发生 → 自动沉淀候选经验(draft)，纯 Runtime/静默/best-effort
     # 不阻断纠正（锁失败仅 WARN）；落 draft/occ=1 不过信任门→预防/反应都不注入（护 150/0）
     _maybe_capture_lesson(st, target["id"], a.reason, spec)
@@ -1736,6 +1850,8 @@ def main():
     sp.set_defaults(fn=cmd_next)
 
     sp = sub.add_parser("gate", help="执行当前阶段出口门禁")
+    sp.add_argument("--force", action="store_true",
+                    help="ESCALATION_REQUIRED 状态下强制重跑自动门（绕过有界返修阻断，人工担责）")
     _ri(sp)
     _wf(sp)
     _wd(sp)

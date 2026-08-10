@@ -467,15 +467,17 @@
     "^无$"
   ],
   "coverage_gates": {
-    "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底；v0.8.0 补强：加测试点/设计文档/安全三门；v0.9.0 根因6：#7/#8/#S 不再随 auto_light 降级——文档覆盖门在连跑/轻量亦硬判）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列(回退G/W/T)引用的最低比例；tp_trace_min_ratio=#7-H 测试点清单每条 TP 被用例关联规则列引用的最低比例；design_doc_trace_min_ratio=#8-H 设计文档可追溯章节每条被用例覆盖(关联规则/用例名称,回退G/W/T)的最低比例（DESIGN 落盘时生效，否则 SKIP）；interface_three_class=每个变更接口三类覆盖硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门；testpoint_coverage=#7-H 测试点覆盖硬门（v0.9.0 不随 auto_light 降级）；testpoint_section_presence=#7-P 测试点清单存在性硬门（P7-1：TP 清单缺失即 exit=1，闭合『不写 TP 清单绕过 #7-H』，v0.9.0 不随 auto_light 降级）；design_doc_testpoints_trace=#8-H 设计文档测试要点追溯硬门（v0.9.0 不随 auto_light 降级，DESIGN 无则 SKIP）；safety_coverage=涉敏感数据时安全类用例数>0 硬门（v0.9.0 不随 auto_light 降级）；req_trace_presence=#4-P REQ 存在性硬门（REQ 缺失/不可解析即 exit=1）；open_questions=5.5b 台账待确认门禁（台账『待确认』P0/P1，full 含 P2，须已解决或正式转假设方可落盘）；rule_source_hard=规则建模每条须标来源硬门（full 模式无来源标记即 exit=1）；risk_source_hard=风险来源待确认硬门（full 模式风险来源未确认即 exit=1）；req_id_hard=关联需求ID 追溯失效硬门（P11-1：full 模式『全员笼统占位 见需求文档/无』即 exit=1；『全员相同占位 见需求文档<章节>』单粗粒度需求模块可能合法，留软告警）。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（仅对 interface/risk 生效；#7/#8/#S v0.9.0 起无视模式恒硬）；off=关闭。domain_config.json 同名字段可覆盖。",
+    "_doc": "覆盖硬门（v0.6.0 事故修复：降级/手动模式下覆盖塌方无机器兜底；v0.8.0 补强：加测试点/设计文档/安全三门；v0.9.0 根因6：#7/#8/#S 不再随 auto_light 降级——文档覆盖门在连跑/轻量亦硬判）。req_trace_min_ratio=#4-H 需求条目被用例关联需求ID列(回退G/W/T)引用的最低比例；rule_trace_min_ratio=#5-H 规则建模清单每条 R<n> 被用例关联规则列引用的最低比例（RC5 修复·闭环需求B『覆盖33%却PASS』：旧版 R 方向反向追溯是被遗忘的空白，rule_coverage 仅 token 类目模糊匹配且为软提示不进 gate；v0.9.0 不随 auto_light 降级，R 清单不存在时 SKIP）；tp_trace_min_ratio=#7-H 测试点清单每条 TP 被用例关联规则列引用的最低比例；design_doc_trace_min_ratio=#8-H 设计文档可追溯章节每条被用例覆盖(关联规则/用例名称,回退G/W/T)的最低比例（DESIGN 落盘时生效，否则 SKIP）；interface_three_class=每个变更接口三类覆盖硬门；risk_p0p1=风险清单 P0/P1 须被用例关联规则列引用硬门；testpoint_coverage=#7-H 测试点覆盖硬门（v0.9.0 不随 auto_light 降级）；testpoint_section_presence=#7-P 测试点清单存在性硬门（P7-1：TP 清单缺失即 exit=1，闭合『不写 TP 清单绕过 #7-H』，v0.9.0 不随 auto_light 降级）；design_doc_testpoints_trace=#8-H 设计文档测试要点追溯硬门（v0.9.0 不随 auto_light 降级，DESIGN 无则 SKIP）；safety_coverage=涉敏感数据时安全类用例数>0 硬门（v0.9.0 不随 auto_light 降级）；req_trace_presence=#4-P REQ 存在性硬门（REQ 缺失/不可解析即 exit=1）；open_questions=5.5b 台账待确认门禁（台账『待确认』P0/P1，full 含 P2，须已解决或正式转假设方可落盘）；rule_source_hard=规则建模每条须标来源硬门（full 模式无来源标记即 exit=1）；risk_source_hard=风险来源待确认硬门（full 模式风险来源未确认即 exit=1）；req_id_hard=关联需求ID 追溯失效硬门（P11-1：full 模式『全员笼统占位 见需求文档/无』即 exit=1；『全员相同占位 见需求文档<章节>』单粗粒度需求模块可能合法，留软告警）。取值 full=硬门 exit=1；auto_light=连跑/轻量降级为软告警（仅对 interface/risk 生效；#7/#8/#S v0.9.0 起无视模式恒硬）；off=关闭。domain_config.json 同名字段可覆盖。RC6/risk_p2p3_min_ratio=P2/P3 风险被引用最低比例（0.0=不阻断仅提示；旧版只查 P0/P1，P2/P3 一条不引也 PASS，需求B RK16-19 即如此）；RC7/risk_min_case_refs=每条风险须被引用的最低次数形如 {\"P0\":2,\"P1\":1}（null=不判；旧版只查≥1 次即算覆盖，覆盖深度无门）。",
     "req_trace_min_ratio": 1.0,
     "tp_trace_min_ratio": 1.0,
     "design_doc_trace_min_ratio": 1.0,
+    "rule_trace_min_ratio": 1.0,
     "interface_three_class": "full",
     "risk_p0p1": "full",
     "req_trace_presence": "full",
     "testpoint_coverage": "full",
     "testpoint_section_presence": "full",
+    "risk_section_presence": "full",
     "design_doc_testpoints_trace": "full",
     "safety_coverage": "full",
     "ledger_propagation": "warn",
@@ -484,7 +486,11 @@
     "assumption_resolution": "full",
     "rule_source_hard": "full",
     "risk_source_hard": "full",
-    "req_id_hard": "full"
+    "req_id_hard": "full",
+    "risk_p2p3_min_ratio": 0.0,
+    "risk_min_case_refs": null,
+    "state_machine_coverage": "off",
+    "boundary_depth_coverage": "off"
   },
   "behavior_source": {
     "_doc": "检查15 业务行为来源追溯 + #5 反向行为来源追溯（dedup_coverage.md）。用例 Given/When/Then 断言的业务行为（状态流转目标/模态规则/约束值/异常机制）须有来源三选一：(a)行为 token 出现在需求文档/接口契约文档；(b)关联规则列引用 R<序号>/TP<序号>/API<序号>（规则建模/风险清单/变更影响清单已沉淀）；契约驱动分支下接口契约文档亦为合法来源；(c)关联规则或用例名称含假设标记 假设A<序号>/基于假设。三者皆无且行为信号不在需求文档->疑似无来源业务行为(脑补)，供 selfcheck 检查15 转问题(P0/P1)/假设(P2/P3)，不得静默保留。规则建模 section 每条规则项建议标 来源:需求文档<章节>/台账Q<序号>/假设A<序号>，无来源标记->疑似脑补规则(破 rule_coverage 自证洗白)。",
@@ -567,14 +573,15 @@
     "SC": "full"
   },
   "phase_gate_map": {
-    "_doc": "阶段出口门禁检查子集映射（v0.7.0·门禁前移；v0.8.0 补 testpoint_coverage/design_doc_testpoints_trace/safety_coverage）。声明每个阶段 --phase-gate 跑哪些检查，与 Phase 13 全量校验共用 collect_all_findings，避免重复或遗漏。runtime 在 Phase 3/5/7/8/10 gate 调用。",
-    "3": ["check_rule_source", "check_section_id_contiguity:R"],
-    "5": ["risk_source_report", "check_section_id_contiguity:RK"],
-    "7": ["check_risk_testpoint_linkage", "check_section_id_contiguity:TP"],
-    "8": ["collect_all_findings", "check_citation_resolution", "check_assumption_resolution", "check_ledger_propagation", "check_behavior_consistency", "check_section_id_contiguity:all", "testpoint_coverage"],
-    "10": ["collect_all_findings", "coverage_gate_failures", "check_open_questions_gate", "check_ledger_propagation", "testpoint_coverage", "design_doc_testpoints_trace", "safety_coverage"],
-    "13": ["verify_md", "collect_all_findings", "coverage_gate_failures", "check_open_questions_gate", "testpoint_coverage", "design_doc_testpoints_trace", "safety_coverage"]
+    "_doc": "阶段出口门禁检查子集映射（v0.7.0·门禁前移）。声明每个阶段 --phase-gate 跑哪些检查，与 Phase 13 全量校验共用 collect_all_findings。runtime 在 Phase 3/5/7/8/10 gate 调用。RC21：覆盖门生效阶段由 coverage_gate_phases 驱动（旧硬编码 8/10/13）；RC22：移除 testpoint_coverage（COVERAGE_GATES 键非 hard_by_check 项，列表中为空操作）——TP 覆盖由 coverage_gate_failures 的 #7-H 承担；RC23：拆 hard_checks/soft_checks 子列表——只有 hard_checks 能阻断 gate（exit=1），soft_checks 仅 warn 不阻断。hard_by_check 有对应键的检查经分派阻断；coverage_gate_failures 及其内部子门（#4-P/#5-H/#7-H/#8-H/#S/#RH 等）经单独调用阻断。旧版软检查（check_ledger_propagation/check_behavior_consistency）与硬检查并列易误导维护者以为可阻断，现移入 soft_checks。",
+    "3": {"hard_checks": ["check_rule_source", "check_section_id_contiguity:R"], "soft_checks": []},
+    "5": {"hard_checks": ["risk_source_report", "check_section_id_contiguity:RK"], "soft_checks": []},
+    "7": {"hard_checks": ["check_risk_testpoint_linkage", "check_section_id_contiguity:TP"], "soft_checks": []},
+    "8": {"hard_checks": ["collect_all_findings", "coverage_gate_failures", "check_citation_resolution", "check_assumption_resolution", "check_section_order", "check_section_id_contiguity:all"], "soft_checks": ["check_ledger_propagation", "check_behavior_consistency"]},
+    "10": {"hard_checks": ["collect_all_findings", "coverage_gate_failures", "check_open_questions_gate", "design_doc_testpoints_trace", "safety_coverage"], "soft_checks": ["check_ledger_propagation"]},
+    "13": {"hard_checks": ["verify_md", "collect_all_findings", "coverage_gate_failures", "check_open_questions_gate", "design_doc_testpoints_trace", "safety_coverage"], "soft_checks": []}
   },
+  "coverage_gate_phases": [8, 10, 13],
   "requirement_probe_keywords": {
     "_doc": "非台账点关键词覆盖探针（v0.7.0·闭环 G5/G6/G7/G8 + RC6）。每类分 surface（主题存在信号·出现在需求/台账即该主题存在）与 depth（深度测点·出现在用例才算该主题真正被测）。探针判定：surface 在源中且 depth 不在用例 -> 报覆盖缺口。闭合 G5-G8 假阴性（线程池命中≠trace传播已测）。旧格式（纯 list）兼容为 surface=depth=list。默认 warn。domain_config 可按域扩展。",
     "categories": {

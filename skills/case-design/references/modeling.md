@@ -321,7 +321,7 @@ When/Then 一律写入表格单元格，单元格内多步骤用 `；`/`步骤N�
 
 ### 检查点文件格式（v0.7.1·runtime 强制 gate 用）
 
-runtime 在 Phase 8 出口门禁调 `verify_cases.py --phase-gate 8 .qamaster/case-design/<req_id>/checkpoint_8.md --req .. --ledger ..`（路径由 Runtime 按 `(workflow, req_id)` 分区解析，状态隔离不同需求）。**检查点文件必须含完整 15 列用例表**（首列"用例ID"，与最终 TestCases.md 同结构），可共存追溯性 section（规则建模/风险清单/测试点清单）与覆盖预检摘要。
+runtime 在 Phase 8 出口门禁调 `verify_cases.py --phase-gate 8 .qamaster/case-design/<req_id>/checkpoint_8.md --req .. --ledger ..`（路径由 Runtime 按 `(workflow, req_id)` 分区解析，状态隔离不同需求）。**检查点文件必须含完整 15 列用例表**（首列"用例ID"，与最终 TestCases.md 同结构），且追溯性 section（规则建模/风险清单/测试点清单）须在用例表**之前**——顺序为 规则建模 → 风险清单 → 测试点清单 → 用例表（v0.11.0·RC3 修复：与 `references/output_write.md` L199 一致；顺序写反由 `verify_cases.py` 的 `check_section_order` 硬阻断，勿靠自觉）。可在用例表后附覆盖预检摘要。
 
 **格式违反**（必 FAIL）：检查点只写摘要文档（如"## 用例生成完成\n\n22 条用例..."）而无用例表 → `parse_table_from_lines` 返回 None → phase-gate 报"[FAIL] 检查点格式不符: Phase 8 检查点必须含 15 列用例表"。此时须**重写检查点为用例表格式**，而非改用例内容或关联需求ID 格式。
 
@@ -453,6 +453,6 @@ runtime 在 Phase 8 出口门禁调 `verify_cases.py --phase-gate 8 .qamaster/ca
 
 ## 20.11 测试维度规范
 
-允许：输入验证、边界验证、状态验证、权限验证、数据验证、接口验证、并发验证、幂等验证、兼容性验证、集成验证、风险验证、安全验证。
+允许：输入验证、边界验证、状态验证、权限验证、数据验证、接口验证、并发验证、幂等验证、兼容性验证、集成验证、风险验证、安全验证、界面验证（RC26 修复：与 `config/validation_rules.json` valid_dims 13 项对齐，旧版漏列界面验证致模型按 12 维度设计、UI 用例声明"界面验证"维度时文档无据）。
 
 禁止使用模糊维度。
