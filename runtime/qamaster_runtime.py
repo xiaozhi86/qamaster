@@ -42,6 +42,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -825,6 +826,10 @@ def _manifest_side_effect(st, phase, spec, workdir):
     Phase 13 PASS → manifest update（TestCases_<id>*.md 实际落盘文件列）
     Phase 14 confirm → manifest complete（置已完成）
 
+    RC32-c：st.modify_of 标记表示"修改已完成需求"场景（req_id 在 MANIFEST 已有
+    非归档行），Phase 0 走 upsert（复用既有行 + 重置为进行中）而非 add（add 会
+    因 req_id 已存在返回报错，造成 MANIFEST 失步）。
+
     失败不阻断 gate（MANIFEST 是 best-effort 索引；失步可 `manifest reconcile` 重建——C6 兜底）。
     """
     pid = phase["id"]
@@ -832,10 +837,15 @@ def _manifest_side_effect(st, phase, spec, workdir):
     if not req_id or pid not in (0, 1, 13, 14):
         return
     mp = _manifest_path(workdir, spec)
+    is_modify = bool(st.get("modify_of"))
     try:
         with locking.FileLock(mp, timeout=30):  # P2 修复：锁超时统一为 30s（与 cmd_manifest/reconcile 一致，旧 10s 在并发多需求下偏短）
             if pid == 0:
-                manifest.add(mp, req_id, workdir=workdir, output_dir=spec.output_dir)
+                if is_modify:
+                    # RC32-c：修改已完成需求 → upsert（既有行刷新 + 重置进行中）
+                    manifest.upsert(mp, req_id, workdir=workdir, output_dir=spec.output_dir, reopen=True)
+                else:
+                    manifest.add(mp, req_id, workdir=workdir, output_dir=spec.output_dir)
             elif pid == 1:
                 ledger = "Clarification_Ledger_%s.md" % req_id
                 manifest.update(mp, req_id, ledger_file=ledger)
@@ -939,6 +949,28 @@ def _derive_from_text(text):
     return ""
 
 
+_ARTIFACT_PREFIX_RE = re.compile(
+    r"^(REQ|TestCases|Clarification_Ledger|Knowledge|DESIGN)_(.+)\.md$"
+)
+
+
+def _strip_artifact_prefix(text):
+    """剥离产物前缀：`TestCases_<id>.md` / `REQ_<id>.md` 等 → 原始 req_id；非产物返回 None。
+
+    修改已完成需求场景下，用户常 `@TestCases_<原id>.md 修改说明` 回传产物文件路径。
+    若不剥离，_derive_req_id 会按"文件路径"走 _derive_from_file，从产物文件名 stem
+    派生出带 `TestCases_` 前缀的 id（再被 _clean_id 截 30 字符 → 与原 id 不符），
+    manifest.add 当作新需求 → 重复行（RC32-a）。
+    """
+    if not text:
+        return None
+    bn = os.path.basename(text.strip())
+    m = _ARTIFACT_PREFIX_RE.match(bn)
+    if m:
+        return m.group(2)
+    return None
+
+
 def _derive_req_id(a, spec, workdir):
     """派生需求标识。优先级：--req-id > 文件路径 > 内联文本。"""
     if a.req_id:
@@ -949,6 +981,14 @@ def _derive_req_id(a, spec, workdir):
     # 去除外层引号
     if len(ui) >= 2 and ui[0] in "\"'" and ui[-1] == ui[0]:
         ui = ui[1:-1].strip()
+    # RC32-a：先剥离产物前缀。命中则用剥离后的 id（再过 _clean_id 归一，与首次 add
+    # 时同口径），不走 _derive_from_file——否则会从 TestCases 文件的
+    # `# 测试用例 - <需求名>` 标题派生出"测试用例---<需求名>"，与原 req_id 仍不符。
+    stripped = _strip_artifact_prefix(ui)
+    if stripped is not None:
+        cand = _clean_id(stripped)
+        if cand:
+            return cand
     if os.path.isfile(ui):
         return _derive_from_file(ui)
     return _derive_from_text(ui)
@@ -973,13 +1013,25 @@ def cmd_bootstrap(a):
               % (req_id, st.get("current_phase") if st else "?", st.get("status") if st else "?"))
         print("  （检测到进行中状态，start 将走 resume 分支，不重建状态）")
         return
-    # 碰撞检查：manifest 已有（完成/归档）→ 追加日期
+    # 碰撞检查：manifest 同名行 → 区分"修改已完成需求" vs "同名归档重跑"
+    # RC32-b：旧逻辑对任何 manifest 命中都追加 -YYYYMMDD，把"修改已完成需求"
+    # 误当"归档重跑"→ 产生新 req_id → manifest.add 新行 → 重复索引。
+    # 修正：已完成/进行中 → 复用 req_id 走修改分支（start 检测后 upsert）；
+    #       已归档       → 仍是归档重跑语义，追加日期（旧行保留归档，新需求另起）。
     mp = _manifest_path(workdir, spec)
     existing_rows = manifest.load_rows(mp)
-    if any(r["req_id"] == req_id for r in existing_rows):
-        cand = "%s-%s" % (req_id, time.strftime("%Y%m%d"))
-        print("BOOTSTRAP NOTE req_id=%s 与已归档需求同名，改用 %s" % (req_id, cand), file=sys.stderr)
-        req_id = cand
+    hit = next((r for r in existing_rows if r["req_id"] == req_id), None)
+    if hit is not None:
+        hit_status = hit.get("status", "")
+        if hit_status == manifest.STATUS_ARCHIVED:
+            cand = "%s-%s" % (req_id, time.strftime("%Y%m%d"))
+            print("BOOTSTRAP NOTE req_id=%s 与已归档需求同名，改用 %s" % (req_id, cand), file=sys.stderr)
+            req_id = cand
+        else:
+            # 已完成/进行中：修改场景。复用 req_id，start 将走 modify 分支
+            # （new_state + modify_of 标记），Phase 0 副作用走 upsert 不产生重复行。
+            print("BOOTSTRAP MODIFY req_id=%s manifest_status=%s（复用 req_id，start 走修改分支）"
+                  % (req_id, hit_status), file=sys.stderr)
     print("BOOTSTRAP OK req_id=%s" % req_id)
 
 
@@ -1012,6 +1064,29 @@ def cmd_start(a):
     st = state_store.new_state(spec.name, req_id, workdir)
     if a.mode:
         st["run_mode"] = a.mode
+    # RC32-c：检测"修改已完成需求"场景——req_id 在 MANIFEST 已有非归档行但
+    # 分区 state 为空（被 Phase 14 完成清理或手工 reset 后重跑同一需求）。
+    # 旧逻辑：直接 new_state → Phase 0 _manifest_side_effect 调 manifest.add →
+    # 因 req_id 已存在返回 (False,"req_id 已存在") → MANIFEST 失步（best-effort
+    # 不阻断，但索引列不刷新且日志报错）。改：检测到此场景时挂 modify_of 标记，
+    # _manifest_side_effect Phase 0 据此走 upsert（复用既有行 + 重置为进行中）。
+    try:
+        _mp = _manifest_path(workdir, spec)
+        _rows = manifest.load_rows(_mp)
+        _hit = next((r for r in _rows if r["req_id"] == req_id), None)
+        if _hit is not None and _hit.get("status") != manifest.STATUS_ARCHIVED:
+            st["modify_of"] = {
+                "req_id": req_id,
+                "prev_status": _hit.get("status", ""),
+                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            state_store.log_event(st, "start_modify",
+                                  detail="manifest_status=%s（修改已完成需求，复用 req_id）"
+                                  % _hit.get("status", ""))
+            print("BOOTSTRAP→start: 检测到 req_id=%s 在 MANIFEST 已有（%s），按修改场景启动（Phase 0 副作用走 upsert）。"
+                  % (req_id, _hit.get("status", "")))
+    except Exception as _e:
+        print("  [WARN] 修改场景检测失败（不阻断；Phase 0 副作用退回 add）: %s" % _e, file=sys.stderr)
     state_store.log_event(st, "start", detail="mode=%s workflow=%s req_id=%s" % (st["run_mode"], spec.name, req_id))
     state_store.save(path, st)
     phase = spec.get_phase(0)

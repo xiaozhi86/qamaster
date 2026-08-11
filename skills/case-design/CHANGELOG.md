@@ -6,6 +6,17 @@
 
 # 发布说明（面向使用者）
 
+## v0.11.2（2026-08-11，MANIFEST 索引完整性修复·RC31-RC32）
+
+**本次发布修复 MANIFEST 索引与实际产物的两类失步**，均定位为 Runtime 维护索引时的根因（非模型问题）。
+
+- **RC31**：知识总结（`Knowledge_<id>.md`）登记后不写 MANIFEST。根因：`_manifest_side_effect` 只覆盖 phase 0/1/13/14，而知识总结是 Phase14 confirm 之后、Phase15 之前的后置动作（经 `cmd_set --knowledge done` 登记），从无分支调 `manifest.update(knowledge_file=...)` → "知识总结"列恒为 `-`，须手动 `manifest reconcile` 才回填。修复：`cmd_set` 的 `knowledge=done` 分支补 best-effort `manifest.update(knowledge_file=...)`（FileLock 30s，失败不阻断）。
+- **RC32**：修改已完成需求时给出产物文件却生成新 MANIFEST 记录条目（重复行）。根因三处：
+  - **RC32-a**：`_derive_req_id` 不剥离产物前缀——用户 `@TestCases_<原id>.md 修改说明` 回传，派生走 `_derive_from_file` 从产物文件 `# 测试用例 - <需求名>` 标题取 id，再被 `_clean_id` 截 30 字符 → 与原 req_id 不符 → `manifest.add` 当新需求 → 重复行。修复：新增 `_strip_artifact_prefix`，命中 `TestCases_/REQ_/Knowledge_/DESIGN_/Clarification_Ledger_` 前缀直接取 `<id>`（再过 `_clean_id` 归一）。
+  - **RC32-b**：`cmd_bootstrap` 碰撞检查不区分"修改已完成需求"与"同名归档重跑"——任何 manifest 命中都追加 `-YYYYMMDD`，把修改场景误当归档重跑 → 产生新 req_id → 重复行。修复：`已归档` 才追加日期（旧行保留归档，新需求另起）；`已完成/进行中` 复用 req_id 走修改分支。
+  - **RC32-c**：`cmd_start` 无修改已完成需求分支——`new_state` 后 Phase 0 `_manifest_side_effect` 调 `manifest.add`，因 req_id 已存在返回 `(False,"req_id 已存在")` → MANIFEST 失步。修复：`cmd_start` 检测 req_id 在 MANIFEST 已有非归档行时挂 `modify_of` 标记；`_manifest_side_effect` Phase 0 据此走 `manifest.upsert`（新增或更新，`reopen=True` 把已完成置回进行中），既有行刷新不重复。
+  - 新增 `manifest.upsert`（幂等新增或更新；`reopen` 控制是否把已完成重置为进行中）。
+
 ## v0.11.1（2026-08-10，全代码库穷尽审计修复·30 根因 RC1-RC30）
 
 **本次发布是对 qamaster 全代码库穷尽审计后的系统性修复**，解决两个线上症状：

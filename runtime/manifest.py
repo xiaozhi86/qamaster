@@ -232,6 +232,46 @@ def update(path, req_id, **fields):
     return (True, "updated req_id=%s fields=%s" % (req_id, ",".join(sorted(fields))))
 
 
+def upsert(path, req_id, workdir=None, output_dir="case-design-out", name=None, reopen=True):
+    """新增或更新索引行（幂等）。RC32-c：修改已完成需求场景的 Phase 0 副作用用此入口。
+
+    - req_id 不存在 → 等价 add（新增进行中行）。
+    - req_id 已存在 → update：刷新 name/req_file/design_file；`reopen=True` 时把
+      status 置回进行中（需求在被返工，已完成的终态标记须让位给进行中）。
+    返回 (ok, message, action) — action ∈ {"added","updated"}。
+    """
+    if not req_id:
+        return (False, "req_id 为空", "noop")
+    rows = load_rows(path)
+    i = _find(rows, req_id)
+    if i < 0:
+        row = _empty_row(req_id)
+        row["req_file"] = "REQ_%s.md" % req_id
+        design_path = os.path.join(workdir or "", output_dir, "DESIGN_%s.md" % req_id)
+        if workdir and os.path.isfile(design_path):
+            row["design_file"] = "DESIGN_%s.md" % req_id
+        row["name"] = name or (_extract_req_name(workdir, output_dir, req_id) if workdir else req_id)
+        row["status"] = STATUS_IN_PROGRESS
+        row["updated_at"] = _today()
+        rows.append(row)
+        _save_rows(path, rows)
+        return (True, "added req_id=%s" % req_id, "added")
+    row = rows[i]
+    row["req_file"] = "REQ_%s.md" % req_id
+    if workdir:
+        design_path = os.path.join(workdir, output_dir, "DESIGN_%s.md" % req_id)
+        if os.path.isfile(design_path):
+            row["design_file"] = "DESIGN_%s.md" % req_id
+        new_name = name or _extract_req_name(workdir, output_dir, req_id)
+        if new_name and new_name != req_id:
+            row["name"] = new_name
+    if reopen and row.get("status") == STATUS_DONE:
+        row["status"] = STATUS_IN_PROGRESS
+    row["updated_at"] = _today()
+    _save_rows(path, rows)
+    return (True, "updated req_id=%s reopen=%s" % (req_id, reopen), "updated")
+
+
 def complete(path, req_id):
     """置某行为已完成（Phase 14 confirm 后置动作）。返回 (ok, message)。"""
     rows = load_rows(path)
