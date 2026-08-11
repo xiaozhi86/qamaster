@@ -392,6 +392,32 @@ def _render_lessons_block(cands, tag, footer=""):
     return "\n".join(lines)
 
 
+def _render_expert_block(cands, tag="PRIOR_EXPERT_KB", footer=""):
+    """渲染专家方法论块（通用方法·非业务特例）。cands=[(score, rec), ...]。
+
+    形态与 lessons 块不同：展示 category/principle/applicable_phases/trigger，
+    而非 phase/dim/原话——专家库存的是提炼后的方法原则，非人类原话。
+    """
+    if not cands:
+        return ""
+    lines = ["##%s##（专家方法论·Runtime 自动检索注入，参考而非硬约束）" % tag]
+    for score, r in cands:
+        cat = r.get("category") or "(未分类)"
+        prin = r.get("principle") or "(无原则)"
+        phases = r.get("applicable_phases") or []
+        ph_str = "/".join(str(p) for p in phases[:8]) if phases else "(全阶段)"
+        trig = r.get("trigger") or []
+        trig_str = "/".join(trig[:8]) if trig else "(无)"
+        occ = r.get("occurrences", 1)
+        lines.append("  - [%s] %s" % (cat, prin))
+        lines.append("    （适用阶段 %s，触发词: %s，跨需求命中 %d 次）" % (ph_str, trig_str, occ))
+    if footer:
+        lines.append("  适用原则：%s" % footer)
+    else:
+        lines.append("  适用原则：本阶段在记录的 applicable_phases 内且需求命中触发词；参考适用方法论，不适用则忽略。")
+    return "\n".join(lines)
+
+
 def _prior_kb_block(st, phase, spec, kind="lesson", top=3):
     """预防式检索+注入：开工前按 REQ 相关性 + 双门注入 ##PRIOR_LESSONS##。
 
@@ -526,6 +552,49 @@ def _relevant_business_kb_on_fail(st, phase, fail_context, spec, top=3):
     cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
     return _render_lessons_block(cands[:top], tag="RELEVANT_BUSINESS_KB",
                                  footer="本门失败/本次纠正疑似与此历史业务知识相关·请据此参考，参考而非硬约束") if cands else ""
+
+
+def _prior_expert_kb_block(st, phase, spec, top=3):
+    """预防式专家方法论检索+注入：**每阶段每轮**按阶段适用性+REQ 相关性+信任门注入 ##PRIOR_EXPERT_KB##。
+
+    镜像 _prior_business_kb_block，4 处差异：
+    1. path="expert"（KB_expert.md）
+    2. tag="PRIOR_EXPERT_KB"
+    3. **按 applicable_phases 过滤**：当前 phase ∈ 记录 applicable_phases 才候选
+       （空 applicable_phases 视为全阶段适用兜底）——实现"不适用的无需使用"
+    4. **信任门 endorsed-only**：仅 status==endorsed 才注入（删掉 occ≥3 逃生口）
+       ——方法论跨需求传播，错方法论污染所有未来设计，质量优先于速度
+    相关性门同 lessons/business（surface≥2 或 module 标题命中）。
+    每阶段每轮注入（含自检轮）：调用方 _card 不加 phase==0 守卫，0-14 全覆盖。
+    No-op：无 KB_expert.md / 无 endorsed 记录 / 当前 phase 无适用 / 无相关 → 返回 "" → 卡片逐字节一致。
+    """
+    p = _kb_path(st.get("workdir", os.getcwd()), spec, "expert")
+    if not os.path.isfile(p):
+        return ""
+    recs = kb_store.load_records(p)
+    rtext = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    phase_id = phase.get("id") if isinstance(phase, dict) else phase
+    cands = []
+    for r in recs:
+        if r.get("superseded_by"):
+            continue
+        # 适用性门：当前 phase ∈ applicable_phases；空列表视为全阶段适用
+        ap = r.get("applicable_phases") or []
+        if ap and str(phase_id) not in [str(x) for x in ap]:
+            continue
+        # 信任门：endorsed-only（无 occ≥3 逃生口）
+        if r.get("status") != "endorsed":
+            continue
+        # 相关性门：surface≥2 或 module 标题命中
+        surface = sum(1 for w in r.get("trigger", []) if w in rtext)
+        title_hit = bool(r.get("module")) and r["module"] in rtext
+        relevant = surface >= 2 or title_hit
+        if not relevant:
+            continue
+        score = 3 * surface + 4 * (1 if title_hit else 0) + r.get("occurrences", 1)
+        cands.append((score, r))
+    cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
+    return _render_expert_block(cands[:top]) if cands else ""
 
 
 def _run_check(chk, st, spec):
@@ -765,6 +834,12 @@ def _card(st, phase, spec, extra="", correction_context=None):
     if les:
         lines.append("")
         lines.append(les)
+    # v0.11.3: 预防式注入 ##PRIOR_EXPERT_KB##（每阶段每轮·含自检轮，endorsed + 阶段适用 + 相关）
+    # 三门（适用+信任+相关）不过 → _prior_expert_kb_block 返回 "" → 卡片与无 KB 时逐字节一致
+    exp = _prior_expert_kb_block(st, phase, spec)
+    if exp:
+        lines.append("")
+        lines.append(exp)
     # v0.11.0: 预防式注入 ##PRIOR_BUSINESS_KB##（仅 Phase 0 开工前业务背景，phase 无关）
     # No-op：无 KB_business.md / 无记录过双门 → 返回 "" → 卡片与无 KB 时逐字节一致
     if str(phase.get("id")) == "0":
@@ -961,10 +1036,20 @@ def _strip_artifact_prefix(text):
     若不剥离，_derive_req_id 会按"文件路径"走 _derive_from_file，从产物文件名 stem
     派生出带 `TestCases_` 前缀的 id（再被 _clean_id 截 30 字符 → 与原 id 不符），
     manifest.add 当作新需求 → 重复行（RC32-a）。
+
+    RC33：须取**首个空白分隔 token** 再 basename——用户常 `@<产物>.md <附加说明>`，
+    附加说明含 `/`（如 `/api/rule/process`）时，在整串上 os.path.basename 会切到
+    附加说明里的 `/`，返回不以 .md 结尾的尾巴 → 正则失配 → 剥离失效 → 回退
+    _derive_from_text 派生垃圾 req_id → manifest.add 当新需求 → MANIFEST 重复行。
     """
     if not text:
         return None
-    bn = os.path.basename(text.strip())
+    s = text.strip()
+    if not s:
+        return None
+    tok = s.split(None, 1)[0]          # 首个 token = 产物路径（忽略其后的附加说明）
+    tok = tok.lstrip("@")               # 兼容 @file 提及前缀
+    bn = os.path.basename(tok)
     m = _ARTIFACT_PREFIX_RE.match(bn)
     if m:
         return m.group(2)
@@ -1723,12 +1808,18 @@ def cmd_kb(a):
     spec = _spec(a)
     workdir = a.workdir
     # v0.11.0: --kind 选 KB 文件（lesson -> KB_lessons.md；business -> KB_business.md）。
-    # 默认 lesson（既有行为）。reconcile 仅对 business 有效（lesson 由 fail/patch 自动捕获）。
+    # v0.11.3: 增 expert -> KB_expert.md（通用测试设计方法论）。
+    # 默认 lesson（既有行为）。reconcile 仅对 business 有效（lesson 由 fail/patch 自动捕获；expert 由 add-expert）。
     kind = (a.kind or "lesson")
     if kind == "all":
-        # list/reconcile 之外不支持 all；此处统一按 lesson 取主路径，list 内部再读双文件
+        # list/reconcile 之外不支持 all；此处统一按 lesson 取主路径，list 内部再读三文件
         kind = "lesson"
-    p = _kb_path(workdir, spec, "business" if kind == "business" else "lessons")
+    if kind == "expert":
+        p = _kb_path(workdir, spec, "expert")
+    elif kind == "business":
+        p = _kb_path(workdir, spec, "business")
+    else:
+        p = _kb_path(workdir, spec, "lessons")
     action = a.action
 
     def _audit(req_id, event, detail):
@@ -1753,12 +1844,14 @@ def cmd_kb(a):
 
     # --- 只读路径（无锁） ---
     if action == "list":
-        # --kind all：合并读 lessons + business 两文件（business no-op 时退空）
+        # --kind all：合并读 lessons + business + expert 三文件（no-op 时退空）
         if (a.kind or "lesson") == "all":
             rows = kb_store.list_records(p, status=a.status, phase=a.phase, dimension=a.dimension)
             pb = _kb_path(workdir, spec, "business")
             rows += kb_store.list_records(pb, status=a.status, phase=a.phase, dimension=a.dimension)
-            print("KB LIST: lessons+business — %d 条记录" % len(rows))
+            pe = _kb_path(workdir, spec, "expert")
+            rows += kb_store.list_records(pe, status=a.status, phase=a.phase, dimension=a.dimension)
+            print("KB LIST: lessons+business+expert — %d 条记录" % len(rows))
         else:
             rows = kb_store.list_records(p, status=a.status, phase=a.phase, dimension=a.dimension)
             print("KB LIST: %s — %d 条记录" % (p, len(rows)))
@@ -1791,6 +1884,15 @@ def cmd_kb(a):
                 block = _prior_business_kb_block(st_q, phase, spec, top=a.top or 3)
                 _print_block("PRIOR_BUSINESS_KB（预防式·Phase 0·会注入）", block or "(无命中)")
             print("  （top=%d；信任门：endorsed 或 occ≥3；相关性门：surface≥2 或标题命中）"
+                  % (a.top or 3))
+            return
+        if (a.kind or "lesson") == "expert":
+            # expert 检索路径（每阶段每轮·含自检轮；反应式复用 _relevant_business_kb_on_fail 的语义——
+            #   expert 无独立反应式 helper，失败定向亦走 _prior_expert_kb_block 因入口卡已含适用方法论；
+            #   context 仅作 surface 加权预览）
+            block = _prior_expert_kb_block(st_q, phase, spec, top=a.top or 3)
+            _print_block("PRIOR_EXPERT_KB（预防式·每阶段每轮·会注入）", block or "(无命中)")
+            print("  （top=%d；信任门：仅 endorsed；适用门：phase∈applicable_phases；相关性门：surface≥2 或标题命中）"
                   % (a.top or 3))
             return
         if a.context:
@@ -1853,6 +1955,38 @@ def cmd_kb(a):
             fp = kb_store.upsert_lesson(p, rec)
         _audit(a.req_id, "kb_add_lesson", detail="id=%s dim=%s" % (fp, rec["dimension"]))
         print("KB ADD-LESSON: OK — id=%s（指纹去重：同类已合并则 occ++）" % fp)
+        return
+    if action == "add-expert":
+        # v0.11.3: 专家知识库沉淀——从用户纠正中提炼的通用测试设计方法论。
+        # 镜像 add-lesson 纪律（Runtime 持锁落盘，模型禁写）。draft 不注入，endorse 后注入。
+        # add-expert 是 action 而非 --kind：--kind 默认 lesson，故此处强制专家库路径，
+        # 否则记录会落进 KB_lessons.md（serialize 按 rec.kind 选横幅会写对内容，但文件名错）。
+        p = _kb_path(workdir, spec, "expert")
+        if not a.category:
+            _die("kb add-expert 需 --category <方法类目>（如 边界值/状态迁移/契约测试）")
+        if not a.principle:
+            _die("kb add-expert 需 --principle \"<方法原则>\"（脱业务后仍成立的通用原则）")
+        trig = []
+        if a.trigger:
+            trig = [t.strip() for t in a.trigger.split("/") if t.strip()]
+        ap_list = []
+        if a.applicable_phases:
+            ap_list = [int(x.strip()) for x in str(a.applicable_phases).split("/")
+                       if x.strip().isdigit()]
+        rec = {
+            "kind": "expert", "phase": "", "dimension": a.dimension or "通用",
+            "error_type": "方法提炼", "module": a.module or "",
+            "source_req": a.source_req or "manual", "captured": kb_store._today(),
+            "raw_text": a.principle.strip(), "status": a.status or "draft",
+            "occurrences": 1, "trigger": trig,
+            "category": a.category.strip(), "applicable_phases": ap_list,
+            "principle": a.principle.strip(),
+        }
+        with locking.FileLock(p, timeout=30):
+            fp = kb_store.upsert_lesson(p, rec)
+        _audit(a.req_id, "kb_add_expert", detail="id=%s cat=%s" % (fp, rec["category"]))
+        print("KB ADD-EXPERT: OK — id=%s（指纹去重：同 category|principle 已合并则 occ++）" % fp)
+        print("  draft 状态——未 endorse 不注入；人工 `kb endorse --kind expert --id %s` 后进 ##PRIOR_EXPERT_KB##" % fp)
         return
     if action == "endorse":
         if not a.id:
@@ -1998,22 +2132,29 @@ def main():
 
     sp = sub.add_parser("kb", help="KB 经验库维护（自我进化·Runtime 独占，模型禁止 Write/Edit）")
     sp.add_argument("action", choices=["list", "show", "query", "distill", "reconcile",
-                                       "add-lesson", "endorse", "supersede", "prune"])
-    sp.add_argument("--kind", default="lesson", choices=["lesson", "business", "all"],
-                    help="KB 种类：lesson=经验库（默认）/business=业务知识库/all=合并读（list）")
+                                       "add-lesson", "add-expert", "endorse", "supersede", "prune"])
+    sp.add_argument("--kind", default="lesson", choices=["lesson", "business", "expert", "all"],
+                    help="KB 种类：lesson=经验库（默认）/business=业务知识库/expert=专家方法论库/all=合并读（list）")
     sp.add_argument("--id", default=None, help="经验 id（show/endorse/supersede --id/prune --id）")
     sp.add_argument("--by", default=None, help="supersede：新经验 id（--id <老> --by <新>）")
     sp.add_argument("--against", default=None, help="query：目标需求 id 或文件（预防式检索用）")
     sp.add_argument("--phase", default=None, help="query/add-lesson：阶段号")
     sp.add_argument("--context", default=None, help="query：失败/纠正文本（走反应式打分）")
     sp.add_argument("--top", default=3, type=int, help="query：返回条数上限（默认 3）")
-    sp.add_argument("--dimension", default=None, help="list/add-lesson：业务维度")
+    sp.add_argument("--dimension", default=None, help="list/add-lesson/add-expert：业务维度")
     sp.add_argument("--status", default=None, choices=["draft", "endorsed"], help="list/prune：状态过滤")
     sp.add_argument("--older-than", default=None, type=int, help="prune：N 天前（配合 --status draft）")
     sp.add_argument("--summary", default=None, help="add-lesson：经验原文（人类原话 verbatim）")
-    sp.add_argument("--trigger", default=None, help="add-lesson：触发词，'/' 分隔")
-    sp.add_argument("--module", default=None, help="add-lesson：模块/需求名（仅溯源展示）")
-    sp.add_argument("--source-req", default=None, help="add-lesson：来源需求 id")
+    sp.add_argument("--trigger", default=None, help="add-lesson/add-expert：触发词，'/' 分隔")
+    sp.add_argument("--module", default=None, help="add-lesson/add-expert：模块/需求名（仅溯源展示）")
+    sp.add_argument("--source-req", default=None, help="add-lesson/add-expert：来源需求 id")
+    # add-expert 专用（专家方法论结构化字段）
+    sp.add_argument("--category", default=None,
+                    help="add-expert：方法类目（边界值/等价类/状态迁移/判定表/场景法/错误推测/契约测试/安全/幂等/并发…）")
+    sp.add_argument("--principle", default=None,
+                    help="add-expert：方法原则（脱业务后仍成立的通用原则，人类标注非模型生成）")
+    sp.add_argument("--applicable-phases", dest="applicable_phases", default=None,
+                    help="add-expert：适用阶段，'/' 分隔（如 6/8/11）；空则全阶段适用兜底")
     _ri(sp)
     _wf(sp)
     _wd(sp)

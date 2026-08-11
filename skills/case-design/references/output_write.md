@@ -302,6 +302,12 @@
 * **问题性质分类**：仅字段微调？断言模糊？规则变更？新场景？新风险？
 * **无问题用例清单**：哪些用例无问题（需原样保留）
 
+> **纠正分流（v0.11.3·强制·防串台）**：解析时须区分纠正**性质**并路由至对应知识沉淀位（见 `references/expert_kb.md` 决策树）：
+> - 纠正含**需求层新增/修改/补充**（新规则/新字段/新业务约束/新验收点）→ 需求规格变了 → 第14阶段审核通过后汇入 `Knowledge_<需求标识>.md`（业务知识总结），**不进专家库**。
+> - 纠正含**测试设计覆盖不全**（漏边界/漏状态机/漏异常/方法选错）→ 测试方法有缺口 → 再判能否提炼为**通用方法论**（脱业务实体后仍成立）：能提炼 → `kb add-expert` 沉淀 draft（不注入，endorse 后进 `##PRIOR_EXPERT_KB##`）；仅本次业务特例 → 留 `KB_lessons.md`（`fail`/`patch` 自动捕获原话）。
+> - 两类兼有 → 拆分：需求层进 Knowledge，方法层可提炼进 KB_expert，不可提炼留 KB_lessons。三类各归其位，禁止串台。
+> 本步只做分类判定与记录，不执行沉淀（沉淀在各对应阶段/流程执行）。
+
 输出【问题点解析表】：
 
 | 问题用例ID | 问题类型 | 问题描述 | 修改方向 | 是否影响前置阶段 |
@@ -424,6 +430,7 @@
 * `case-design-out/REQ_<需求标识>.md` —— 用户提供的原始需求文档（**强制落盘**，第0阶段步骤零落盘，为 #4/#5 反向追溯唯一可靠基准；见 `references/phase0_manifest.md` 步骤零）
 * `case-design-out/KB_lessons.md` —— 自我进化经验库（跨需求共享，Runtime 在 `fail`/`patch` 纠正时自动沉淀 draft、经人工 `kb endorse` 背书后注入 `##PRIOR_LESSONS##`/`##RELEVANT_LESSONS##`；**模型禁止 Write/Edit**，进化机制与模型无关铁律；维护用 `python runtime/qamaster_runtime.py kb <action>`）
 * `case-design-out/KB_business.md` —— 业务历史知识库（跨需求共享，Runtime 经 `kb reconcile --kind business` 聚合各需求 Phase 14 的 `Knowledge_*.md` 元数据+维度文本；**只索引不生成**，聚合/打标/检索/注入全 stdlib；**模型禁止 Write/Edit**，业务知识内容归属人类；Phase 0 预防式注入 `##PRIOR_BUSINESS_KB##`、失败时反应式注入 `##RELEVANT_BUSINESS_KB##`，均为软上下文参考而非硬约束）
+* `case-design-out/KB_expert.md` —— 专家方法论库（v0.11.3，跨需求共享，Runtime 经 `kb add-expert` 从用户纠正中沉淀**可提炼为通用方法**的 draft、经人工 `kb endorse --kind expert` 背书后注入 `##PRIOR_EXPERT_KB##`；**只存方法不存业务**，脱业务实体后仍成立的方法原则；**模型禁止 Write/Edit**；0-14 每阶段每轮·含自检轮按 `applicable_phases` 适用性+相关性+endorsed 信任门注入，软上下文参考而非硬约束；分类决策树与提炼判定见 `references/expert_kb.md`）
 * 用户提供的业务/测试知识库文件
 * **`scripts/` 下的自带可复用脚本（`verify_md.py`、`verify_cases.py`、`verify_knowledge.py`、`verify_kb.py`、`project_cases.py`、`gen_excel.py`）为 skill 资产，位于 skill 安装目录、不在 `case-design-out/` 内，禁止删除**（`gen_excel.py` 为 Excel 生成永久脚本，替代旧 ad-hoc 用完即删脚本；仅解析 .md 的中间产物仍属临时文件需清理）
 

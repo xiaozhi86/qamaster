@@ -6,6 +6,29 @@
 
 # 发布说明（面向使用者）
 
+## v0.11.3（2026-08-11，专家知识库 KB_expert.md·从用户纠正中自我进化测试设计方法论）
+
+**本次发布补齐"从用户纠正中提炼通用测试设计方法论"的闭环**——既有 `KB_lessons.md`（人类原话 verbatim）与 `KB_business.md`（业务知识聚合）之外，新增第三类 KB `KB_expert.md`（`kind=expert`），专门存**脱业务实体后仍成立的通用测试设计方法论**，经 `endorse` 后按阶段适用性注入 case-design 0-14 阶段每轮（含自检轮）。
+
+**用户原始诉求**：用户对测试用例的纠正补充，需求层变更应补进业务知识总结；测试设计覆盖不全应纠正方法，能提炼成通用方法论时写入专家知识库；专家库只存通用方法不存业务；case-design 0-14 每轮（含自检轮）使用适用的专家知识，不适用的不注入。
+
+**核心机制**：
+- **新 KB 类型** `kind=expert`，文件 `case-design-out/KB_expert.md`。记录结构在共享 `_DEFAULT_REC` 扩展三字段 `category`/`principle`/`applicable_phases`，镜像 lesson/business 纪律（Runtime FileLock 落盘，模型禁写）。
+- **沉淀命令** `kb add-expert --category <类> --principle "<原则>" --applicable-phases <阶段> --trigger <词>`：从用户纠正中提炼的可通用方法沉淀为 `draft`（不注入）。
+- **信任门 endorsed-only**（经用户 AskUserQuestion 确认）：专家库**仅 endorsed 才注入**，无 occ≥3 逃生口——方法论跨需求传播，错方法论污染所有未来设计，质量优先于速度。`kb endorse --kind expert --id <id>` 后进注入。
+- **三门注入** `_prior_expert_kb_block`：①适用性门（当前 phase ∈ applicable_phases，空列表全阶段兜底）②信任门（endorsed-only）③相关性门（trigger surface≥2 或 module 标题命中）。注入 `##PRIOR_EXPERT_KB##` 进每阶段每轮契约卡（含自检轮，`_card` 单一承载函数一处覆盖全部重入入口）。
+- **No-op 保证**：无 KB_expert.md / 无 endorsed 记录 / 当前 phase 无适用 / 无相关 → 返回 `""` → 契约卡与 v0.11.2 逐字节一致。
+
+**变更文件**：
+- `runtime/kb_store.py`：`_DEFAULT_REC` 加三字段；`_JSON_FIELDS` 加 `applicable_phases`；`_HEADER_LINES_EXPERT` + `_header` 三路分发；`serialize` 加三行；`fingerprint` expert 分支（`category|principle[:40]`）。
+- `runtime/qamaster_runtime.py`：`_render_expert_block` + `_prior_expert_kb_block`（镜像 business helper，4 处差异：expert 路径/PRIOR_EXPERT_KB tag/applicable_phases 过滤/endorsed-only）；`_card` 注入点；`cmd_kb` kind 三分发；`add-expert` action；argparse 三新参数。
+- `skills/case-design/scripts/verify_kb.py`：`LIST_FIELDS` 加 `applicable_phases`；`ID_PATTERNS` 加 expert；`phase` 空值放行（business/expert 无阶段绑定）。
+- `skills/case-design/SKILL.md`：铁律 #5 扩展为三类 KB（经验库+业务知识库+专家知识库）；共享索引加 KB_expert.md；修改流程路由提示。
+- `skills/case-design/references/expert_kb.md`（新文件）：专家库唯一细则——分类决策树（路由用户纠正：需求层→Knowledge_*.md；方法层可提炼→add-expert；不可提炼→KB_lessons）+ 可提炼判定 + category 词表 + applicable_phases 填法 + endorse 流程 + 与 methods.md 边界。
+- `skills/case-design/references/selfcheck.md`：自检轮专家方法论注入说明 + 检查14对抗遍参考 `##PRIOR_EXPERT_KB##`。
+- `skills/case-design/references/output_write.md`：不清理文件列表加 KB_expert.md；修改流程第1步加纠正分流提示。
+- `.claude-plugin/plugin.json` + `marketplace.json`：0.11.2 → 0.11.3。
+
 ## v0.11.2（2026-08-11，MANIFEST 索引完整性修复·RC31-RC32）
 
 **本次发布修复 MANIFEST 索引与实际产物的两类失步**，均定位为 Runtime 维护索引时的根因（非模型问题）。

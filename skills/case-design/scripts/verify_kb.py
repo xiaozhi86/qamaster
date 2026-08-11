@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-verify_kb.py — 经验库 KB_lessons.md 结构校验（Tier B 降本脚本）
+verify_kb.py — 知识库 KB_*.md 结构校验（Tier B 降本脚本）
 
-用途：KB_lessons.md 落盘后，由 skill 经 Bash 调用本脚本，校验经验库记录
-结构完整性，把 kb_store 序列化格式中【可机器判定】的结构要求客观化。
-verify_cases.py 校验测试用例 .md；verify_knowledge.py 校验知识总结 .md；
-本脚本校验经验库 KB_lessons.md，补自我进化沉淀的闭环缺口。
+用途：KB_lessons.md / KB_business.md / KB_expert.md 落盘后，由 skill 经 Bash
+调用本脚本，校验知识库记录结构完整性，把 kb_store 序列化格式中【可机器判定】
+的结构要求客观化。verify_cases.py 校验测试用例 .md；verify_knowledge.py 校验
+知识总结 .md；本脚本校验三类 KB_*.md，补自我进化沉淀的闭环缺口。
 
-【设计不变】不新增门禁、不改变经验库记录格式、不改变捕获时机。仅校验
+【设计不变】不新增门禁、不改变知识库记录格式、不改变捕获时机。仅校验
 结构完整性（围栏/字段齐全/列表合法/状态合法），不校验内容质量（主观，
 留给模型 + 人工 endorse）。
 
@@ -16,9 +16,11 @@ verify_cases.py 校验测试用例 .md；verify_knowledge.py 校验知识总结 
   - 文件头模型禁写横幅在位
   - 每条记录围栏 start/end 配对
   - 必填字段齐全：kind/id/phase/dimension/status/raw_text
-  - id 形如 KB-lesson-<12 hex> 或 KB-business-<12 hex>（按记录 kind 派发）
+  - id 形如 KB-lesson-<12 hex> / KB-business-<12 hex> / KB-expert-<12 hex>
+    （按记录 kind 派发；lesson/business/expert 分文件，单文件内 kind 一致）
   - status ∈ {draft, endorsed}
-  - 列表字段（source_reqs/supersedes/superseded_by/trigger/variants）为合法 JSON
+  - 列表字段（source_reqs/supersedes/superseded_by/trigger/variants/
+    applicable_phases）为合法 JSON 数组
   - occurrences 为正整数
 
 退出码：0=结构通过；1=缺字段/围栏/状态非法/列表非法
@@ -38,11 +40,12 @@ REQUIRED_FIELDS = ["kind", "id", "phase", "dimension", "status", "raw_text"]
 # 合法状态
 VALID_STATUS = {"draft", "endorsed"}
 # 列表字段（须为合法 JSON 数组）
-LIST_FIELDS = ["source_reqs", "supersedes", "superseded_by", "trigger", "variants"]
-# id 形状（按 kind 派发前缀；lesson/business 分文件，单文件内 kind 一致）
+LIST_FIELDS = ["source_reqs", "supersedes", "superseded_by", "trigger", "variants", "applicable_phases"]
+# id 形状（按 kind 派发前缀；lesson/business/expert 分文件，单文件内 kind 一致）
 ID_PATTERNS = {
     "lesson":   re.compile(r"^KB-lesson-[0-9a-f]{12}$"),
     "business": re.compile(r"^KB-business-[0-9a-f]{12}$"),
+    "expert":    re.compile(r"^KB-expert-[0-9a-f]{12}$"),
 }
 # 围栏
 RECORD_START = re.compile(r"<!--\s*@kb:record\s+start\s+id=([^\s>]*)\s*-->")
@@ -81,7 +84,7 @@ def _parse_records(lines):
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python verify_kb.py <KB_lessons.md>")
+        print("用法: python verify_kb.py <KB_lessons.md | KB_business.md | KB_expert.md>")
         return 1
 
     path = sys.argv[1]
@@ -96,7 +99,7 @@ def main():
         return 1
 
     text = "".join(lines)
-    print("===== 经验库结构校验 =====")
+    print("===== 知识库结构校验 =====")
     print("文件: %s" % os.path.basename(path))
     print("-" * 40)
 
@@ -116,19 +119,25 @@ def main():
     print("  记录数: %d" % len(records))
     for idx, (rid, fields, has_end) in enumerate(records, 1):
         tag = "记录#%d id=%s" % (idx, rid or "(空)")
+        rec_kind = fields.get("kind", "lesson")
         if not has_end:
             fails.append("%s: 缺 end 围栏" % tag)
+        # 必填字段：kind/expert 的 phase 允许空（方法提炼不绑某阶段），
+        # business/expert 的 module 亦非必填——仅强制 key 在位
         for fld in REQUIRED_FIELDS:
-            if fld not in fields or not fields[fld]:
+            if fld not in fields:
+                # key 缺失即结构错误
+                fails.append("%s: 缺字段 %s" % (tag, fld))
+            elif not fields[fld]:
+                # key 在位但值为空：phase 允许空（business/expert 无阶段绑定）
+                if fld == "phase":
+                    continue
                 if fld == "raw_text" and fields.get("raw_text") == "":
-                    # raw_text 允许为空字符串（占位），但 key 须在
-                    if fld not in fields:
-                        fails.append("%s: 缺字段 %s" % (tag, fld))
-                else:
-                    fails.append("%s: 缺字段 %s 或值为空" % (tag, fld))
+                    continue  # raw_text 允许空字符串占位
+                # expert 的 principle 映射到 raw_text，已放行；其余标量空值视为结构问题
+                fails.append("%s: 缺字段 %s 或值为空" % (tag, fld))
         # id 形状（围栏 id 优先，否则取 fields.id；按记录 kind 派发 pattern）
         id_val = rid or fields.get("id", "")
-        rec_kind = fields.get("kind", "lesson")
         id_re = ID_PATTERNS.get(rec_kind, ID_PATTERNS["lesson"])
         if id_val and not id_re.match(id_val):
             pat_kind = rec_kind if rec_kind in ID_PATTERNS else "lesson"

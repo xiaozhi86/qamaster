@@ -49,11 +49,27 @@ _HEADER_LINES_BUSINESS = [
     "---",
     "",
 ]
+_HEADER_LINES_EXPERT = [
+    "# 专家知识库 KB_expert",
+    "",
+    "> 本文件为跨需求共享的通用测试设计方法论库（从用户纠正中提炼、跨需求复用）。",
+    "> 由 qamaster Runtime 经 `kb add-expert` 沉淀 draft、人工 `kb endorse` 后注入 ##PRIOR_EXPERT_KB##。",
+    "> **只存通用方法知识，不记录具体业务知识**（业务知识归 Knowledge_*.md/KB_business）。",
+    "> **模型禁止 Write/Edit 本文件**（进化机制与模型无关铁律；方法论内容归属人类）。",
+    "> 仅 endorsed 记录才注入（无 occ≥3 逃生口）——错方法论污染所有未来设计，质量优先于速度。",
+    "",
+    "---",
+    "",
+]
 
 
 def _header(kind="lesson"):
-    """按 kind 选文件头横幅（business/lessons 分离，同结构同禁写纪律）。"""
-    return list(_HEADER_LINES_BUSINESS if kind == "business" else _HEADER_LINES_LESSON)
+    """按 kind 选文件头横幅（lesson/business/expert 分离，同结构同禁写纪律）。"""
+    if kind == "business":
+        return list(_HEADER_LINES_BUSINESS)
+    if kind == "expert":
+        return list(_HEADER_LINES_EXPERT)
+    return list(_HEADER_LINES_LESSON)
 
 # 记录字段默认值（单一事实源；序列化与解析共用）
 _DEFAULT_REC = {
@@ -62,10 +78,13 @@ _DEFAULT_REC = {
     "source_reqs": [], "captured": "", "supersedes": [], "superseded_by": [],
     "occurrences": 1, "status": "draft", "trigger": [], "raw_text": "",
     "variants": [],
+    # expert 专用（kind=expert）：通用测试设计方法论的结构化字段。
+    # lesson/business 记录携带空默认值，既有行为不变（共享 schema）。
+    "category": "", "applicable_phases": [], "principle": "",
 }
 
 # 需 JSON 解析的列表/字典字段（标量字段按原样字符串）
-_JSON_FIELDS = {"source_reqs", "supersedes", "superseded_by", "trigger", "variants"}
+_JSON_FIELDS = {"source_reqs", "supersedes", "superseded_by", "trigger", "variants", "applicable_phases"}
 
 # surface map 子进程 memoize 缓存（进程内，键=skill_dir）
 _surf_cache = {}
@@ -131,8 +150,12 @@ def serialize(records, kind="lesson"):
     """记录列表 -> KB*.md 文本（含文件头横幅 + 记录围栏）。kind 选横幅。"""
     out = _header(kind)
     if not records:
-        out.append("<!-- 暂无经验记录。纠正发生时 Runtime 自动沉淀 draft。 -->" if kind != "business"
-                   else "<!-- 暂无业务知识记录。kb reconcile --kind business 后聚合 Knowledge_*.md。 -->")
+        if kind == "business":
+            out.append("<!-- 暂无业务知识记录。kb reconcile --kind business 后聚合 Knowledge_*.md。 -->")
+        elif kind == "expert":
+            out.append("<!-- 暂无专家方法论记录。kb add-expert 沉淀 draft、endorse 后注入。 -->")
+        else:
+            out.append("<!-- 暂无经验记录。纠正发生时 Runtime 自动沉淀 draft。 -->")
         out.append("")
         return "\n".join(out)
     for r in records:
@@ -157,6 +180,10 @@ def serialize(records, kind="lesson"):
         raw = " ".join(str(raw).splitlines()).strip()
         out.append("raw_text: %s" % raw)
         out.append("variants: %s" % json.dumps(r.get("variants") or [], ensure_ascii=False))
+        # expert 专用结构化字段（lesson/business 为空默认值，序列化对齐）
+        out.append("category: %s" % (r.get("category") or ""))
+        out.append("applicable_phases: %s" % json.dumps(r.get("applicable_phases") or [], ensure_ascii=False))
+        out.append("principle: %s" % (r.get("principle") or ""))
         out.append("<!-- @kb:record end -->")
         out.append("")
     return "\n".join(out)
@@ -205,14 +232,18 @@ def _atomic_write(path, text):
 def _save_records(path, records, kind="lesson"):
     """原子写记录列表。kind 透传 serialize 选横幅。
 
-    business/lessons 分文件、单文件内 kind 一致：records 非空时按首条记录 kind 推断，
-    保证共享的 upsert_lesson/endorse/supersede/prune 写 business 文件时也能选对横幅，
-    无需调用方显式传 kind。空记录回退：路径名含 business 则用 business 横幅，否则 kind 参数。
+    business/lessons/expert 分文件、单文件内 kind 一致：records 非空时按首条记录 kind 推断，
+    保证共享的 upsert_lesson/endorse/supersede/prune 写 business/expert 文件时也能选对横幅，
+    无需调用方显式传 kind。空记录回退：路径名含 business/expert 则用对应横幅，否则 kind 参数。
     """
     if records and isinstance(records[0], dict) and records[0].get("kind"):
         kind = records[0]["kind"]
-    elif not records and "business" in os.path.basename(path).lower():
-        kind = "business"
+    elif not records:
+        base = os.path.basename(path).lower()
+        if "business" in base:
+            kind = "business"
+        elif "expert" in base:
+            kind = "expert"
     _atomic_write(path, serialize(records, kind=kind))
 
 
@@ -231,11 +262,16 @@ def fingerprint(r):
       （否则永远=1，自我进化特性失效）。前缀 `KB-lesson-`。
     - business（业务知识）：键=(module, dimension)。同模块同维度跨需求累积
       （module 取 Knowledge 元数据"更新模块"，人类标注，非模型生成）。前缀 `KB-business-`。
+    - expert（通用方法论）：键=(category, principle[:40])。同类方法不同 principle 各自一条；
+      同 principle 跨需求只 occ++ 不拆类（方法论收敛而非发散）。前缀 `KB-expert-`。
     """
     kind = r.get("kind", "lesson")
     if kind == "business":
         key = "%s|%s" % (r.get("module", ""), r.get("dimension", "通用"))
         return "KB-business-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    if kind == "expert":
+        key = "%s|%s" % (r.get("category", ""), (r.get("principle") or "")[:40])
+        return "KB-expert-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
     key = "%s|%s" % (r.get("phase", ""), r.get("dimension", "通用"))
     return "KB-lesson-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
