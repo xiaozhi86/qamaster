@@ -40,7 +40,16 @@ class FileLock:
             # 此区域内对 manifest_path 的 read-modify-write 串行化
             ...
 
-    锁文件路径 = path + ".lock"。fd 关闭即释放（进程崩溃也释放）。
+    锁文件路径 = path + ".lock"。fd 关闭即释放锁（进程崩溃也释放）。
+    锁语义在 fd 上（fcntl.flock / msvcrt.locking），不在文件存在性上——
+    `_acquire` 的 O_CREAT 会按需重建锁文件。
+
+    RC33：`_release` 在关 fd 后删锁文件（os.unlink）。单用户/写完即退出的工具
+    99% 场景无竞争 → 释放即清，目录干净（贴合 output_write.md「会话末确认
+    case-design-out 无临时文件遗留」承诺）；罕见竞争（另一进程持 fd 等待）→
+    Windows 下 unlink 对他人持有的 fd 删不掉 → 留待那方释放时清，幂等不损坏。
+    锁文件非产出物（0 字节、无数据），`output_write.md` 不清理清单也未收录——
+    模型禁 Write/Edit MANIFEST/KB 本体（铁律 #4/#5），但删 .lock 是 Runtime 职责。
     """
 
     def __init__(self, path, timeout=30.0, poll=0.1):
@@ -93,6 +102,8 @@ class FileLock:
 
     def _release(self):
         if self._fd is None:
+            # _acquire 抛 LockTimeout 前已 close fd 并置 None；with 语句下 __enter__
+            # 抛错不会触发 __exit__，此分支正常不可达。即便手动调到：未持锁不删锁文件。
             return
         try:
             if _fcntl is not None:
@@ -113,6 +124,16 @@ class FileLock:
             except OSError:
                 pass
             self._fd = None
+            # RC33：关 fd 后删锁文件。锁语义在 fd 上（已释放），不在文件存在性上——
+            # `_acquire` 的 O_CREAT 会按需重建。无竞争 → 释放即清，目录干净（贴合
+            # output_write.md「无临时文件遗留」承诺）；有竞争（他人持 fd 等待）→
+            # Windows unlink 对他人持有的 fd 删不掉，幂等留待那方释放时清，不损坏锁
+            # 正确性。POSIX 罕见 3+ 并发写者竞态（unlink→新 inode 分裂）本工具单用户
+            # 写完即退出场景不达，接受。
+            try:
+                os.unlink(self._lock_path)
+            except OSError:
+                pass
 
     def __enter__(self):
         self._acquire()

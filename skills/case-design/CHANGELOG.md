@@ -29,6 +29,10 @@
 - `skills/case-design/references/output_write.md`：不清理文件列表加 KB_expert.md；修改流程第1步加纠正分流提示。
 - `.claude-plugin/plugin.json` + `marketplace.json`：0.11.2 → 0.11.3。
 
+**RC33（验证期补修，随 v0.11.3 一同发布）**：
+- **RC33-a**：修改已完成需求时用户常以 `@<产物文件>.md <附加说明>` 形式回传（如 `@TestCases_<原id>.md /api/rule/process接口只要关心入参`），附加说明里的 `/` 使 `os.path.basename` 切到说明文本 → 产物前缀正则失配 → 剥离失效 → 回退 `_derive_from_text` 派生垃圾 req_id（被 `_clean_id` 截 30 字符）→ `manifest.add` 当新需求 → MANIFEST 重复行（RC32 的遗漏场景：RC32 只处理单 token 产物路径，未覆盖"产物+空格+附加说明含 /"的常见用法）。修复：`_strip_artifact_prefix` 先取**首个空白分隔 token** 再 `basename`，忽略其后的附加说明。
+- **RC33-b**：`FileLock._release` 仅 `flock(LOCK_UN)`/`msvcrt LK_UNLCK` + `os.close(fd)`，不删锁文件 → `MANIFEST.md.lock`/`KB_*.md.lock`（0 字节）在 `case-design-out/` 累积，与 `output_write.md`「会话末无临时文件遗留」承诺相悖（`.lock` 既不在不清理清单也不在保留清单——文档缺口）。修复：`_release` 关 fd 后 `os.unlink(self._lock_path)`，`try/except OSError` 容 Windows 竞态（他人持 fd 删不掉 → 幂等留待下次，不损坏锁正确性；锁语义在 fd 上，`_acquire` 的 O_CREAT 会按需重建）。
+
 ## v0.11.2（2026-08-11，MANIFEST 索引完整性修复·RC31-RC32）
 
 **本次发布修复 MANIFEST 索引与实际产物的两类失步**，均定位为 Runtime 维护索引时的根因（非模型问题）。
