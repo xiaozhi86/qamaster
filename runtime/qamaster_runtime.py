@@ -333,6 +333,25 @@ def _derive_dim_trigger(req_text, reason, surfmap):
     return best, sorted(set(trigger_union))
 
 
+# 抽象信号词表：纠正 reason 命中任一即"似可提炼为通用方法论"。
+# 非约束：仅提示人工考虑 kb add-expert，不自动沉淀、不改铁律#5、不改 _maybe_capture_lesson。
+_ABSTRACTION_SIGNALS = (
+    "组合", "判定表", "决策表", "正交", "互斥", "同时满足", "全部满足",
+    "边界", "邻接", "状态机", "非法流转", "终态", "幂等", "并发", "竞态",
+    "脱敏", "越权", "注入", "热更新", "重复提交",
+)
+
+
+def _abstraction_hint(reason):
+    """纠正 reason 命中可抽象方法信号词 → 返回命中词串；否则返回 ""。
+    纯 stdlib 子串匹配，零模型。仅用于 cmd_fail/cmd_patch 打印非约束性提示，
+    不触碰 _maybe_capture_lesson（护其静默/150/0 不变量）。"""
+    if not reason:
+        return ""
+    hits = [s for s in _ABSTRACTION_SIGNALS if s in reason]
+    return ",".join(hits)
+
+
 def _maybe_capture_lesson(st, phase, reason, spec):
     """纠正发生时自动沉淀候选经验(draft)。纯 Runtime，零模型，静默，幂等，best-effort。
 
@@ -1549,6 +1568,14 @@ def cmd_fail(a):
     print("ROLLBACK: 已回退到 Phase %d (%s)，原因: %s" % (target["id"], target["name"], a.reason or ""))
     print("按 output_write.md 修改流程起点判定：从本阶段起依次顺序执行至 Phase 14，不得跳阶段；")
     print("修改范围限定（只改问题点，无问题用例原样保留）。")
+    # 1a·抽象信号提示（非约束）：命中可抽象方法信号词时提示人工提炼为专家方法论。
+    # 不自动沉淀、不改铁律#5、不触碰 _maybe_capture_lesson（护其静默/150/0）；仅 stdout 提示。
+    _hint = _abstraction_hint(a.reason)
+    if _hint:
+        print("  [提示·非约束] 此纠正含可抽象方法信号(%s)。" % _hint)
+        print("           若能脱业务提炼为通用方法论，可人工执行：")
+        print("           kb add-expert --category <类> --principle \"<脱业务原则>\" \\")
+        print("             --applicable-phases <阶段> --trigger <词>  (draft; endorse 后注入 ##PRIOR_EXPERT_KB##)")
     print()
     # correction_context 传入 reason → _card 追加反应式 ##RELEVANT_LESSONS## 块（失败定向）
     print(_card(st, target, spec, correction_context=a.reason))
@@ -1599,6 +1626,14 @@ def cmd_patch(a):
     print("PATCH: 已登记增量反哺指令 → Phase %d (%s)" % (target["id"], target["name"]))
     print("  原因: %s" % a.reason)
     print("  (不回退 current_phase=%d；指令将由当前/后续阶段契约卡的 ##PATCH_FEEDBACK## 段注入)" % cur)
+    # 1a·抽象信号提示（非约束）：命中可抽象方法信号词时提示人工提炼为专家方法论。
+    # 不自动沉淀、不改铁律#5、不触碰 _maybe_capture_lesson（护其静默/150/0）；仅 stdout 提示。
+    _hint = _abstraction_hint(a.reason)
+    if _hint:
+        print("  [提示·非约束] 此纠正含可抽象方法信号(%s)。" % _hint)
+        print("           若能脱业务提炼为通用方法论，可人工执行：")
+        print("           kb add-expert --category <类> --principle \"<脱业务原则>\" \\")
+        print("             --applicable-phases <阶段> --trigger <词>  (draft; endorse 后注入 ##PRIOR_EXPERT_KB##)")
     print()
     # correction_context 传入 reason → _card 追加反应式 ##RELEVANT_LESSONS## 块（失败定向）
     print(_card(st, spec.get_phase(cur), spec, correction_context=a.reason))
