@@ -352,6 +352,31 @@ def _abstraction_hint(reason):
     return ",".join(hits)
 
 
+# v0.11.4: 审核门(14)/许可门(15)常驻方法论沉淀提醒。
+# cmd_fail/cmd_patch 有 reason 字段供 _abstraction_hint 嗅探可抽象信号；但审核/许可环节用户给出的
+# 方法论指导是对话式反馈，不经 fail/patch（无 reason），Runtime 无法嗅探其内容。故在 14/15 契约卡
+# 常驻一条软提醒，由见到反馈的模型负责分类并主动 kb add-expert / kb add-lesson。
+# 纪律同 _abstraction_hint：非约束软上下文，不自动沉淀、不改铁律#5、不触碰信任门、不碰 _maybe_capture_lesson。
+def _methodology_capture_hint(phase):
+    """Phase 14/15 → 返回 ##METHODOLOGY_CAPTURE## 软提醒串；其余阶段返回 ''。
+    静态提醒（不依赖 KB 数据），故不影响 KB 注入 helper 的 150/0 no-op 不变量。"""
+    pid = phase.get("id") if isinstance(phase, dict) else phase
+    if pid not in (14, 15):
+        return ""
+    return (
+        "##METHODOLOGY_CAPTURE##（审核/许可环节方法论沉淀提醒·软上下文·非约束）\n"
+        "  若用户在本轮审核/许可反馈中给出【可跨需求复用的测试设计方法论】（脱去具体业务实体后仍成立，\n"
+        "  如“多条件判定须用判定表穷举 2^n 组合”“状态机须覆盖终态后非法流转拦截”），须分类路由：\n"
+        "  - 可提炼为通用方法论 → kb add-expert --category <方法类目> --principle \"<脱业务原则>\" \\\n"
+        "      --applicable-phases <阶段> --trigger <词>  (draft 不注入；人工 endorse 后进 ##PRIOR_EXPERT_KB##)\n"
+        "  - 仅本次业务特例（离开本需求即无意义）→ kb add-lesson --phase <N> --summary \"<人类原话>\"\n"
+        "  - 需求层变更（新规则/新字段/新业务约束）→ 汇入 Knowledge_<需求标识>.md，不进专家库\n"
+        "  禁止以写入 Claude 个人记忆/项目记忆（~/.claude/.../memory）替代——个人记忆不注入 qamaster\n"
+        "  任何阶段、对后续需求设计不可见；方法论须经 Runtime `kb` 命令落盘方可经 endorse 注入。\n"
+        "  分类决策树与可提炼判定见 references/expert_kb.md。"
+    )
+
+
 def _maybe_capture_lesson(st, phase, reason, spec):
     """纠正发生时自动沉淀候选经验(draft)。纯 Runtime，零模型，静默，幂等，best-effort。
 
@@ -859,6 +884,13 @@ def _card(st, phase, spec, extra="", correction_context=None):
     if exp:
         lines.append("")
         lines.append(exp)
+    # v0.11.4: 审核门(14)/许可门(15)常驻方法论沉淀提醒——这两阶段用户反馈不经 fail/patch
+    # （无 reason 字段供 _abstraction_hint 嗅探），故卡片常驻提醒模型主动分类路由 kb add-expert/add-lesson。
+    # 非约束软上下文：不自动沉淀、不改铁律#5、不触碰信任门（与 _abstraction_hint 同纪律）。
+    mcap = _methodology_capture_hint(phase)
+    if mcap:
+        lines.append("")
+        lines.append(mcap)
     # v0.11.0: 预防式注入 ##PRIOR_BUSINESS_KB##（仅 Phase 0 开工前业务背景，phase 无关）
     # No-op：无 KB_business.md / 无记录过双门 → 返回 "" → 卡片与无 KB 时逐字节一致
     if str(phase.get("id")) == "0":

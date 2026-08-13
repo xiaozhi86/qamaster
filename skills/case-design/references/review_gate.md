@@ -55,6 +55,7 @@
 * 连跑/轻量模式下可标注"待人工审核"后自动推进；多文件拆分时全部文件连续落盘后统一标注待审核、不在文件间停顿（P0 风险在统一审核门禁中覆盖，不再逐文件早审，见 SKILL.md 6.5 与 25 轮次优先级、references/output_write.md 拆分多文件自动续跑）
 * 审核反馈若有问题，按 `references/output_write.md` "起点判定"确定重走起点，**重入主执行流程从该阶段起依次顺序执行至第14阶段**，重新走完整输出并再次提示审核
 * 审核通过后须**自动生成/更新知识总结**（`references/knowledge.md`），这是独立产出物，与后续Excel无关
+* **审核反馈方法论沉淀（v0.11.4·强制·闭合"方法论漏沉淀"根因）**：审核通过前/后须扫描本轮用户审核反馈，凡含【可跨需求复用的测试设计方法论】（脱业务实体后仍成立，如"多条件判定须用判定表穷举 2^n 组合"）→ 提炼并执行 `kb add-expert --category <方法类目> --principle "<脱业务原则>" --applicable-phases <阶段>` 沉淀 draft（不注入，endorse 后进 `##PRIOR_EXPERT_KB##`）；仅本次业务特例 → `kb add-lesson --phase <N> --summary "<原话>"`；需求层变更 → 汇入 `Knowledge_*.md`。**禁止以写入 Claude 个人记忆/项目记忆替代**——个人记忆不注入 qamaster 任何阶段，对后续需求设计不可见。审核门契约卡常驻 `##METHODOLOGY_CAPTURE##` 提醒此路由；分类决策树见 `references/expert_kb.md`
 * 知识总结生成完成后，询问是否生成 Excel；**Excel生成只读取测试用例.md，不读取知识总结**
 
 ## 审核提示话术

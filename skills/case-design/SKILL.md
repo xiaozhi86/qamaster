@@ -51,6 +51,7 @@ disable-model-invocation: true
    - **业务知识库 `case-design-out/KB_business.md`**：跨需求共享的业务历史知识索引，聚合自每个需求 Phase 14 产出的 `Knowledge_<需求标识>.md`（既有模型产物）的元数据+维度文本。Runtime 经 `kb reconcile --kind business` 索引（非自动触发）；**只索引不生成**——聚合/打标/检索/注入全 stdlib 确定性。开工前（Phase 0）预防式注入 `##PRIOR_BUSINESS_KB##`，检测到问题时反应式注入 `##RELEVANT_BUSINESS_KB##`。
    - **专家知识库 `case-design-out/KB_expert.md`**：跨需求共享的**通用测试设计方法论库**（从用户纠正中提炼、跨需求复用）。Runtime 经 `kb add-expert` 沉淀 draft（`--category <方法类目> --principle "<脱业务后仍成立的通用原则>" --applicable-phases <阶段列表>`），人工 `kb endorse --kind expert --id <id>` 后注入 `##PRIOR_EXPERT_KB##`。**只存通用方法知识，不记录具体业务知识**（业务知识归 Knowledge_*.md/KB_business）；**每阶段每轮（0-14 含自检轮）按阶段适用性（phase∈applicable_phases）+ 信任门（仅 endorsed，无 occ≥3 逃生口——错方法论污染所有未来设计）+ 相关性门注入**——不适用的则无需使用。分类决策树与可提炼判定见 `references/expert_kb.md`。
    - 模型**禁止 Write/Edit `KB_lessons.md` / `KB_business.md` / `KB_expert.md`**——自我进化机制与模型无关（铁律），经验/业务知识/方法论内容归属人类。维护用 `python runtime/qamaster_runtime.py kb <action> [--kind lesson|business|expert|all]`（list/show/query/distill/reconcile/add-lesson/add-expert/endorse/supersede/prune）。模型只"读到"Runtime 注入的 `##PRIOR_LESSONS##`/`##RELEVANT_LESSONS##`/`##PRIOR_BUSINESS_KB##`/`##RELEVANT_BUSINESS_KB##`/`##PRIOR_EXPERT_KB##` 软上下文并据此修正（消费侧，参考而非硬约束，永不作硬门）。
+   - **禁止以 Claude 个人记忆/项目记忆（`~/.claude/.../memory`）替代 `kb add-expert`/`kb add-lesson` 沉淀方法论**（v0.11.4·根因修复）：个人记忆不注入 qamaster 任何阶段、对后续需求设计不可见；用户给出的可通用测试设计方法论必须经 Runtime `kb` 命令落盘（draft）方可经人工 endorse 注入 `##PRIOR_EXPERT_KB##`。审核门(14)/许可门(15)契约卡常驻 `##METHODOLOGY_CAPTURE##` 提醒此路由——fail/patch 已有 `_abstraction_hint` 提示，但审核/许可环节的方法论反馈不经 fail/patch，须模型主动分类并执行 `kb` 命令。
 6. **gate FAIL 明细自查通道（v0.8.1·截断兜底）**：`gate` 回传给模型的 `detail` 有上限（`fail_lines[:50]` + 尾部 30 行 + `##VERIFY_SUMMARY##` 摘要行）。若 `detail` 末尾被截断、或 `[FAIL] 硬违规:` 后跟的明细不足以定位修复点，模型**必须**直接跑 verify_cases.py 拿全量 stdout 自查，**不要凭空猜测改法盲改**：
 
    ```
@@ -263,9 +264,10 @@ Swagger/OpenAPI、接口说明、或新旧两版接口文档。含接口名/路�
 
 禁止跳步骤。禁止跨步骤执行。各阶段标注的 ref 为该阶段必须遵循的规范，**进入阶段前先读对应 ref**。
 
-> **用户纠正分类路由（v0.11.3·专家知识库配套）**：用户对测试用例的纠正补充分两路，先判定再落盘——
+> **用户纠正/方法论指导分类路由（v0.11.4·专家知识库配套）**：用户对测试用例的纠正补充**或测试设计方法论指导**（含审核/许可环节给出的通用方法建议，如"多条件判定须用判定表穷举组合"）分两路，先判定再落盘——
 > ① **需求层变更**（新增/修改/补充规则、新字段、新业务约束）→ 补进 `Knowledge_<需求标识>.md` 对应维度（业务知识总结，第14阶段审核后更新），**不进专家库**；
-> ② **测试设计覆盖不全**（漏边界/漏状态机/漏异常/方法选错）→ 纠正方法；**若可抽象为跨需求复用的通用方法**（脱业务实体后仍成立）→ `kb add-expert --category <方法类目> --principle "<通用原则>" --applicable-phases <阶段列表>` 沉淀 draft，endorse 后进 `##PRIOR_EXPERT_KB##`；**不可抽象**（仅本次业务特例）→ 留在 `KB_lessons.md`（经验库，原话）。分类决策树与可提炼判定见 `references/expert_kb.md`。
+> ② **测试设计覆盖不全/方法指导**（漏边界/漏状态机/漏异常/方法选错/通用方法要求）→ 纠正方法；**若可抽象为跨需求复用的通用方法**（脱业务实体后仍成立）→ `kb add-expert --category <方法类目> --principle "<通用原则>" --applicable-phases <阶段列表>` 沉淀 draft，endorse 后进 `##PRIOR_EXPERT_KB##`；**不可抽象**（仅本次业务特例）→ 留在 `KB_lessons.md`（经验库，原话；审核/许可环节未经 fail/patch 自动捕获时用 `kb add-lesson --phase <N> --summary "<原话>"` 手动补）。分类决策树与可提炼判定见 `references/expert_kb.md`。
+> **禁止以写入 Claude 个人记忆/项目记忆（`~/.claude/.../memory`）替代 `kb add-expert`/`kb add-lesson`**（v0.11.4·根因修复）：个人记忆不注入 qamaster 任何阶段、对后续需求设计不可见；方法论须经 Runtime `kb` 命令落盘方可经 endorse 注入 `##PRIOR_EXPERT_KB##`。审核门(14)/许可门(15)契约卡常驻 `##METHODOLOGY_CAPTURE##` 提醒本路由——这两阶段用户反馈不经 fail/patch（无 reason 字段），Runtime 无法嗅探内容，须由见到反馈的模型主动分类并执行 `kb` 命令。
 **默认按需求规模自动分级**（第0阶段判定，见 `references/dedup_coverage.md` ch26 与 `references/phase0_manifest.md`）：重型（新建 P0/核心链路）走完整 15 步；中型（已有模块新增 P1）合并建模、裁剪部分阶段；轻型（字段/文案/低风险 P2P3）跳过完整规格建模与覆盖矩阵。流程深度（执行哪些阶段）与运行模式（人工介入程度，见 6.5）是两个正交维度：用户显式声明"连跑/轻量"时同时设定运行模式与流程深度（连跑→中型、轻量→轻型）；未声明则流程深度按规模自动分级、运行模式默认完整。契约驱动分支为第三正交维度：输入含接口文档时启用（第0阶段输入形态探测，见 `references/phase0_manifest.md` 步骤六），与规模分级/运行模式可叠加；对变更接口做契约/规则/场景三类测试（见 `references/methods.md` 统一接口测试矩阵）。
 
 ---
