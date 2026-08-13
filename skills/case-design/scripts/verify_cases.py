@@ -1339,22 +1339,38 @@ def check_clarification_completeness(req_lines, ledger):
     return len(gaps), gaps
 
 
-# ===== P2-1：组合/判定表覆盖探针【覆盖深度·软探针】=====
+# ===== P2-1：组合/判定表覆盖探针【覆盖深度·软探针·喂 selfcheck 检查14】=====
 # 闭合覆盖矩阵"组合"维度的机器盲区：KEYWORD_DIMS 仅含"时间组合"（时间边界），业务规则的
 # 判定表/多条件组合既无关键词维度也无硬门（硬门只保追溯性"每条目被引用≥1"，不保覆盖深度）。
 # 组合分支是 bug 高发区，此探针提示"需求/规则含组合信号但用例未覆盖组合维度"。软探针，不阻断。
-_COMBINATION_SURFACE = ["判定表", "决策表", "正交", "组合", "叠加", "互斥", "阶梯", "同时满足", "多条件"]
+# AND 门场景升级为"5 类组合类型覆盖"（全符合/全不符合/部分符合/部分不符合/单条件失败），
+# 缺类即报缺口，喂 selfcheck 检查14 自修强制（软信号→硬自修闭环）。
+_COMBINATION_SURFACE = ["判定表", "决策表", "正交", "组合", "叠加", "互斥",
+                        "阶梯", "同时满足", "全部满足", "均需", "前置条件", "多条件"]
+# AND 门信号：命中即进入"组合类型完备性"depth 判定（非单纯标签存在性）
+_AND_GATE_SIGNALS = ("同时满足", "全部满足", "须满足", "均需", "前置条件", "条件全部")
+# depth：5 类组合类型覆盖信号（出现在用例才算该类型真正被测）
+_COMBINATION_TYPE_DEPTH = {
+    "全符合":     ["全符合", "全部符合", "均满足", "全部满足", "条件全成立"],
+    "全不符合":   ["全不符合", "全部不符合", "均不满足", "全部不满足", "条件全不成立"],
+    "部分符合":   ["部分符合", "部分满足", "恰一成立", "恰二成立", "仅一条件成立", "仅一满足"],
+    "部分不符合": ["部分不符合", "部分不满足", "仅一条件不", "单一不满足", "恰一不成立"],
+    "单条件失败": ["单条件", "逐条失败", "逐个不满足", "单一条件不", "仅一条不"],
+}
+# 兼容旧 depth 标签（判定表/正交等仍算"有组合类用例"，但不替代类型覆盖判定）
 _COMBINATION_DEPTH_TAGS = ("判定表", "决策表", "正交", "组合")
 
 
 def check_combination_coverage(req_lines, lines, data_rows):
-    """P2-1 组合/判定表覆盖探针（软）：需求/规则含组合信号但用例未覆盖组合维度。
+    """P2-1 组合/判定表覆盖探针（软）：需求/规则含 AND 门/组合信号时，
+    校验用例是否覆盖 5 类组合类型（全符合/全不符合/部分符合/部分不符合/单条件失败）。
 
-    镜像 check_clarification_completeness 的 surface/depth，但 depth 目标改为用例。
-    判定：surface（组合信号词）出现在 REQ 或规则/风险 section（用例表之前的非用例行），
-    且用例全无组合/判定表/正交 depth 标记 -> 报"需求含组合逻辑但无用例覆盖（疑似漏测）"。
-    软探针，不阻断。无 REQ/无用例表 -> 降级跳过（不误伤）。
-    返回 (缺口数, 描述列表)；组合为单一维度，命中即 (1, [描述])。
+    判定：
+      surface（AND 门/组合信号）出现在 REQ 或规则/风险 section → 进入 depth；
+      depth：AND 门场景统计 5 类组合类型在用例行 blob 的覆盖，缺类型 → 报缺口；
+      非 AND 门（因子×水平组合）保留旧"任一 depth 标签即覆盖"语义，行为兼容。
+    软探针，不阻断 exit；缺口写进 soft["combination_gaps"] 喂 selfcheck 检查14。
+    无 REQ/无用例表 → 降级跳过。返回 (缺口数, 缺失类型描述列表)。
     """
     if not data_rows or (not req_lines and not lines):
         return 0, []
@@ -1375,14 +1391,26 @@ def check_combination_coverage(req_lines, lines, data_rows):
     source_text = req_text + " " + section_text
     if not any(kw in source_text for kw in _COMBINATION_SURFACE):
         return 0, []
-    # depth：用例是否覆盖组合维度（测试类型/维度标签或全文含 判定表/正交/组合）
+    # depth：聚合全部用例行 blob（任一行命中即该类型被测）
+    case_blob_all = ""
     for r in data_rows:
         ctype = r[IDX_TYPE] if len(r) > IDX_TYPE else ""
         cdim = r[IDX_DIM] if len(r) > IDX_DIM else ""
-        blob = ctype + " " + cdim + " " + row_text(r)
-        if any(t in blob for t in _COMBINATION_DEPTH_TAGS):
+        case_blob_all += " " + ctype + " " + cdim + " " + row_text(r)
+    # 非 AND 门：保留旧"任一 depth 标签即覆盖"语义（兼容因子×水平组合场景）
+    has_and_gate = any(sig in source_text for sig in _AND_GATE_SIGNALS)
+    if not has_and_gate:
+        if any(t in case_blob_all for t in _COMBINATION_DEPTH_TAGS):
             return 0, []  # 已有组合类用例覆盖
-    return 1, ["需求/规则含组合逻辑信号但用例未覆盖组合/判定表维度（疑似漏测 bug 高发区）"]
+        return 1, ["需求/规则含组合逻辑信号但用例未覆盖组合/判定表维度（疑似漏测 bug 高发区）"]
+    # AND 门：校验 5 类组合类型覆盖，缺类型即报缺口
+    missing = []
+    for type_name, kws in _COMBINATION_TYPE_DEPTH.items():
+        if not any(k in case_blob_all for k in kws):
+            missing.append(type_name)
+    if missing:
+        return 1, ["AND 门前置条件 2ⁿ 组合覆盖缺失类型：%s（须穷举 2ⁿ 真值表全行，见 methods.md 判定表条目）" % "、".join(missing)]
+    return 0, []
 
 
 # ===== 项 5：用例↔台账/规则一致性【闭环 C3】=====
