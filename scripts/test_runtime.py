@@ -456,6 +456,15 @@ def main():
     test_kb_business_separate_from_lessons()
     test_kb_query_top_preview()
 
+    # KB 专家方法论库（v0.11.5·机制与模型无关·7 项·护 150/0 endorsed-only）
+    test_expert_noop_preserves_baseline()
+    test_expert_draft_blocked_trust_gate()
+    test_expert_endorsed_injected()
+    test_methodology_capture_lists_pending_draft()
+    test_add_expert_trigger_tokenization()
+    test_verify_kb_softwarn_pipe_trigger()
+    test_kb_pending_endorse_summary()
+
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
         for name, detail in failed:
@@ -1144,6 +1153,33 @@ def _kb_biz_rec(rid, dim, status, occ, trigger, raw_text,
         "supersedes": [], "superseded_by": list(superseded_by or []),
         "occurrences": occ, "status": status, "trigger": list(trigger),
         "raw_text": raw_text, "variants": [],
+    }
+
+
+def _kb_expert_path_of(workdir):
+    return os.path.join(workdir, "case-design-out", "KB_expert.md")
+
+
+def _kb_seed_expert(workdir, records):
+    """直接落盘 KB_expert.md（绕过 upsert 指纹，精确控制 id/status/category/principle/applicable_phases）。"""
+    import kb_store
+    kb_store._save_records(_kb_expert_path_of(workdir), records)
+
+
+def _kb_expert_rec(rid, category, principle, applicable_phases, status, occ,
+                   trigger, raw_text, source_req="kb-expert", module="", superseded_by=None):
+    """构造一条 expert KB 记录 dict（kind=expert，通用方法论）。
+    结构键=(category, principle[:40])；指纹前缀 KB-expert-。raw_text 由调用方给（测试断言用，
+    真实 add-expert 落 raw_text=principle；此处分离以便断言文本独立于 principle）。"""
+    return {
+        "kind": "expert", "id": rid, "phase": "", "dimension": "通用",
+        "error_type": "方法提炼", "module": module, "source_req": source_req,
+        "source_reqs": [source_req], "captured": "2026-08-09",
+        "supersedes": [], "superseded_by": list(superseded_by or []),
+        "occurrences": occ, "status": status, "trigger": list(trigger),
+        "raw_text": raw_text, "variants": [],
+        "category": category, "applicable_phases": list(applicable_phases),
+        "principle": principle,
     }
 
 
@@ -1936,6 +1972,316 @@ def test_kb_business_separate_from_lessons():
         check("KB_lessons.md 与 KB_business.md 分文件",
               os.path.isfile(_kb_path_of(workdir)) and os.path.isfile(_kb_business_path_of(workdir))
               and _kb_path_of(workdir) != _kb_business_path_of(workdir), "文件未分离")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+# =============================================================================
+# KB 专家方法论库（expert KB）· 7 项自证（v0.11.5：闭合 draft→endorse→注入 闭环）
+# 约束：No-op 基线（无 KB_expert.md → PRIOR_EXPERT_KB='' + METHODOLOGY_CAPTURE 逐字节等于静态基串，
+#   护 150/0）/ 信任门 endorsed-only（无 occ≥3 逃生口——错方法论污染所有未来设计）/ 适用性门
+#   （phase∈applicable_phases）/ 相关性门（surface≥2 或 module 标题命中）/ 模型禁写 /
+#   _pending_endorse_drafts 故意不套适用性门（endorse 是跨阶段人工动作，服务可见性而非注入）。
+# =============================================================================
+
+# expert 测试用 REQ：含"判定表/组合/前置条件/AND门"等 surface，使相关性门可达 surface≥2
+_KB_REQ_EXPERT = """# %s
+
+## 出催判定逻辑
+
+三条件 AND 前置须同时满足（判定表穷举 2^n 组合），逾期天数与产品代码、资金方任一不满足
+则静默不调用出催接口。多条件组合覆盖须用判定表全行。
+"""
+
+
+def test_expert_noop_preserves_baseline():
+    """无 KB_expert.md → PRIOR_EXPERT_KB 返 ''；Phase14 mcap 逐字节等于静态基串（护 150/0）。"""
+    print("\n[kb-expert] 无 KB_expert → PRIOR_EXPERT_KB='' + mcap=静态基串（护 150/0）")
+    import qamaster_runtime as rt
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-noop-")
+    try:
+        rid = "expert-noop-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        st = _kb_state(workdir, rid)
+        phase6 = spec.get_phase(6)
+        phase14 = spec.get_phase(14)
+        # 注入路径 no-op
+        check("无 KB_expert → PRIOR_EXPERT_KB 返空串",
+              rt._prior_expert_kb_block(st, phase6, spec) == "", "应 no-op")
+        # mcap 路径：Phase14 无 draft → 逐字节等于静态基串（_methodology_capture_hint 内联的 base）
+        mcap = rt._methodology_capture_hint(st, phase14, spec)
+        base = (
+            "##METHODOLOGY_CAPTURE##（审核/许可环节方法论沉淀提醒·软上下文·非约束）\n"
+            "  若用户在本轮审核/许可反馈中给出【可跨需求复用的测试设计方法论】（脱去具体业务实体后仍成立，\n"
+            "  如“多条件判定须用判定表穷举 2^n 组合”“状态机须覆盖终态后非法流转拦截”），须分类路由：\n"
+            "  - 可提炼为通用方法论 → kb add-expert --category <方法类目> --principle \"<脱业务原则>\" \\\n"
+            "      --applicable-phases <阶段> --trigger <词>  (draft 不注入；人工 endorse 后进 ##PRIOR_EXPERT_KB##)\n"
+            "  - 仅本次业务特例（离开本需求即无意义）→ kb add-lesson --phase <N> --summary \"<人类原话>\"\n"
+            "  - 需求层变更（新规则/新字段/新业务约束）→ 汇入 Knowledge_<需求标识>.md，不进专家库\n"
+            "  禁止以写入 Claude 个人记忆/项目记忆（~/.claude/.../memory）替代——个人记忆不注入 qamaster\n"
+            "  任何阶段、对后续需求设计不可见；方法论须经 Runtime `kb` 命令落盘方可经 endorse 注入。\n"
+            "  分类决策树与可提炼判定见 references/expert_kb.md。"
+        )
+        check("无 draft → mcap 逐字节等于静态基串（护 150/0）",
+              mcap == base, "mcap 漂移:\n%s" % mcap)
+        # Phase 非 14/15 → mcap 返空串
+        check("Phase 6 → mcap 返空串", rt._methodology_capture_hint(st, phase6, spec) == "",
+              "非 14/15 不应提示")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_expert_draft_blocked_trust_gate():
+    """draft + 过适用性门 + 过相关性门 → 仍返 ''（endorsed-only 信任门阻断，无 occ≥3 逃生口）。"""
+    print("\n[kb-expert] draft 过双门仍不注入（endorsed-only 信任门，无 occ≥3 逃生口）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-draft-")
+    try:
+        rid = "expert-draft-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        fp = kb_store.fingerprint({"kind": "expert", "category": "判定表",
+                                    "principle": "N个AND门前置条件须判定表穷举2^n全行"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
+            "draft", 1, ["判定表", "组合", "前置条件", "AND门"],
+            "判定表穷举方法论 draft", source_req="A")])
+        st = _kb_state(workdir, rid)
+        phase6 = spec.get_phase(6)
+        block = rt._prior_expert_kb_block(st, phase6, spec)
+        check("draft 过适用+相关 → PRIOR_EXPERT_KB 仍空（信任门阻断）",
+              block == "", "draft 不应注入: %s" % block)
+        # 即便 occ=3（draft 累积）仍不注入——expert 无 occ≥3 逃生口
+        rec3 = _kb_expert_rec(
+            fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
+            "draft", 3, ["判定表", "组合", "前置条件", "AND门"],
+            "判定表穷举方法论 draft occ=3", source_req="A")
+        _kb_seed_expert(workdir, [rec3])
+        block3 = rt._prior_expert_kb_block(st, phase6, spec)
+        check("draft occ=3 仍不注入（expert 无 occ≥3 逃生口）",
+              block3 == "", "occ≥3 不应放行 expert: %s" % block3)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_expert_endorsed_injected():
+    """endorsed + 过适用 + 过相关 → 注入 ##PRIOR_EXPERT_KB##；错阶段/错 REQ 不注入。"""
+    print("\n[kb-expert] endorsed 过三门 → 注入 PRIOR_EXPERT_KB；错阶段/零相关不注入")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-endorsed-")
+    try:
+        rid = "expert-endorsed-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        fp = kb_store.fingerprint({"kind": "expert", "category": "判定表",
+                                    "principle": "N个AND门前置条件须判定表穷举2^n全行"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
+            "endorsed", 1, ["判定表", "组合", "前置条件", "AND门"],
+            "判定表穷举方法论 endorsed", source_req="A")])
+        st = _kb_state(workdir, rid)
+        phase6 = spec.get_phase(6)
+        block = rt._prior_expert_kb_block(st, phase6, spec)
+        check("endorsed 过三门 → 注入非空", bool(block), "应注入: %s" % block)
+        check("注入标签 PRIOR_EXPERT_KB", "##PRIOR_EXPERT_KB##" in block, block)
+        check("注入含 category=判定表", "判定表" in block, block)
+        check("注入含 principle", "AND门前置条件" in block, block)
+        check("注入含 适用阶段 6/8/11", "6/8/11" in block, block)
+        # 错阶段（applicable_phases 不含 14）→ 不注入
+        phase14 = spec.get_phase(14)
+        block14 = rt._prior_expert_kb_block(st, phase14, spec)
+        check("applicable_phases 不含 14 → Phase14 不注入", block14 == "",
+              "适用性门失效: %s" % block14)
+        # 零相关 REQ → 不注入
+        rid2 = "界面需求-20260809"
+        _kb_req_file(workdir, rid2, "# %s\n\n## 界面布局\n\n按钮对齐与配色规范\n" % rid2)
+        st2 = _kb_state(workdir, rid2)
+        miss = rt._prior_expert_kb_block(st2, phase6, spec)
+        check("零相关 REQ → 不注入", miss == "", "相关性门失效: %s" % miss)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_methodology_capture_lists_pending_draft():
+    """Phase14 + 一条过相关性门的 draft → mcap 含"近可注入 draft" + id；无 draft → 逐字节等于静态串。"""
+    print("\n[kb-expert] mcap 列出待 endorse draft（闭合 RC-a）；无 draft 逐字节 no-op")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-mcap-")
+    try:
+        rid = "expert-mcap-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        # 先断 no-op 基串（无 draft）
+        st = _kb_state(workdir, rid)
+        phase14 = spec.get_phase(14)
+        base = rt._methodology_capture_hint(st, phase14, spec)
+        check("无 KB_expert → mcap 为静态基串", base.startswith("##METHODOLOGY_CAPTURE##"),
+              "应含 mcap 头: %s" % base[:80])
+        check("无 draft → mcap 不含近可注入子节",
+              "近可注入 draft" not in base, "误列 draft: %s" % base)
+        # 种一条过相关性门 draft（trigger 含判定表/组合/前置条件/AND门，REQ surface≥2）
+        fp = kb_store.fingerprint({"kind": "expert", "category": "判定表",
+                                    "principle": "N个AND门前置条件须判定表穷举2^n全行"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
+            "draft", 1, ["判定表", "组合", "前置条件", "AND门"],
+            "判定表穷举方法论 draft", source_req="A")])
+        mcap = rt._methodology_capture_hint(st, phase14, spec)
+        check("有 draft → mcap 含'近可注入 draft'子节",
+              "近可注入 draft" in mcap, "应列 draft: %s" % mcap)
+        check("mcap 含 draft id", fp in mcap, "应含 id: %s" % mcap)
+        check("mcap 含 endorse 提示", "kb endorse --kind expert --id" in mcap, mcap)
+        # endorsed 记录不被列（已注入，不重复提示）
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
+            "endorsed", 1, ["判定表", "组合", "前置条件", "AND门"],
+            "判定表穷举方法论 endorsed", source_req="A")])
+        mcap2 = rt._methodology_capture_hint(st, phase14, spec)
+        check("endorsed 记录不进近可注入子节",
+              "近可注入 draft" not in mcap2, "不应列 endorsed: %s" % mcap2)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_add_expert_trigger_tokenization():
+    """`kb add-expert --trigger "A|B，C、D/E"` → 落盘 trigger==["A","B","C","D","E"]（5 元素）。"""
+    print("\n[kb-expert] add-expert trigger 分词鲁棒性（半角 / | , 与全角 、 ，）")
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-tok-")
+    try:
+        rid = "expert-tok-req"
+        r = run(workdir, "kb", "add-expert",
+                "--category", "判定表",
+                "--principle", "多条件AND门须判定表穷举2^n组合全行",
+                "--applicable-phases", "6/8/11",
+                "--trigger", "A|B，C、D/E",
+                req_id=rid, expect_rc=0)
+        check("add-expert rc=0", r.returncode == 0, "rc=%d\n%s" % (r.returncode, r.stdout[:300]))
+        check("add-expert 输出 OK", "KB ADD-EXPERT: OK" in r.stdout, r.stdout[:300])
+        ep = _kb_expert_path_of(workdir)
+        check("KB_expert.md 被创建", os.path.isfile(ep), "应落盘")
+        recs = kb_store.load_records(ep)
+        check("落盘一条 expert 记录", len(recs) == 1, "recs=%d" % len(recs))
+        trig = recs[0].get("trigger", [])
+        check("trigger 分词为 5 元素（A|B，C、D/E）",
+              trig == ["A", "B", "C", "D", "E"], "trigger=%s" % trig)
+        check("applicable_phases 分词 [6,8,11]",
+              recs[0].get("applicable_phases") == [6, 8, 11],
+              "ap=%s" % recs[0].get("applicable_phases"))
+        check("记录 kind=expert", recs[0].get("kind") == "expert", "kind=%s" % recs[0].get("kind"))
+        check("id 形如 KB-expert-<12hex>",
+              recs[0].get("id", "").startswith("KB-expert-") and
+              len(recs[0].get("id", "")) == len("KB-expert-") + 12,
+              "id=%s" % recs[0].get("id"))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_verify_kb_softwarn_pipe_trigger():
+    """verify_kb.py 对 trigger 单元素含分隔符 print WARN 但 return 0（不升门禁·护 docstring 设计意图）。"""
+    print("\n[kb-expert] verify_kb 软告警（trigger 畸形单元素 WARN·return 0 不升门禁）")
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-warn-")
+    try:
+        vkb = os.path.join(SKILL_SCRIPTS, "verify_kb.py")
+        # 构造一条 trigger 为畸形单元素含 | 的 expert 记录（直接落盘，绕过 add-expert 分词）
+        bad_rec = _kb_expert_rec(
+            "KB-expert-deadbeefdead", "判定表",
+            "多条件AND门须判定表穷举2^n组合全行", [6, 8, 11],
+            "draft", 1, ["条件组合|判定表|多条件|前置条件|AND门|OR门"],
+            "trigger 畸形单元素含 |", source_req="A")
+        _kb_seed_expert(workdir, [bad_rec])
+        ep = _kb_expert_path_of(workdir)
+        proc = subprocess.run([sys.executable, vkb, ep], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+        check("trigger 畸形单元素 → verify_kb return 0（不升门禁）",
+              proc.returncode == 0, "rc=%d（应 0，软 WARN 不升门禁）" % proc.returncode)
+        check("stdout 含 WARN 提示", "[WARN]" in proc.stdout, "应软告警:\n%s" % proc.stdout)
+        check("WARN 指向未分词", "未分词" in proc.stdout, "应提示未分词:\n%s" % proc.stdout)
+        # 对照：正常分词 trigger 无 WARN
+        good_rec = _kb_expert_rec(
+            "KB-expert-cafebabecafe", "判定表",
+            "多条件AND门须判定表穷举2^n组合全行", [6, 8, 11],
+            "draft", 1, ["条件组合", "判定表", "多条件", "前置条件", "AND门"],
+            "trigger 正常分词", source_req="A")
+        _kb_seed_expert(workdir, [good_rec])
+        proc2 = subprocess.run([sys.executable, vkb, ep], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace")
+        check("正常分词 trigger → verify_kb return 0 且无 WARN",
+              proc2.returncode == 0 and "[WARN]" not in proc2.stdout,
+              "正常 trigger 不应告警:\n%s" % proc2.stdout)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_kb_pending_endorse_summary():
+    """expert draft N → 摘要含"N"；全 endorsed/无文件 → 返 ''（命令侧·通道B）。"""
+    print("\n[kb-expert] _kb_pending_endorse_summary（通道B·expert draft 计数）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-sum-")
+    try:
+        # 无任何 KB 文件 → ''
+        check("无 KB 文件 → 摘要返空串",
+              rt._kb_pending_endorse_summary(workdir, spec) == "", "应 no-op")
+        # 2 条 expert draft → 摘要含 "expert 2"
+        fp1 = kb_store.fingerprint({"kind": "expert", "category": "判定表",
+                                     "principle": "AND门须判定表穷举2^n全行"})
+        fp2 = kb_store.fingerprint({"kind": "expert", "category": "边界值",
+                                     "principle": "边界内邻接值min+1/max-1须独立用例"})
+        _kb_seed_expert(workdir, [
+            _kb_expert_rec(fp1, "判定表", "AND门须判定表穷举2^n全行", [6, 8, 11],
+                           "draft", 1, ["判定表", "组合", "前置条件"],
+                           "draft 判定表方法论", source_req="A"),
+            _kb_expert_rec(fp2, "边界值", "边界内邻接值min+1/max-1须独立用例", [6, 8, 11],
+                           "draft", 1, ["边界", "阈值", "min", "max"],
+                           "draft 边界值方法论", source_req="A"),
+        ])
+        summary = rt._kb_pending_endorse_summary(workdir, spec)
+        check("2 条 expert draft → 摘要非空", bool(summary), "应非空: %s" % summary)
+        check("摘要含 'expert 2'", "expert 2" in summary, "应含 expert 2: %s" % summary)
+        check("摘要含 endorse 提示命令", "kb endorse" in summary, summary)
+        # superseded draft 不计数（三记录同落一盘，第三条被第一条废止）
+        fp3 = kb_store.fingerprint({"kind": "expert", "category": "状态迁移",
+                                     "principle": "状态机须覆盖终态后非法流转拦截"})
+        _kb_seed_expert(workdir, [
+            _kb_expert_rec(fp1, "判定表", "AND门须判定表穷举2^n全行", [6, 8, 11],
+                           "draft", 1, ["判定表", "组合", "前置条件"],
+                           "draft 判定表方法论", source_req="A"),
+            _kb_expert_rec(fp2, "边界值", "边界内邻接值min+1/max-1须独立用例", [6, 8, 11],
+                           "draft", 1, ["边界", "阈值", "min", "max"],
+                           "draft 边界值方法论", source_req="A"),
+            _kb_expert_rec(fp3, "状态迁移", "状态机须覆盖终态后非法流转拦截", [5, 6, 8, 11],
+                           "draft", 1, ["状态机", "终态", "流转"],
+                           "draft 状态迁移方法论(被废止)", source_req="A",
+                           superseded_by=[fp1]),
+        ])
+        summary2 = rt._kb_pending_endorse_summary(workdir, spec)
+        check("superseded draft 不计数 → 仍 expert 2（不含被废止的）",
+              "expert 2" in summary2 and "expert 3" not in summary2,
+              "应仍 expert 2（跳过 superseded）: %s" % summary2)
+        # 全 endorsed → 摘要不含 expert（draft=0 → 该 kind 不进 counts）
+        fp1_end = kb_store.fingerprint({"kind": "expert", "category": "判定表",
+                                         "principle": "AND门须判定表穷举2^n全行-end"})
+        _kb_seed_expert(workdir, [
+            _kb_expert_rec(fp1_end, "判定表", "AND门须判定表穷举2^n全行-end", [6, 8, 11],
+                           "endorsed", 1, ["判定表", "组合"],
+                           "endorsed 判定表方法论", source_req="A"),
+        ])
+        summary3 = rt._kb_pending_endorse_summary(workdir, spec)
+        check("全 endorsed（无 draft）→ 摘要返空串",
+              summary3 == "", "应 no-op: %s" % summary3)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

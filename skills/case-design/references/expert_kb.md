@@ -110,7 +110,7 @@
 
 ## 四、applicable_phases 填法
 
-`--applicable-phases` 用 `/` 分隔的阶段编号（如 `6/8/11`）。**空则全阶段适用兜底**（慎用——多数方法有明确落点阶段）。参考映射：
+`--applicable-phases` 用 `/`、`|`、`,` 或全角 `、`、`，` 分隔的阶段编号（如 `6/8/11`，Runtime `_split_tokens` 统一接受这些分隔符）。**空则全阶段适用兜底**（慎用——多数方法有明确落点阶段）。参考映射：
 
 | category | 典型 applicable_phases | 理由 |
 |----|----|----|
@@ -196,6 +196,7 @@ python runtime/qamaster_runtime.py kb add-expert \
   --trigger 边界/阈值/min/max/邻接 \
   --module <需求名> \
   --source-req <req_id>
+# （分隔符接受 / | , 、，可任选；但同一命令内勿混用以免可读性下降）
 
 # endorse 后注入
 python runtime/qamaster_runtime.py kb endorse --kind expert --id KB-expert-xxxxxxxxxxxx

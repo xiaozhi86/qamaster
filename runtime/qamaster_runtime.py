@@ -91,6 +91,27 @@ def _skill_scripts(spec):
     return os.path.join(PLUGIN_ROOT, spec.skill_dir, "scripts")
 
 
+# v0.11.5: add-lesson/add-expert 落盘后 best-effort 调 verify_kb.py 做结构自检。
+# 护"纠正永远成功"：异常/非零退出码不阻断、只 print 摘要（verify_kb 结构问题走 fails、
+# 未分词 trigger 走 warns，均不阻断 add 流程——add 已先持锁落盘成功）。
+# 纯 stdlib subprocess，不触碰契约卡渲染路径，不影响 150/0。
+def _verify_kb_after_write(spec, kb_path):
+    try:
+        scripts = _skill_scripts(spec)
+        verifier = os.path.join(scripts, "verify_kb.py")
+        if not os.path.exists(verifier):
+            return  # skill 脚本不在位（非标准布局）→ 静默跳过
+        cmd = '"%s" "%s" "%s"' % (sys.executable, verifier, kb_path)
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=30)
+        out = (proc.stdout or "").strip()
+        if out:
+            print(out)
+    except Exception as e:
+        # best-effort：任何异常都不阻断 add 流程
+        print("  [verify_kb 自检跳过: %s]" % e)
+
+
 def _skill_md_abs(spec):
     return os.path.join(PLUGIN_ROOT, spec.skill_md)
 
@@ -112,6 +133,33 @@ def _kb_path(workdir, spec, kind="lessons"):
     """
     name = "KB_%s.md" % kind
     return os.path.join(workdir, spec.output_dir, name)
+
+
+# v0.11.5: KB 健康摘要（命令侧·通道B）——数三类 KB 中 status==draft 且非 superseded 的条数，
+# 供 cmd_status / cmd_confirm Phase14 暴露给人"还有 N 条 draft 待 endorse"。
+# 不触碰契约卡渲染路径（不影响 150/0）。无 draft → 返 ""（caller 非空才 print）。
+def _kb_pending_endorse_summary(workdir, spec):
+    counts = {}
+    for kind in ("lessons", "business", "expert"):
+        p = _kb_path(workdir, spec, kind)
+        n = 0
+        if os.path.isfile(p):
+            try:
+                for r in kb_store.load_records(p):
+                    if r.get("superseded_by"):
+                        continue
+                    if r.get("status") == "draft":
+                        n += 1
+            except Exception:
+                n = 0  # best-effort：损坏文件不计
+        if n:
+            counts[kind] = n
+    if not counts:
+        return ""
+    parts = ["%s %d" % (k, v) for k, v in counts.items()]
+    return ("KB 待 endorse：%s 条（运行 `kb list --kind all --status draft` 查看；"
+            "`kb endorse --kind <lessons|business|expert> --id <id>` 后即注入对应阶段契约卡）"
+            % " / ".join(parts))
 
 
 def _read_req_text(workdir, spec, req_id):
@@ -352,18 +400,42 @@ def _abstraction_hint(reason):
     return ",".join(hits)
 
 
+# v0.11.5: trigger / applicable_phases 分词鲁棒性。
+# add-lesson/add-expert 的 --trigger、--applicable-phases 历史仅 split("/")：
+# 调用方误用半角 | 或全角 、 致整串变成单元素畸形（相关性门 surface=0，draft 永不命中）。
+# 本函数统一接受半角 / | , 与全角 、 ， 作分隔，去空、去重、保序。applicable_phases 仍由调用方
+# 叠加 isdigit() 过滤（护"非数字字段静默丢弃"）。纯 stdlib，不触碰 KB 注入 helper 的 150/0。
+def _split_tokens(s):
+    """split on / | , （半角）与 、 ，（全角）；去空去重保序。None/空串 → []。"""
+    if not s:
+        return []
+    out = []
+    seen = set()
+    for tok in re.split(r"[/|,、，]+", str(s)):
+        t = tok.strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 # v0.11.4: 审核门(14)/许可门(15)常驻方法论沉淀提醒。
 # cmd_fail/cmd_patch 有 reason 字段供 _abstraction_hint 嗅探可抽象信号；但审核/许可环节用户给出的
 # 方法论指导是对话式反馈，不经 fail/patch（无 reason），Runtime 无法嗅探其内容。故在 14/15 契约卡
 # 常驻一条软提醒，由见到反馈的模型负责分类并主动 kb add-expert / kb add-lesson。
 # 纪律同 _abstraction_hint：非约束软上下文，不自动沉淀、不改铁律#5、不触碰信任门、不碰 _maybe_capture_lesson。
-def _methodology_capture_hint(phase):
+def _methodology_capture_hint(st, phase, spec):
     """Phase 14/15 → 返回 ##METHODOLOGY_CAPTURE## 软提醒串；其余阶段返回 ''。
-    静态提醒（不依赖 KB 数据），故不影响 KB 注入 helper 的 150/0 no-op 不变量。"""
+
+    v0.11.5：在静态基串末尾，追加"近可注入 draft（仅卡信任门）"子节，把已沉淀但未 endorse
+    的 expert draft 暴露给人工——闭合 RC-a（draft 永不 endorse → 永不注入）断裂。
+    No-op 护 150/0：无过双门 draft → 子节不追加 → 返回值与改动前逐字节一致；无 KB_expert.md
+    → _pending_endorse_drafts 返 [] → 同样逐字节一致。该函数从静态变读 KB 重开 no-op 表面，
+    护栏=空列表短路 + 镜像 noop 断言（test_runtime.test_methodology_capture_lists_pending_draft）。"""
     pid = phase.get("id") if isinstance(phase, dict) else phase
     if pid not in (14, 15):
         return ""
-    return (
+    base = (
         "##METHODOLOGY_CAPTURE##（审核/许可环节方法论沉淀提醒·软上下文·非约束）\n"
         "  若用户在本轮审核/许可反馈中给出【可跨需求复用的测试设计方法论】（脱去具体业务实体后仍成立，\n"
         "  如“多条件判定须用判定表穷举 2^n 组合”“状态机须覆盖终态后非法流转拦截”），须分类路由：\n"
@@ -375,6 +447,26 @@ def _methodology_capture_hint(phase):
         "  任何阶段、对后续需求设计不可见；方法论须经 Runtime `kb` 命令落盘方可经 endorse 注入。\n"
         "  分类决策树与可提炼判定见 references/expert_kb.md。"
     )
+    # v0.11.5: 追加近可注入 draft 子节（仅卡信任门）。空 → 不追加 → 逐字节等于 base（护 150/0）。
+    try:
+        drafts = _pending_endorse_drafts(st, phase, spec)
+    except Exception:
+        drafts = []  # best-effort：任何异常都护 no-op
+    if not drafts:
+        return base
+    lines = [base, ""]
+    lines.append("  近可注入 draft（已过适用性+相关性门，仅卡信任门 endorse 即可注入 ##PRIOR_EXPERT_KB##）：")
+    for r in drafts:
+        rid = r.get("id", "?")
+        cat = r.get("category") or "(未分类)"
+        prin = r.get("principle") or "(无原则)"
+        if len(prin) > 50:
+            prin = prin[:50] + "…"
+        trig = r.get("trigger") or []
+        trig_str = "/".join(str(t) for t in trig[:6]) if trig else "(无)"
+        lines.append("    - %s [%s] %s （触发词: %s）" % (rid, cat, prin, trig_str))
+    lines.append("  → 人工审阅 principle 真通用后 `kb endorse --kind expert --id <id>`，下轮即注入 ##PRIOR_EXPERT_KB##。")
+    return "\n".join(lines)
 
 
 def _maybe_capture_lesson(st, phase, reason, spec):
@@ -641,6 +733,40 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
     return _render_expert_block(cands[:top]) if cands else ""
 
 
+# v0.11.5: 列出"仅卡信任门"的待 endorse expert draft，供 Phase14/15 契约卡 ##METHODOLOGY_CAPTURE##
+# 暴露给人工（闭合 draft→endorse→注入 闭环的 RC-a 根因）。
+# **门设计**：跳过 superseded + 跳过 endorsed + 相关性门（surface≥2 或 module 标题命中）。
+# **不套适用性门**（与 _prior_expert_kb_block 的关键差异）：本 helper 服务的是"背书可见性"
+# 而非"注入"。endorse 是跨需求跨阶段的人工动作，draft 的 applicable_phases 决定 endorse 后
+# 注入哪些阶段，不决定"是否该暴露给人 endorse"。多数方法论 applicable_phases=6/8/11（不含 14），
+# 若套适用性门会在 Phase14 卡片把绝大多数 draft 藏起来——RC-a 不闭合。mcap 只在 14/15 渲染，
+# 故此处放宽到"凡是与本需求相关的待 endorse draft 都暴露"，由相关性门 + top=5 约束噪声。
+# 不触碰契约卡 PRIOR_EXPERT_KB 渲染路径（信任门不松、draft 仍不注入）。
+# No-op：无 KB_expert.md / 无相关 draft → 返 []（护 150/0：mcap 空列表短路 → 逐字节等于静态基串）。
+def _pending_endorse_drafts(st, phase, spec, top=5):
+    p = _kb_path(st.get("workdir", os.getcwd()), spec, "expert")
+    if not os.path.isfile(p):
+        return []
+    recs = kb_store.load_records(p)
+    rtext = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    cands = []
+    for r in recs:
+        if r.get("superseded_by"):
+            continue
+        # 信任门：此处故意跳过——纳入 draft（这正是要暴露给人 endorse 的对象）
+        if r.get("status") == "endorsed":
+            continue  # 已 endorsed 已注入 PRIOR_EXPERT_KB，不再重复提示
+        # 相关性门（同 _prior_expert_kb_block：surface≥2 或 module 标题命中）
+        surface = sum(1 for w in r.get("trigger", []) if w in rtext)
+        title_hit = bool(r.get("module")) and r["module"] in rtext
+        if not (surface >= 2 or title_hit):
+            continue
+        cands.append(r)
+        if len(cands) >= top:
+            break
+    return cands
+
+
 def _run_check(chk, st, spec):
     """执行单条确定性检查，返回 (ok, detail)。"""
     workdir = st["workdir"]
@@ -887,7 +1013,7 @@ def _card(st, phase, spec, extra="", correction_context=None):
     # v0.11.4: 审核门(14)/许可门(15)常驻方法论沉淀提醒——这两阶段用户反馈不经 fail/patch
     # （无 reason 字段供 _abstraction_hint 嗅探），故卡片常驻提醒模型主动分类路由 kb add-expert/add-lesson。
     # 非约束软上下文：不自动沉淀、不改铁律#5、不触碰信任门（与 _abstraction_hint 同纪律）。
-    mcap = _methodology_capture_hint(phase)
+    mcap = _methodology_capture_hint(st, phase, spec)
     if mcap:
         lines.append("")
         lines.append(mcap)
@@ -1267,6 +1393,11 @@ def cmd_status(a):
     }, ensure_ascii=False, indent=2))
     print()
     print(_resume_hint(st, spec))
+    # v0.11.5: 通道B——KB 健康（待 endorse draft 摘要），非空才提示
+    summary = _kb_pending_endorse_summary(a.workdir, spec)
+    if summary:
+        print()
+        print(summary)
     if a.card:
         print()
         print(_card(st, phase, spec))
@@ -1511,6 +1642,10 @@ def cmd_confirm(a):
             "  4) 执行: %s next（进入 Excel 许可门）\n"
             "若知识总结已生成，直接执行第 3/4 步。" % (spec.output_dir, req_id, _rt_cmd(), _rt_cmd())
         )
+        # v0.11.5: 通道B——KB 健康（待 endorse draft 摘要），非空才追加（闭合审核门→endorse 最后一公里）
+        summary = _kb_pending_endorse_summary(a.workdir, spec)
+        if summary:
+            extra = extra + "\n" + summary
         print("CONFIRM ACCEPTED: Phase 14 审核通过")
         print()
         print(extra)
@@ -2010,7 +2145,7 @@ def cmd_kb(a):
             _die("kb add-lesson 需 --summary <经验原文>（人类原话 verbatim）")
         trig = []
         if a.trigger:
-            trig = [t.strip() for t in a.trigger.split("/") if t.strip()]
+            trig = _split_tokens(a.trigger)
         rec = {
             "kind": "lesson", "phase": str(a.phase), "dimension": a.dimension or "通用",
             "error_type": "人工纠正", "module": a.module or "",
@@ -2022,6 +2157,7 @@ def cmd_kb(a):
             fp = kb_store.upsert_lesson(p, rec)
         _audit(a.req_id, "kb_add_lesson", detail="id=%s dim=%s" % (fp, rec["dimension"]))
         print("KB ADD-LESSON: OK — id=%s（指纹去重：同类已合并则 occ++）" % fp)
+        _verify_kb_after_write(spec, p)
         return
     if action == "add-expert":
         # v0.11.3: 专家知识库沉淀——从用户纠正中提炼的通用测试设计方法论。
@@ -2035,11 +2171,11 @@ def cmd_kb(a):
             _die("kb add-expert 需 --principle \"<方法原则>\"（脱业务后仍成立的通用原则）")
         trig = []
         if a.trigger:
-            trig = [t.strip() for t in a.trigger.split("/") if t.strip()]
+            trig = _split_tokens(a.trigger)
         ap_list = []
         if a.applicable_phases:
-            ap_list = [int(x.strip()) for x in str(a.applicable_phases).split("/")
-                       if x.strip().isdigit()]
+            ap_list = [int(x) for x in _split_tokens(a.applicable_phases)
+                       if x.isdigit()]
         rec = {
             "kind": "expert", "phase": "", "dimension": a.dimension or "通用",
             "error_type": "方法提炼", "module": a.module or "",
@@ -2054,6 +2190,7 @@ def cmd_kb(a):
         _audit(a.req_id, "kb_add_expert", detail="id=%s cat=%s" % (fp, rec["category"]))
         print("KB ADD-EXPERT: OK — id=%s（指纹去重：同 category|principle 已合并则 occ++）" % fp)
         print("  draft 状态——未 endorse 不注入；人工 `kb endorse --kind expert --id %s` 后进 ##PRIOR_EXPERT_KB##" % fp)
+        _verify_kb_after_write(spec, p)
         return
     if action == "endorse":
         if not a.id:
@@ -2212,7 +2349,8 @@ def main():
     sp.add_argument("--status", default=None, choices=["draft", "endorsed"], help="list/prune：状态过滤")
     sp.add_argument("--older-than", default=None, type=int, help="prune：N 天前（配合 --status draft）")
     sp.add_argument("--summary", default=None, help="add-lesson：经验原文（人类原话 verbatim）")
-    sp.add_argument("--trigger", default=None, help="add-lesson/add-expert：触发词，'/' 分隔")
+    sp.add_argument("--trigger", default=None,
+                    help="add-lesson/add-expert：触发词，'/' 或 '|' 或 ',' 或 '、'/'，' 分隔")
     sp.add_argument("--module", default=None, help="add-lesson/add-expert：模块/需求名（仅溯源展示）")
     sp.add_argument("--source-req", default=None, help="add-lesson/add-expert：来源需求 id")
     # add-expert 专用（专家方法论结构化字段）
@@ -2221,7 +2359,7 @@ def main():
     sp.add_argument("--principle", default=None,
                     help="add-expert：方法原则（脱业务后仍成立的通用原则，人类标注非模型生成）")
     sp.add_argument("--applicable-phases", dest="applicable_phases", default=None,
-                    help="add-expert：适用阶段，'/' 分隔（如 6/8/11）；空则全阶段适用兜底")
+                    help="add-expert：适用阶段，'/' 或 '|' 或 ',' 或 '、'/'，' 分隔（如 6/8/11）；空则全阶段适用兜底")
     _ri(sp)
     _wf(sp)
     _wd(sp)

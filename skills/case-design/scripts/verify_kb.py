@@ -104,6 +104,7 @@ def main():
     print("-" * 40)
 
     fails = []
+    warns = []
 
     # 0. 文件头横幅
     print("【文件头横幅】")
@@ -154,6 +155,13 @@ def main():
                     v = json.loads(fields[lf])
                     if not isinstance(v, list):
                         fails.append("%s: %s 非数组" % (tag, lf))
+                    # 软 WARN（不升门禁、不入 fails、return 0 不变）：
+                    # trigger 字段为单元素且该元素含分隔符 / | , 、 ，
+                    # —— 疑似调用方误用 | 等作分隔致整串未分词（相关性门 surface=0）。
+                    if lf == "trigger" and isinstance(v, list) and len(v) == 1:
+                        single = v[0]
+                        if isinstance(single, str) and any(sep in single for sep in ("/", "|", ",", "、", "，")):
+                            warns.append("%s: trigger 单元素含分隔符，疑似未分词: %s" % (tag, single))
                 except ValueError:
                     fails.append("%s: %s 非法 JSON" % (tag, lf))
         # occurrences
@@ -173,6 +181,10 @@ def main():
     print("  %s（%d 项问题）" % (overall, len(fails)))
     for v in fails:
         print("  - %s" % v)
+    if warns:
+        print("  （%d 项软告警·不升门禁·不影响退出码）" % len(warns))
+        for w in warns:
+            print("  - [WARN] %s" % w)
     print("  （内容质量不校验，留给人工 endorse/supersede）")
     print("=" * 40)
 
