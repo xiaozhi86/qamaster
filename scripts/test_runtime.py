@@ -456,7 +456,7 @@ def main():
     test_kb_business_separate_from_lessons()
     test_kb_query_top_preview()
 
-    # KB 专家方法论库（v0.11.6·机制与模型无关·9 项·护 150/0 endorsed-only）
+    # KB 专家方法论库（v0.11.7·机制与模型无关·10 项·护 150/0 endorsed-only）
     test_expert_noop_preserves_baseline()
     test_expert_draft_blocked_trust_gate()
     test_expert_endorsed_injected()
@@ -467,6 +467,8 @@ def main():
     # v0.11.6（RC-d 终极修复）回归：读取时分词自愈 + add-expert 自动补 REQ 域词
     test_expert_legacy_malformed_trigger_selfheal()
     test_add_expert_auto_req_signals()
+    # v0.11.7（RC-e）回归：子串遮蔽去重（数字阈值不误注入）
+    test_expert_substring_shadow_no_overmatch()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -2327,6 +2329,54 @@ def test_expert_legacy_malformed_trigger_selfheal():
         check("legacy 畸形 trigger 读取时自愈 → 注入非空", bool(block),
               "应注入（分词后 全部条件+条件1 命中 surface≥2）: %s" % block)
         check("自愈注入含 PRIOR_EXPERT_KB 标签", "##PRIOR_EXPERT_KB##" in block, block)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_expert_substring_shadow_no_overmatch():
+    """子串遮蔽去重（RC-e）：无关数字阈值 REQ（仅 大于等于 一处）不再误注入；真 AND 门 REQ 仍注入。
+
+    镜像 D:/AGI/AAAA 真实数据形态：trigger 含 大于+大于等于 子串对。修复前
+    "大于等于50条" 一处双计 → surface=2 → 分页规则误注入两条组合覆盖方法论（已实锤）。
+    修复后短词 大于 被 大于等于 遮蔽不计数 → surface=1 → 不注入；
+    "大于50"（无 等于）仍计 大于；非子串命中词集（全部条件/条件1）不受影响。
+    """
+    print("\n[kb-expert] 子串遮蔽去重：数字阈值 REQ 不误注入，AND 门 REQ 仍注入")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-shadow-")
+    try:
+        rid = "expert-shadow-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        # trigger 镜像真实存量（F2 自动补词后的形态：含 大于+大于等于 子串对）
+        fp = kb_store.fingerprint({"kind": "expert", "category": "组合覆盖",
+                                    "principle": "多条件AND门须判定表穷举2^n全行"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp, "组合覆盖", "多条件AND门须判定表穷举2^n全行", [6, 8, 11],
+            "endorsed", 1, ["全部条件", "条件1", "大于", "大于等于"],
+            "2^n 组合覆盖方法论", source_req="A")])
+        st = _kb_state(workdir, rid)
+        phase6 = spec.get_phase(6)
+        block = rt._prior_expert_kb_block(st, phase6, spec)
+        check("AND 门 REQ（全部条件+条件1，非子串对）→ 仍注入", bool(block),
+              "应注入: %s" % block)
+        # 无关分页 REQ：仅 大于等于 一处（大于 被遮蔽）→ surface=1 → 不注入
+        rid2 = "分页需求-20260815"
+        _kb_req_file(workdir, rid2,
+                     "# %s\n\n## 分页规则\n\n查询接口返回条数大于等于50条时分页，"
+                     "页大小不超过100条。\n" % rid2)
+        st2 = _kb_state(workdir, rid2)
+        miss = rt._prior_expert_kb_block(st2, phase6, spec)
+        check("数字阈值 REQ（大于被大于等于遮蔽，surface=1）→ 不注入", miss == "",
+              "误注入: %s" % miss)
+        # 裸 大于（无 等于）：不被遮蔽，正常计数——但单独一处仍 surface=1 不注入
+        rid3 = "限额需求-20260815"
+        _kb_req_file(workdir, rid3, "# %s\n\n## 限额规则\n\n单笔金额大于100万元须复核。\n" % rid3)
+        st3 = _kb_state(workdir, rid3)
+        miss3 = rt._prior_expert_kb_block(st3, phase6, spec)
+        check("裸大于 REQ（无第二信号）→ 仍不注入", miss3 == "", "误注入: %s" % miss3)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

@@ -756,10 +756,17 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
         # v0.11.6（终极修复 RC-d）：存量 trigger 元素读取时先过 _split_tokens——
         # legacy 畸形单元素串（如 ["条件组合|判定表|…"] 整串一个 token，RC-b 只修了
         # 写入路径）在此自愈拆分后参与匹配，无需重建数据。
+        # v0.11.7（RC-e·子串遮蔽去重）：_REQ_SIGNALS 含子串对（"大于"⊂"大于等于"、
+        # "必须同时满足"⊃"同时满足"等），一处出现双计 → 单一"≥数字阈值"即满足
+        # surface≥2，无关需求误注入（分页规则实测两条件合覆盖方法论被注入）。
+        # 计数前剔除被更长命中词包含的短词："大于等于50" 只计 大于等于 不计 大于；
+        # "大于50"（无 等于）仍计 大于。命中词集非子串对不受影响。
         words = []
         for w in r.get("trigger", []):
             words.extend(_split_tokens(str(w)))
-        surface = sum(1 for w in words if w in rtext)
+        hitset = set(w for w in words if w in rtext)
+        surface = sum(1 for w in hitset
+                      if not any(w != w2 and w in w2 for w2 in hitset))
         title_hit = bool(r.get("module")) and r["module"] in rtext
         relevant = surface >= 2 or title_hit
         if not relevant:
