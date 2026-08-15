@@ -419,6 +419,34 @@ def _split_tokens(s):
     return out
 
 
+# v0.11.6（终极修复 RC-d）：REQ 域结构信号词表。
+# 根因：expert trigger 由人填方法论术语（判定表/AND门/枚举），而注入门 surface≥2 做
+# 「REQ 正文逐字命中」——业务散文需求（"必须满足以下全部条件：条件1/2/3，资金方既不是A
+# 也不是B"）不含方法论词（实证命中 0 次），词域天然不相交 → endorsed 也永不注入。
+# 本表 = 需求正文里"结构信号"的 REQ 域措辞：add-expert 落盘时从来源 REQ 命中并并入
+# trigger（与方法论术语并集）。方法论词给人读，REQ 域词给门匹配；词取自 REQ 自身，
+# 保证同形态需求 surface≥2 可达。纯 stdlib 常量，零模型。
+_REQ_SIGNALS = (
+    # 多条件 AND 门（2^n 判定表方法论的 REQ 域信号）
+    "全部条件", "所有条件", "必须同时满足", "同时满足", "全部满足", "满足以下",
+    # 编号条件（条件1..条件9 由 _req_signal_hits 正则扩展）
+    # 否定/肯定枚举（枚举逐值覆盖方法论的 REQ 域信号）
+    "既不是", "也不是", "枚举值", "取值",
+    # OR 门 / 阈值边界（顺带覆盖，命中即并入，不命中不添）
+    "或者", "任一", "满足其一", "其一",
+    "大于等于", "小于等于", "大于", "小于", "超过", "不低于", "不高于", "不超过",
+)
+
+
+def _req_signal_hits(req_text):
+    """来源 REQ 正文命中的 REQ 域结构信号词（含 条件1..条件9 扩展）。空文本 → []。"""
+    if not req_text:
+        return []
+    hits = set(w for w in _REQ_SIGNALS if w in req_text)
+    hits |= set("条件%d" % n for n in range(1, 10) if ("条件%d" % n) in req_text)
+    return sorted(hits)
+
+
 # v0.11.4: 审核门(14)/许可门(15)常驻方法论沉淀提醒。
 # cmd_fail/cmd_patch 有 reason 字段供 _abstraction_hint 嗅探可抽象信号；但审核/许可环节用户给出的
 # 方法论指导是对话式反馈，不经 fail/patch（无 reason），Runtime 无法嗅探其内容。故在 14/15 契约卡
@@ -455,7 +483,7 @@ def _methodology_capture_hint(st, phase, spec):
     if not drafts:
         return base
     lines = [base, ""]
-    lines.append("  近可注入 draft（已过适用性+相关性门，仅卡信任门 endorse 即可注入 ##PRIOR_EXPERT_KB##）：")
+    lines.append("  待 endorse draft（不做 REQ 相关性预筛——endorse 是跨需求人工判断）：")
     for r in drafts:
         rid = r.get("id", "?")
         cat = r.get("category") or "(未分类)"
@@ -465,7 +493,9 @@ def _methodology_capture_hint(st, phase, spec):
         trig = r.get("trigger") or []
         trig_str = "/".join(str(t) for t in trig[:6]) if trig else "(无)"
         lines.append("    - %s [%s] %s （触发词: %s）" % (rid, cat, prin, trig_str))
-    lines.append("  → 人工审阅 principle 真通用后 `kb endorse --kind expert --id <id>`，下轮即注入 ##PRIOR_EXPERT_KB##。")
+    lines.append("  → 人工审阅 principle 真通用后 `kb endorse --kind expert --id <id>`。")
+    lines.append("    注意：trigger 若只含方法论术语（判定表/AND门等，REQ 正文不出现），endorse 后仍不会注入；")
+    lines.append("    须保证 trigger 含 ≥2 个 REQ 域实词（会在需求正文逐字出现的信号词，如 全部条件/条件1/既不是/也不是）。")
     return "\n".join(lines)
 
 
@@ -700,7 +730,8 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
        （空 applicable_phases 视为全阶段适用兜底）——实现"不适用的无需使用"
     4. **信任门 endorsed-only**：仅 status==endorsed 才注入（删掉 occ≥3 逃生口）
        ——方法论跨需求传播，错方法论污染所有未来设计，质量优先于速度
-    相关性门同 lessons/business（surface≥2 或 module 标题命中）。
+    相关性门同 lessons/business（surface≥2 或 module 标题命中）；
+    v0.11.6：trigger 元素读取时先过 _split_tokens（legacy 畸形单元素串自愈）。
     每阶段每轮注入（含自检轮）：调用方 _card 不加 phase==0 守卫，0-14 全覆盖。
     No-op：无 KB_expert.md / 无 endorsed 记录 / 当前 phase 无适用 / 无相关 → 返回 "" → 卡片逐字节一致。
     """
@@ -721,8 +752,14 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
         # 信任门：endorsed-only（无 occ≥3 逃生口）
         if r.get("status") != "endorsed":
             continue
-        # 相关性门：surface≥2 或 module 标题命中
-        surface = sum(1 for w in r.get("trigger", []) if w in rtext)
+        # 相关性门：surface≥2 或 module 标题命中。
+        # v0.11.6（终极修复 RC-d）：存量 trigger 元素读取时先过 _split_tokens——
+        # legacy 畸形单元素串（如 ["条件组合|判定表|…"] 整串一个 token，RC-b 只修了
+        # 写入路径）在此自愈拆分后参与匹配，无需重建数据。
+        words = []
+        for w in r.get("trigger", []):
+            words.extend(_split_tokens(str(w)))
+        surface = sum(1 for w in words if w in rtext)
         title_hit = bool(r.get("module")) and r["module"] in rtext
         relevant = surface >= 2 or title_hit
         if not relevant:
@@ -735,20 +772,21 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
 
 # v0.11.5: 列出"仅卡信任门"的待 endorse expert draft，供 Phase14/15 契约卡 ##METHODOLOGY_CAPTURE##
 # 暴露给人工（闭合 draft→endorse→注入 闭环的 RC-a 根因）。
-# **门设计**：跳过 superseded + 跳过 endorsed + 相关性门（surface≥2 或 module 标题命中）。
-# **不套适用性门**（与 _prior_expert_kb_block 的关键差异）：本 helper 服务的是"背书可见性"
-# 而非"注入"。endorse 是跨需求跨阶段的人工动作，draft 的 applicable_phases 决定 endorse 后
-# 注入哪些阶段，不决定"是否该暴露给人 endorse"。多数方法论 applicable_phases=6/8/11（不含 14），
-# 若套适用性门会在 Phase14 卡片把绝大多数 draft 藏起来——RC-a 不闭合。mcap 只在 14/15 渲染，
-# 故此处放宽到"凡是与本需求相关的待 endorse draft 都暴露"，由相关性门 + top=5 约束噪声。
+# v0.11.6（终极修复 RC-d）：**删除原相关性门（surface≥2 / module 标题命中）**。
+# 根因实证：该门拿方法论术语 trigger（判定表/AND门/枚举）逐字匹配业务散文 REQ 正文——
+# 两个词域天然不相交（真实 REQ 方法论词命中 0 次）→ surface 恒<2 → draft 连"给人看的
+# 列表"都进不去 → 人永远看不见 → 永不 endorse → 永不注入（自我锁死死锁，v0.11.5 的
+# RC-a 修复因复制注入门而自我挫败）。endorse 是**跨需求的人工判断**，"这条方法论通不通用"
+# 与"相不相关本次 REQ"是两个问题；机器词面预筛不该挡住人眼。暴露给人看（本 helper）与
+# 注入（_prior_expert_kb_block，相关性门保留）从此解耦。
+# 现规则：非 superseded 且非 endorsed 的 expert draft 全列（top 截断防噪声，不分先后）。
 # 不触碰契约卡 PRIOR_EXPERT_KB 渲染路径（信任门不松、draft 仍不注入）。
-# No-op：无 KB_expert.md / 无相关 draft → 返 []（护 150/0：mcap 空列表短路 → 逐字节等于静态基串）。
+# No-op：无 KB_expert.md / 无 draft → 返 []（护 150/0：mcap 空列表短路 → 逐字节等于静态基串）。
 def _pending_endorse_drafts(st, phase, spec, top=5):
     p = _kb_path(st.get("workdir", os.getcwd()), spec, "expert")
     if not os.path.isfile(p):
         return []
     recs = kb_store.load_records(p)
-    rtext = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
     cands = []
     for r in recs:
         if r.get("superseded_by"):
@@ -756,11 +794,7 @@ def _pending_endorse_drafts(st, phase, spec, top=5):
         # 信任门：此处故意跳过——纳入 draft（这正是要暴露给人 endorse 的对象）
         if r.get("status") == "endorsed":
             continue  # 已 endorsed 已注入 PRIOR_EXPERT_KB，不再重复提示
-        # 相关性门（同 _prior_expert_kb_block：surface≥2 或 module 标题命中）
-        surface = sum(1 for w in r.get("trigger", []) if w in rtext)
-        title_hit = bool(r.get("module")) and r["module"] in rtext
-        if not (surface >= 2 or title_hit):
-            continue
+        # v0.11.6: 不套相关性门（词域错配死锁根因，见上）——draft 无条件暴露给人
         cands.append(r)
         if len(cands) >= top:
             break
@@ -2172,6 +2206,13 @@ def cmd_kb(a):
         trig = []
         if a.trigger:
             trig = _split_tokens(a.trigger)
+        # v0.11.6（终极修复 RC-d）：自动并入来源 REQ 的域信号词（词域错配根因）。
+        # 方法论术语给人读、REQ 域实词给注入门 surface 匹配——不补则 endorsed 后仍恒 surface<2。
+        # 与人工 trigger 并集去重；upsert 指纹合并时 trigger 亦取并集（跨需求累积不丢）。
+        # 来源：优先当前 --req-id（审核门上下文），退化 --source-req；无 REQ 文件 → 不添。
+        sig = _req_signal_hits(_read_req_text(workdir, spec, a.req_id or a.source_req or ""))
+        if sig:
+            trig = sorted(set(trig) | set(sig))
         ap_list = []
         if a.applicable_phases:
             ap_list = [int(x) for x in _split_tokens(a.applicable_phases)

@@ -456,7 +456,7 @@ def main():
     test_kb_business_separate_from_lessons()
     test_kb_query_top_preview()
 
-    # KB 专家方法论库（v0.11.5·机制与模型无关·7 项·护 150/0 endorsed-only）
+    # KB 专家方法论库（v0.11.6·机制与模型无关·9 项·护 150/0 endorsed-only）
     test_expert_noop_preserves_baseline()
     test_expert_draft_blocked_trust_gate()
     test_expert_endorsed_injected()
@@ -464,6 +464,9 @@ def main():
     test_add_expert_trigger_tokenization()
     test_verify_kb_softwarn_pipe_trigger()
     test_kb_pending_endorse_summary()
+    # v0.11.6（RC-d 终极修复）回归：读取时分词自愈 + add-expert 自动补 REQ 域词
+    test_expert_legacy_malformed_trigger_selfheal()
+    test_add_expert_auto_req_signals()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -1984,13 +1987,19 @@ def test_kb_business_separate_from_lessons():
 #   _pending_endorse_drafts 故意不套适用性门（endorse 是跨阶段人工动作，服务可见性而非注入）。
 # =============================================================================
 
-# expert 测试用 REQ：含"判定表/组合/前置条件/AND门"等 surface，使相关性门可达 surface≥2
+# v0.11.6（终极修复 RC-d）：夹具改为真实业务散文措辞（回归锚点）。
+# 旧夹具预埋方法论词（"判定表穷举2^n组合/多条件组合"）→ 相关性门在测试里恒 surface≥2，
+# 测试全绿却从未覆盖真实场景（业务散文 REQ 方法论词命中 0 次）——"假绿"掩盖词域错配根因。
+# 现夹具镜像真实催收 REQ：全词均在 REQ 域（全部条件/条件1/2/3/既不是/也不是/大于等于），
+# 方法论词（判定表/AND门/枚举）一个都不出现——正是生产环境打破注入门的措辞形态。
 _KB_REQ_EXPERT = """# %s
 
-## 出催判定逻辑
+## 调用条件
 
-三条件 AND 前置须同时满足（判定表穷举 2^n 组合），逾期天数与产品代码、资金方任一不满足
-则静默不调用出催接口。多条件组合覆盖须用判定表全行。
+接口调用必须满足以下全部条件：
+条件1：逾期天数(overdueDays)大于等于10天
+条件2：产品代码(productCode)是：yyyy
+条件3：资金方（payment）既不是AAA也不是BBB
 """
 
 
@@ -2046,9 +2055,10 @@ def test_expert_draft_blocked_trust_gate():
         _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
         fp = kb_store.fingerprint({"kind": "expert", "category": "判定表",
                                     "principle": "N个AND门前置条件须判定表穷举2^n全行"})
+        # v0.11.6: trigger 含 REQ 域实词（夹具已改业务散文）→ 相关性门过，纯测信任门
         _kb_seed_expert(workdir, [_kb_expert_rec(
             fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
-            "draft", 1, ["判定表", "组合", "前置条件", "AND门"],
+            "draft", 1, ["全部条件", "条件1", "条件2", "判定表"],
             "判定表穷举方法论 draft", source_req="A")])
         st = _kb_state(workdir, rid)
         phase6 = spec.get_phase(6)
@@ -2058,7 +2068,7 @@ def test_expert_draft_blocked_trust_gate():
         # 即便 occ=3（draft 累积）仍不注入——expert 无 occ≥3 逃生口
         rec3 = _kb_expert_rec(
             fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
-            "draft", 3, ["判定表", "组合", "前置条件", "AND门"],
+            "draft", 3, ["全部条件", "条件1", "条件2", "判定表"],
             "判定表穷举方法论 draft occ=3", source_req="A")
         _kb_seed_expert(workdir, [rec3])
         block3 = rt._prior_expert_kb_block(st, phase6, spec)
@@ -2081,9 +2091,10 @@ def test_expert_endorsed_injected():
         _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
         fp = kb_store.fingerprint({"kind": "expert", "category": "判定表",
                                     "principle": "N个AND门前置条件须判定表穷举2^n全行"})
+        # v0.11.6: trigger 含 REQ 域实词（夹具已改业务散文）→ 相关性门过，纯测注入路径
         _kb_seed_expert(workdir, [_kb_expert_rec(
             fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
-            "endorsed", 1, ["判定表", "组合", "前置条件", "AND门"],
+            "endorsed", 1, ["全部条件", "条件1", "条件2", "判定表"],
             "判定表穷举方法论 endorsed", source_req="A")])
         st = _kb_state(workdir, rid)
         phase6 = spec.get_phase(6)
@@ -2109,8 +2120,13 @@ def test_expert_endorsed_injected():
 
 
 def test_methodology_capture_lists_pending_draft():
-    """Phase14 + 一条过相关性门的 draft → mcap 含"近可注入 draft" + id；无 draft → 逐字节等于静态串。"""
-    print("\n[kb-expert] mcap 列出待 endorse draft（闭合 RC-a）；无 draft 逐字节 no-op")
+    """Phase14 + draft（纯方法论词 trigger + 业务散文 REQ）→ mcap 含"待 endorse draft" + id。
+
+    v0.11.6（RC-d 死锁回归锚点）：draft 的暴露不再做 REQ 相关性预筛——
+    方法论词 trigger 对业务散文 REQ surface=0，draft 仍必须出现在 mcap（给人 endorse）。
+    无 draft → 逐字节等于静态基串（护 150/0）。
+    """
+    print("\n[kb-expert] mcap 列出待 endorse draft（死锁回归：不预筛相关性）；无 draft 逐字节 no-op")
     import qamaster_runtime as rt
     import kb_store
     from case_design import spec as _cd_spec
@@ -2125,9 +2141,9 @@ def test_methodology_capture_lists_pending_draft():
         base = rt._methodology_capture_hint(st, phase14, spec)
         check("无 KB_expert → mcap 为静态基串", base.startswith("##METHODOLOGY_CAPTURE##"),
               "应含 mcap 头: %s" % base[:80])
-        check("无 draft → mcap 不含近可注入子节",
-              "近可注入 draft" not in base, "误列 draft: %s" % base)
-        # 种一条过相关性门 draft（trigger 含判定表/组合/前置条件/AND门，REQ surface≥2）
+        check("无 draft → mcap 不含待 endorse 子节",
+              "待 endorse draft" not in base, "误列 draft: %s" % base)
+        # 种一条纯方法论词 trigger draft（REQ 是业务散文，surface=0——RC-d 死锁原景）
         fp = kb_store.fingerprint({"kind": "expert", "category": "判定表",
                                     "principle": "N个AND门前置条件须判定表穷举2^n全行"})
         _kb_seed_expert(workdir, [_kb_expert_rec(
@@ -2135,9 +2151,8 @@ def test_methodology_capture_lists_pending_draft():
             "draft", 1, ["判定表", "组合", "前置条件", "AND门"],
             "判定表穷举方法论 draft", source_req="A")])
         mcap = rt._methodology_capture_hint(st, phase14, spec)
-        check("有 draft → mcap 含'近可注入 draft'子节",
-              "近可注入 draft" in mcap, "应列 draft: %s" % mcap)
-        check("mcap 含 draft id", fp in mcap, "应含 id: %s" % mcap)
+        check("死锁回归：纯方法论 trigger + 业务散文 REQ → draft 仍列入 mcap",
+              "待 endorse draft" in mcap and fp in mcap, "应列 draft: %s" % mcap)
         check("mcap 含 endorse 提示", "kb endorse --kind expert --id" in mcap, mcap)
         # endorsed 记录不被列（已注入，不重复提示）
         _kb_seed_expert(workdir, [_kb_expert_rec(
@@ -2145,8 +2160,8 @@ def test_methodology_capture_lists_pending_draft():
             "endorsed", 1, ["判定表", "组合", "前置条件", "AND门"],
             "判定表穷举方法论 endorsed", source_req="A")])
         mcap2 = rt._methodology_capture_hint(st, phase14, spec)
-        check("endorsed 记录不进近可注入子节",
-              "近可注入 draft" not in mcap2, "不应列 endorsed: %s" % mcap2)
+        check("endorsed 记录不进待 endorse 子节",
+              "待 endorse draft" not in mcap2, "不应列 endorsed: %s" % mcap2)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -2282,6 +2297,70 @@ def test_kb_pending_endorse_summary():
         summary3 = rt._kb_pending_endorse_summary(workdir, spec)
         check("全 endorsed（无 draft）→ 摘要返空串",
               summary3 == "", "应 no-op: %s" % summary3)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_expert_legacy_malformed_trigger_selfheal():
+    """存量畸形单元素 trigger（["条件组合|判定表|全部条件|条件1"]）endorsed → 读取时 _split_tokens 自愈注入。
+
+    v0.11.6（F3/RC-d）：D:/AGI/AAAA 存量数据即此形态——RC-b 只修了写入侧分词，
+    旧记录落盘时已是单元素串；读取时分词后 surface≥2 可达，无需重建数据。
+    """
+    print("\n[kb-expert] 读取时分词自愈：legacy 畸形单元素 trigger → 注入门可命中")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-selfheal-")
+    try:
+        rid = "expert-selfheal-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        fp = kb_store.fingerprint({"kind": "expert", "category": "组合覆盖",
+                                    "principle": "多条件AND门须判定表穷举2^n全行"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp, "组合覆盖", "多条件AND门须判定表穷举2^n全行", [6, 8, 11],
+            "endorsed", 1, ["条件组合|判定表|全部条件|条件1"],  # legacy 畸形单元素
+            "2^n 组合覆盖方法论", source_req="A")])
+        st = _kb_state(workdir, rid)
+        block = rt._prior_expert_kb_block(st, spec.get_phase(6), spec)
+        check("legacy 畸形 trigger 读取时自愈 → 注入非空", bool(block),
+              "应注入（分词后 全部条件+条件1 命中 surface≥2）: %s" % block)
+        check("自愈注入含 PRIOR_EXPERT_KB 标签", "##PRIOR_EXPERT_KB##" in block, block)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_add_expert_auto_req_signals():
+    """add-expert --req-id 指向业务散文 REQ → 落盘 trigger 自动并入 REQ 域实词（F2/RC-d）。
+
+    人工 trigger 只给方法论词（判定表|AND门），来源 REQ 命中的 全部条件/条件1/既不是/也不是
+    自动并集——写入侧根治"词域错配"，endorsed 后注入门对业务散文可命中。
+    """
+    print("\n[kb-expert] add-expert 自动补 REQ 域 trigger 词（写入侧根治词域错配）")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-sig-")
+    try:
+        rid = "expert-sig-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        r = run(workdir, "kb", "add-expert",
+                "--category", "组合覆盖",
+                "--principle", "多条件AND门须判定表穷举2^n全行",
+                "--applicable-phases", "6/8/11",
+                "--trigger", "判定表|AND门",
+                req_id=rid, expect_rc=0)
+        check("add-expert rc=0", r.returncode == 0, "rc=%d\n%s" % (r.returncode, r.stdout[:300]))
+        ep = _kb_expert_path_of(workdir)
+        check("KB_expert.md 被创建", os.path.isfile(ep), "应落盘")
+        recs = kb_store.load_records(ep)
+        check("落盘一条 expert 记录", len(recs) == 1, "recs=%d" % len(recs))
+        trig = recs[0]["trigger"] if recs else []
+        check("trigger 保留人工方法论词", "判定表" in trig and "AND门" in trig,
+              "方法论词应保留: %s" % trig)
+        check("trigger 自动并入 全部条件", "全部条件" in trig, "缺 REQ 域词: %s" % trig)
+        check("trigger 自动并入 条件1", "条件1" in trig, "缺 REQ 域词: %s" % trig)
+        check("trigger 自动并入 既不是/也不是", "既不是" in trig and "也不是" in trig,
+              "缺 REQ 域词: %s" % trig)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
