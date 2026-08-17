@@ -829,6 +829,60 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
     return _render_expert_block(cands[:top]) if cands else ""
 
 
+def _relevant_expert_on_fail(st, phase, fail_context, spec, top=3):
+    """反应式专家方法论定向应用：检测到问题时按失败上下文文本 surface 命中查 expert KB，
+    注入 ##RELEVANT_EXPERT_KB##。
+
+    v0.11.9（RC-g）：补齐专家库反应式缺口——此前只有 lessons/business 有反应式失败定向
+    helper，expert 无（"原地修复→重跑 gate"纠错循环里，专家方法论不被针对该具体失败原因
+    定向检索，只在下次卡片渲染时以预防式身份重现）。本 helper 镜像 _relevant_lessons_on_fail
+    的失败文本命中语义（hit_fail≥1 或 hit_req≥2），同时保留 _prior_expert_kb_block 的 expert
+    特有过滤：applicable_phases 适用门 + endorsed-only 信任门（无 occ≥3 逃生口——错方法论
+    污染所有未来设计）+ trigger 分词 + REQ 侧 _req_signal_hits 归一（子串遮蔽去重 + 编号
+    条件归一，护 RC-e/RC-f 不回归）。
+    No-op：无 KB_expert.md / 无 endorsed / 错阶段 / 失败文本无命中 → 返回 ""。
+    """
+    p = _kb_path(st.get("workdir", os.getcwd()), spec, "expert")
+    if not os.path.isfile(p) or not (fail_context or "").strip():
+        return ""
+    recs = kb_store.load_records(p)
+    req_text = _req_corpus_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    phase_id = phase.get("id") if isinstance(phase, dict) else phase
+    corpus_signals = set(_req_signal_hits(req_text))
+    cands = []
+    for r in recs:
+        if r.get("superseded_by"):
+            continue
+        # 适用性门：当前 phase ∈ applicable_phases；空列表视为全阶段适用（同预防式）
+        ap = r.get("applicable_phases") or []
+        if ap and str(phase_id) not in [str(x) for x in ap]:
+            continue
+        # 信任门：endorsed-only（无 occ≥3 逃生口，同预防式）
+        if r.get("status") != "endorsed":
+            continue
+        # trigger 分词（legacy 畸形单元素串自愈，同预防式）
+        words = []
+        for w in r.get("trigger", []):
+            words.extend(_split_tokens(str(w)))
+        # 失败侧命中（去子串遮蔽重计，同预防式 RC-e）
+        fail_hitset = set(w for w in words if w in fail_context)
+        hit_fail = sum(1 for w in fail_hitset
+                       if not any(w != w2 and w in w2 for w2 in fail_hitset))
+        # REQ 侧命中（含 _req_signal_hits 归一：编号条件归一，同预防式 RC-f）
+        req_hitset = set(w for w in words if w in req_text or w in corpus_signals)
+        hit_req = sum(1 for w in req_hitset
+                      if not any(w != w2 and w in w2 for w2 in req_hitset))
+        # 相关性门：失败文本命中≥1 或 REQ 命中≥2
+        if not (hit_fail >= 1 or hit_req >= 2):
+            continue
+        score = 5 * hit_fail + 3 * hit_req + r.get("occurrences", 1)
+        cands.append((score, r))
+    cands.sort(key=lambda sr: (-sr[0], -sr[1].get("occurrences", 1)))
+    return _render_expert_block(
+        cands[:top], tag="RELEVANT_EXPERT_KB",
+        footer="本门失败/本次纠正疑似与此专家方法论相关·请据此修正，参考而非硬约束") if cands else ""
+
+
 # v0.11.5: 列出"仅卡信任门"的待 endorse expert draft，供 Phase14/15 契约卡 ##METHODOLOGY_CAPTURE##
 # 暴露给人工（闭合 draft→endorse→注入 闭环的 RC-a 根因）。
 # v0.11.6（终极修复 RC-d）：**删除原相关性门（surface≥2 / module 标题命中）**。
@@ -1129,6 +1183,11 @@ def _card(st, phase, spec, extra="", correction_context=None):
         if relb:
             lines.append("")
             lines.append(relb)
+        # v0.11.9: 反应式注入 ##RELEVANT_EXPERT_KB##（失败定向专家方法论，阶段适用+endorsed-only）
+        rele = _relevant_expert_on_fail(st, phase, correction_context, spec)
+        if rele:
+            lines.append("")
+            lines.append(rele)
     if extra:
         lines.append("")
         lines.append(extra)
@@ -1664,6 +1723,12 @@ def cmd_gate(a):
         if relb:
             print("")
             print(relb)
+        # v0.11.9: 反应式专家方法论定向——失败上下文查 expert KB（阶段适用+endorsed-only）
+        # No-op：无 KB_expert / 无 endorsed / 错阶段 / 无命中 → 不打印
+        rele = _relevant_expert_on_fail(st, phase, fail_detail, spec)
+        if rele:
+            print("")
+            print(rele)
         if rounds >= 3:
             # RC9·v0.11.0：escalation 已在 cmd_gate 入口置 ESCALATION_REQUIRED 并阻断推进。
             # 此处 gate 本次刚失败、计数刚到阈值：仅打印提示，阻断由下次 gate 入口执行
@@ -2182,11 +2247,15 @@ def cmd_kb(a):
                   % (a.top or 3))
             return
         if (a.kind or "lesson") == "expert":
-            # expert 检索路径（每阶段每轮·含自检轮；反应式复用 _relevant_business_kb_on_fail 的语义——
-            #   expert 无独立反应式 helper，失败定向亦走 _prior_expert_kb_block 因入口卡已含适用方法论；
-            #   context 仅作 surface 加权预览）
-            block = _prior_expert_kb_block(st_q, phase, spec, top=a.top or 3)
-            _print_block("PRIOR_EXPERT_KB（预防式·每阶段每轮·会注入）", block or "(无命中)")
+            # expert 检索路径（每阶段每轮·含自检轮）：预防式 _prior_expert_kb_block 与
+            # 反应式 _relevant_expert_on_fail 双 helper（v0.11.9 起补齐反应式失败定向），
+            # 均走同一 expert 过滤（applicable_phases 适用门 + endorsed-only 信任门 + 相关性门）。
+            if a.context:
+                block = _relevant_expert_on_fail(st_q, phase, a.context, spec, top=a.top or 3)
+                _print_block("RELEVANT_EXPERT_KB（反应式·失败定向·会注入）", block or "(无命中)")
+            else:
+                block = _prior_expert_kb_block(st_q, phase, spec, top=a.top or 3)
+                _print_block("PRIOR_EXPERT_KB（预防式·每阶段每轮·会注入）", block or "(无命中)")
             print("  （top=%d；信任门：仅 endorsed；适用门：phase∈applicable_phases；相关性门：surface≥2 或标题命中）"
                   % (a.top or 3))
             return

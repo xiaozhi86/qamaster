@@ -471,6 +471,8 @@ def main():
     test_expert_substring_shadow_no_overmatch()
     # v0.11.8（RC-f）回归：台账引入 AND 门（REQ 散文无信号）→ 编号条件归一注入
     test_expert_ledger_numbered_cond_injection()
+    # v0.11.9（RC-g）回归：补齐专家库反应式失败定向（失败文本命中→RELEVANT_EXPERT_KB）
+    test_expert_reactive_on_fail()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -2466,6 +2468,68 @@ def test_expert_ledger_numbered_cond_injection():
                      "# 仅REQ散文无台账-md\n\n坐席外呼客户接通后启动ASR识别并写缓存，通话结束推送催记模型。\n")
         miss = rt._prior_expert_kb_block(st2, spec.get_phase(6), spec)
         check("无台账仅 REQ 散文 → 仍不注入", miss == "", "误注入: %s" % miss)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_expert_reactive_on_fail():
+    """反应式专家方法论定向（RC-g）：失败文本命中→注入 ##RELEVANT_EXPERT_KB##；
+    错阶段 / draft / 失败文本无命中且 REQ 无命中 → ''。
+
+    镜像 test_kb_business_reactive_injects_on_fail 与 test_kb_reactive_failure_targeted，
+    但保留 expert 特有过滤：applicable_phases 适用门 + endorsed-only 信任门（无 occ≥3 逃生口）。
+    """
+    print("\n[kb-expert] 反应式失败定向（RC-g）：失败文本命中→注入；错阶段/draft/无命中→''")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-react-")
+    try:
+        rid = "expert-react-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        st = _kb_state(workdir, rid)
+        phase6 = spec.get_phase(6)
+        phase3 = spec.get_phase(3)
+        # ① endorsed 判定表记录：trigger 与 REQ 域词重叠（全部条件/条件1/条件2）
+        fp = kb_store.fingerprint({"kind": "expert", "category": "判定表",
+                                    "principle": "N个AND门前置条件须判定表穷举2^n全行"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
+            "endorsed", 1, ["全部条件", "条件1", "条件2", "判定表", "AND门"],
+            "判定表穷举方法论 endorsed", source_req="A")])
+        # 失败文本含触发词（判定表/AND门）→ 注入
+        hit = rt._relevant_expert_on_fail(st, phase6, "AND门组合未用判定表穷举2^n全行", spec)
+        check("失败文本命中 → 反应式注入非空", bool(hit), "应注入: %s" % hit)
+        check("反应式标签 RELEVANT_EXPERT_KB", "##RELEVANT_EXPERT_KB##" in hit, hit)
+        check("反应式含方法论原则原文", "N个AND门前置条件须判定表穷举2^n全行" in hit, hit)
+        check("反应式含参考页脚", "参考而非硬约束" in hit, hit)
+        # ② 错阶段（phase 3 不在 applicable_phases [6,8,11]）→ 适用门阻断 → ''
+        wrong_phase = rt._relevant_expert_on_fail(st, phase3, "AND门组合未用判定表穷举", spec)
+        check("错阶段 → 适用门阻断返空", wrong_phase == "", "适用门失效: %s" % wrong_phase)
+        # ③ draft（endorsed-only 信任门，无 occ≥3 逃生口）→ ''（失败文本命中但信任门阻断）
+        fp2 = kb_store.fingerprint({"kind": "expert", "category": "状态机",
+                                     "principle": "状态机须覆盖终态后非法流转拦截"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp2, "状态机", "状态机须覆盖终态后非法流转拦截", [6, 8, 11],
+            "draft", 3, ["状态机", "非法流转", "终态"],
+            "状态机方法论 draft occ=3", source_req="A")])
+        draft_block = rt._relevant_expert_on_fail(st, phase6, "状态机终态非法流转未拦截", spec)
+        check("draft occ=3 反应式仍不注入（endorsed-only）", draft_block == "",
+              "信任门失效: %s" % draft_block)
+        # ④ endorsed 但 trigger 与 REQ/失败文本零重叠 → 相关性门阻断 → ''
+        #    用独立 req_id（REQ 无 全部条件/条件N 等词）避免 hit_req≥2 误放行
+        rid2 = "界面需求-20260817"
+        _kb_req_file(workdir, rid2, "# %s\n\n## 界面布局\n\n按钮对齐与配色规范\n" % rid2)
+        st2 = _kb_state(workdir, rid2)
+        fp3 = kb_store.fingerprint({"kind": "expert", "category": "状态机",
+                                     "principle": "状态机须覆盖终态后非法流转拦截"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp3, "状态机", "状态机须覆盖终态后非法流转拦截", [6, 8, 11],
+            "endorsed", 1, ["状态机", "非法流转", "终态"],
+            "状态机方法论 endorsed", source_req="A")])
+        miss = rt._relevant_expert_on_fail(st2, phase6, "界面按钮样式不对齐", spec)
+        check("失败文本无命中且 REQ 无命中 → 不注入", miss == "", "应 no-op: %s" % miss)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
