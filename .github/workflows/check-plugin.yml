@@ -22,5 +22,5 @@ jobs:
       - name: 字节编译 runtime 与 skill 脚本（语法检查）
         run: python -m py_compile runtime/*.py skills/case-design/scripts/*.py scripts/test_runtime.py
 
-      - name: Runtime 自证测试（57 项断言，无 LLM）
+      - name: Runtime 自证测试（无 LLM）
         run: python scripts/test_runtime.py

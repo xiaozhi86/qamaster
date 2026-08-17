@@ -198,6 +198,12 @@ if _skill_md.exists():
 # 7. README
 if not (ROOT / "README.md").exists():
     err("README.md: 缺失")
+else:
+    _readme_txt = (ROOT / "README.md").read_text(encoding="utf-8")
+    _assert_nums = [int(m) for m in re.findall(r"(\d+)\s*项断言", _readme_txt)]
+    if len(set(_assert_nums)) > 1:
+        err(f"README.md: 断言计数不一致 {sorted(set(_assert_nums))}"
+            "（多处「N 项断言」须统一为同一数字，防改一处漏一处的漂移）")
 
 # 8. 不应入库的产物（按 git 已跟踪文件判断）
 try:

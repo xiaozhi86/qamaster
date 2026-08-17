@@ -1,5 +1,5 @@
 ---
-name: requirement-review-out
+name: requirement-review
 description: 综合的需求文档分析、评审。
 disable-model-invocation: true
 ---

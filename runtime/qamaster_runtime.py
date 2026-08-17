@@ -559,7 +559,7 @@ def _maybe_capture_lesson(st, phase, reason, spec):
         return None
     req_id = st.get("req_id", "")
     workdir = st.get("workdir", os.getcwd())
-    req_text = _read_req_text(workdir, spec, req_id)
+    req_text = _req_corpus_text(workdir, spec, req_id)
     surfmap = kb_store.get_surface_map(os.path.join(PLUGIN_ROOT, spec.skill_dir))
     dim, trigger = _derive_dim_trigger(req_text, reason, surfmap)
     rec = {

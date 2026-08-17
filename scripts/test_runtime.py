@@ -440,6 +440,7 @@ def main():
     test_kb_preventive_dual_gate()
     test_kb_reactive_failure_targeted()
     test_kb_reactive_respects_trust_gate()
+    test_kb_capture_uses_ledger_corpus()
     test_kb_endorse_and_supersede()
     test_kb_threshold_recurrence_injected()
     test_kb_concurrent_add()
@@ -1331,6 +1332,42 @@ def test_kb_dim_trigger_union():
     dim2, trig2 = rt._derive_dim_trigger("完全无关的普通文案", "", surfmap)
     check("无命中 → dim=通用", dim2 == "通用", "dim=%s" % dim2)
     check("无命中 → trigger=空", trig2 == [], "trig=%s" % trig2)
+
+
+def test_kb_capture_uses_ledger_corpus():
+    """缺陷修复回归：经验捕获扫 REQ+台账语料（_req_corpus_text，非旧 _read_req_text）。
+
+    台账引入的 surface 词（REQ 正文与 reason 均无）应被纳入落盘 lesson 的 dim/trigger。
+    修复前 _maybe_capture_lesson 读 _read_req_text → 台账 surface 词丢失 → dim=通用、trigger=[]。
+    """
+    print("\n[kb] 捕获扫 REQ+台账语料（台账 surface 词入 trigger，RC-f 同族遗漏修复）")
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-capture-ledger-")
+    try:
+        import qamaster_runtime as rt
+        import kb_store
+        from case_design import spec as _cd_spec
+        spec = _cd_spec()
+        rid = "台账并发-20260817"
+        _seed_state(workdir, rid, 7, [0, 1, 2, 3, 4, 5, 6])
+        # REQ 正文：纯散文，无任何 surface 词
+        _kb_req_file(workdir, rid, "# %s\n\n用户在购物车提交订单，系统创建订单并置为待支付。\n" % rid)
+        # 台账：引入并发幂等类 surface 词（REQ 正文与 reason 均无）
+        w(workdir, os.path.join("case-design-out", "Clarification_Ledger_%s.md" % rid),
+          "| Q7 | 业务规则 | 下单扣库存的并发语义？ | 用户提交订单后系统并发扣减库存，"
+          "重复提交需幂等 | 已解决 |\n")
+        # reason 不含 surface 词：surface 词唯一来源是台账
+        reason = "漏标了库存扣减规则"
+        r = run(workdir, "fail", "--to", "5", "--reason", reason, req_id=rid, expect_rc=0)
+        recs = kb_store.load_records(_kb_path_of(workdir))
+        check("捕获一条 draft 记录", len(recs) == 1 and recs[0]["status"] == "draft",
+              "recs=%s" % [(x.get("status"), x.get("dimension")) for x in recs])
+        check("dim=并发幂等（台账 surface 词被扫描）", recs[0].get("dimension") == "并发幂等",
+              "dim=%s" % recs[0].get("dimension"))
+        trig = recs[0].get("trigger") or []
+        check("trigger 含台账引入的并发词", "并发" in trig and "幂等" in trig,
+              "trigger=%s" % trig)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def test_kb_fingerprint_coarse_recurrence():

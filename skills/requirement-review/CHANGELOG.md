@@ -1,6 +1,6 @@
-# Changelog - requirement-review-out
+# Changelog - requirement-review
 
-本文件记录 requirement-review-out skill 的版本变更。
+本文件记录 requirement-review skill 的版本变更。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
