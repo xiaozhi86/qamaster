@@ -162,11 +162,9 @@ def _kb_pending_endorse_summary(workdir, spec):
             % " / ".join(parts))
 
 
-def _read_req_text(workdir, spec, req_id):
-    """读取 case-design-out/REQ_<id>.md 正文（供 surface 命中）。失败返回 ""。"""
-    if not req_id:
-        return ""
-    p = os.path.join(workdir, spec.output_dir, "REQ_%s.md" % req_id)
+def _read_file_text(workdir, spec, name):
+    """读取 case-design-out/<name>.md 正文（供 surface 命中）。失败返回 ""。"""
+    p = os.path.join(workdir, spec.output_dir, name)
     if not os.path.isfile(p):
         return ""
     try:
@@ -174,6 +172,38 @@ def _read_req_text(workdir, spec, req_id):
             return f.read()
     except OSError:
         return ""
+
+
+def _read_req_text(workdir, spec, req_id):
+    """读取 case-design-out/REQ_<id>.md 正文（供 surface 命中）。失败返回 ""。"""
+    if not req_id:
+        return ""
+    return _read_file_text(workdir, spec, "REQ_%s.md" % req_id)
+
+
+def _read_ledger_text(workdir, spec, req_id):
+    """读取 case-design-out/Clarification_Ledger_<id>.md 正文。失败返回 ""。
+
+    v0.11.8（RC-f·澄清引入 AND 门不注入）：结构性规则常经澄清引入（如台账 Q32
+    二轮需求变更引入三前置条件 AND 门），REQ 正文永远没有该结构信号；只扫 REQ
+    正文则相关性门恒 surface=0 → endorsed 方法论永不注入（详见 _prior_expert_kb_block）。
+    """
+    if not req_id:
+        return ""
+    return _read_file_text(workdir, spec, "Clarification_Ledger_%s.md" % req_id)
+
+
+def _req_corpus_text(workdir, spec, req_id):
+    """REQ 正文 + 澄清台账正文（换行拼接），作为 surface 命中的权威语料。
+
+    v0.11.8（RC-f）：台账「用户答复一经落盘即等同于需求文档权威事实」，相关性门
+    扫描范围应从 REQ 扩展到 REQ+台账。无台账时退化为 REQ（与旧行为逐字节一致）。
+    """
+    req = _read_req_text(workdir, spec, req_id) or ""
+    ledger = _read_ledger_text(workdir, spec, req_id) or ""
+    if not ledger:
+        return req
+    return req + "\n" + ledger
 
 
 def _manifest_name(st):
@@ -437,13 +467,31 @@ _REQ_SIGNALS = (
     "大于等于", "小于等于", "大于", "小于", "超过", "不低于", "不高于", "不超过",
 )
 
+# v0.11.8（RC-f·编号条件归一）：台账常以「1./2./3.」编号陈述条件（如 Q32「需同时满足
+# 全部三条件：1.… 2.… 3.…」），而存量 expert trigger 存的是「条件1/条件2/条件3」——
+# 两措辞逐字不相交 → 相关性门 surface 恒<2。本组为「条件从句信号」，仅当语料命中其一
+# 才把 1./2./3. 归一为 条件N（防普通编号列表 1./2./3. 被误判为条件门——RC-e 同纪律克制）。
+_COND_CLAUSE_SIGNALS = (
+    "全部条件", "所有条件", "必须同时满足", "同时满足", "全部满足", "满足以下",
+    "均需", "须满足", "全部三条件", "条件全部", "前置条件", "任一不满足",
+)
+
+# 编号条件标记：行首或空白/冒号/括号/分号/句读后的「数字.」或「数字、」，后随非空
+# （排除版本号 v1.0、日期 2025-01-01 等——数字前须为空白/标点/行首，而非字母或数字）。
+# 台账 Q32 实际形态「全部三条件：1.…；2.…；3.…」——2./3. 前是「；」，故边界须含全角分号。
+_NUMBERED_COND_RE = re.compile(r"(?:^|[\s：:；;、（(，,。])([1-9])[\.、](?=\s*\S)")
+
 
 def _req_signal_hits(req_text):
-    """来源 REQ 正文命中的 REQ 域结构信号词（含 条件1..条件9 扩展）。空文本 → []。"""
+    """来源 REQ/台账正文命中的 REQ 域结构信号词（含 条件1..条件9 与 1./2./3. 编号条件归一）。空文本 → []。"""
     if not req_text:
         return []
     hits = set(w for w in _REQ_SIGNALS if w in req_text)
     hits |= set("条件%d" % n for n in range(1, 10) if ("条件%d" % n) in req_text)
+    # v0.11.8（RC-f）：编号条件归一只在语料同时命中条件从句信号时才生效。
+    if any(s in req_text for s in _COND_CLAUSE_SIGNALS):
+        for m in _NUMBERED_COND_RE.finditer(req_text):
+            hits.add("条件%s" % m.group(1))
     return sorted(hits)
 
 
@@ -595,7 +643,7 @@ def _prior_kb_block(st, phase, spec, kind="lesson", top=3):
     if not os.path.isfile(p):
         return ""
     recs = kb_store.load_records(p)
-    rtext = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    rtext = _req_corpus_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
     phase_id = phase.get("id") if isinstance(phase, dict) else phase
     cands = []
     for r in recs:
@@ -628,7 +676,7 @@ def _relevant_lessons_on_fail(st, phase, fail_context, spec, top=3):
     if not os.path.isfile(p) or not (fail_context or "").strip():
         return ""
     recs = kb_store.load_records(p)
-    req_text = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    req_text = _req_corpus_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
     phase_id = phase.get("id") if isinstance(phase, dict) else phase
     cands = []
     for r in recs:
@@ -666,7 +714,7 @@ def _prior_business_kb_block(st, phase, spec, top=3):
     if not os.path.isfile(p):
         return ""
     recs = kb_store.load_records(p)
-    rtext = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    rtext = _req_corpus_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
     cands = []
     for r in recs:
         if r.get("superseded_by"):
@@ -700,7 +748,7 @@ def _relevant_business_kb_on_fail(st, phase, fail_context, spec, top=3):
     if not os.path.isfile(p) or not (fail_context or "").strip():
         return ""
     recs = kb_store.load_records(p)
-    req_text = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    req_text = _req_corpus_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
     cands = []
     for r in recs:
         if r.get("superseded_by"):
@@ -739,7 +787,7 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
     if not os.path.isfile(p):
         return ""
     recs = kb_store.load_records(p)
-    rtext = _read_req_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
+    rtext = _req_corpus_text(st.get("workdir", os.getcwd()), spec, st.get("req_id", "")) or ""
     phase_id = phase.get("id") if isinstance(phase, dict) else phase
     cands = []
     for r in recs:
@@ -761,10 +809,14 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
         # surface≥2，无关需求误注入（分页规则实测两条件合覆盖方法论被注入）。
         # 计数前剔除被更长命中词包含的短词："大于等于50" 只计 大于等于 不计 大于；
         # "大于50"（无 等于）仍计 大于。命中词集非子串对不受影响。
+        # v0.11.8（RC-f·编号条件归一）：语料（REQ+台账）先过 _req_signal_hits 把
+        # 「1./2./3.」编号条件归一为「条件N」（仅当同时命中条件从句信号时生效），
+        # 使存量 trigger 里的「条件1/条件2/条件3」无需重建数据即可命中台账编号条件。
         words = []
         for w in r.get("trigger", []):
             words.extend(_split_tokens(str(w)))
-        hitset = set(w for w in words if w in rtext)
+        corpus_signals = set(_req_signal_hits(rtext))
+        hitset = set(w for w in words if w in rtext or w in corpus_signals)
         surface = sum(1 for w in hitset
                       if not any(w != w2 and w in w2 for w2 in hitset))
         title_hit = bool(r.get("module")) and r["module"] in rtext
@@ -2217,7 +2269,9 @@ def cmd_kb(a):
         # 方法论术语给人读、REQ 域实词给注入门 surface 匹配——不补则 endorsed 后仍恒 surface<2。
         # 与人工 trigger 并集去重；upsert 指纹合并时 trigger 亦取并集（跨需求累积不丢）。
         # 来源：优先当前 --req-id（审核门上下文），退化 --source-req；无 REQ 文件 → 不添。
-        sig = _req_signal_hits(_read_req_text(workdir, spec, a.req_id or a.source_req or ""))
+        # v0.11.8（RC-f）：改扫 REQ+台账语料——结构性规则常经澄清引入（台账 Q32 引入
+        # AND 门），只扫 REQ 正文则 1./2./3. 编号条件无法归一并入，写入侧仍词域错配。
+        sig = _req_signal_hits(_req_corpus_text(workdir, spec, a.req_id or a.source_req or ""))
         if sig:
             trig = sorted(set(trig) | set(sig))
         ap_list = []

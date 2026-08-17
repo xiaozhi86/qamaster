@@ -469,6 +469,8 @@ def main():
     test_add_expert_auto_req_signals()
     # v0.11.7（RC-e）回归：子串遮蔽去重（数字阈值不误注入）
     test_expert_substring_shadow_no_overmatch()
+    # v0.11.8（RC-f）回归：台账引入 AND 门（REQ 散文无信号）→ 编号条件归一注入
+    test_expert_ledger_numbered_cond_injection()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -2411,6 +2413,59 @@ def test_add_expert_auto_req_signals():
         check("trigger 自动并入 条件1", "条件1" in trig, "缺 REQ 域词: %s" % trig)
         check("trigger 自动并入 既不是/也不是", "既不是" in trig and "也不是" in trig,
               "缺 REQ 域词: %s" % trig)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_expert_ledger_numbered_cond_injection():
+    """台账引入 AND 门（REQ 散文无信号）→ endorsed 判定表方法论仍注入（RC-f）。
+
+    D:/AGI/AAAA 真实原景：REQ 正文是纯 ASR 流程散文（无 条件N/全部条件 信号词）；
+    AND 门三前置条件经台账 Q32 二轮需求变更引入（措辞「需同时满足全部三条件：
+    1.… 2.… 3.…，任一不满足则不调用」）。修复前相关性门只扫 REQ 正文 surface=0 →
+    endorsed 方法论永不注入，最终靠 verify_cases.py gate 失败事后逼出 2³=8。
+    修复后：①扫描语料扩到 REQ+台账；②「1./2./3.」编号条件归一为「条件1/2/3」
+    与存量 trigger 对齐（无需重建数据）→ surface≥2 → 注入。
+    """
+    print("\n[kb-expert] 台账引入 AND 门（REQ 散文无信号）→ endorsed 方法论注入（RC-f）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-ledger-")
+    try:
+        rid = "催收-通话ASR实时转义挂机AI总结催记-md"
+        # REQ 正文：纯 ASR 流程散文，无任何结构信号词
+        _kb_req_file(workdir, rid,
+                     "# %s\n\n坐席手工外呼拨打客户，客户接通，判断当前坐席号是否在开启ASR坐席的"
+                     "字典中存在；缓存中实时记录坐席及客户的ASR内容，分角色记录；通话结束，将ASR"
+                     "缓存内容请催记模型接口总结分析；两次处理完成后异步回调催收系统。\n" % rid)
+        # 台账：Q32 引入 AND 门（1./2./3. 编号条件 + 全部三条件 + 任一不满足）
+        w(workdir, os.path.join("case-design-out", "Clarification_Ledger_%s.md" % rid),
+          "| Q32 | 业务规则 | 调用催记模型的准入条件？ | 需同时满足全部三条件："
+          "1.坐席所属appcode在apollo配置了可调催记接口；"
+          "2.当前坐席在开启双向ASR的appcode字典中配置了该坐席；"
+          "3.当前通话坐席和客户ASR文本不能均为空。任一不满足则不调用催记模型 | 已解决 |\n")
+        fp = kb_store.fingerprint({"kind": "expert", "category": "组合覆盖",
+                                    "principle": "补充需求中出现多条件AND/OR门时须判定表2^n全面组合覆盖"})
+        # 存量 endorsed 记录：trigger 存的是「条件1/条件2/条件3」，非台账的「1./2./3.」
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp, "组合覆盖", "补充需求中出现多条件AND/OR门时须判定表2^n全面组合覆盖", [],
+            "endorsed", 2, ["AND门", "也不是", "全部条件", "判定表", "大于", "大于等于",
+                            "既不是", "条件1", "条件2", "条件3",
+                            "条件组合|判定表|多条件|前置条件|AND门|OR门"],
+            "多条件AND/OR门须判定表2^n全面组合覆盖", source_req="manual")])
+        st = _kb_state(workdir, rid)
+        block = rt._prior_expert_kb_block(st, spec.get_phase(6), spec)
+        check("台账 AND 门（REQ 散文）→ endorsed 判定表方法论注入", bool(block),
+              "应注入（台账 全部三条件+1./2./3.→条件1/2/3 surface≥2）: %s" % block)
+        check("注入含 PRIOR_EXPERT_KB 标签", "##PRIOR_EXPERT_KB##" in block, block)
+        # 反例：无台账（仅 REQ 散文）→ 仍不注入（护 150/0 与既有相关性门语义）
+        st2 = _kb_state(workdir, "仅REQ散文无台账-md")
+        _kb_req_file(workdir, "仅REQ散文无台账-md",
+                     "# 仅REQ散文无台账-md\n\n坐席外呼客户接通后启动ASR识别并写缓存，通话结束推送催记模型。\n")
+        miss = rt._prior_expert_kb_block(st2, spec.get_phase(6), spec)
+        check("无台账仅 REQ 散文 → 仍不注入", miss == "", "误注入: %s" % miss)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
