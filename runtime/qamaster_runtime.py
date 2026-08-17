@@ -76,6 +76,11 @@ def _register_workflows():
         _cd.register()
     except Exception:
         pass
+    try:
+        import requirement_review as _rr  # noqa: E402
+        _rr.register()
+    except Exception:
+        pass
 
 
 def _spec(a_or_workflow):
@@ -449,6 +454,32 @@ def _split_tokens(s):
     return out
 
 
+def _trigger_words(rec):
+    """trigger 分词自愈：逐元素过 _split_tokens 后扁平化（RC-b/RC-d 同纪律）。
+
+    legacy 畸形单元素串（如 ["条件组合|判定表|…"] 整串一个 token）在此自愈拆分；
+    对已是干净 list 的 trigger 逐元素 split 后仍是原词（幂等，字节行为不变）。
+    各 KB 命中计数（lessons/business/expert 预防+反应）统一走本函数，勿再裸遍历 trigger。
+    """
+    words = []
+    for w in rec.get("trigger", []):
+        words.extend(_split_tokens(str(w)))
+    return words
+
+
+def _dedup_substring_shadow(hitset):
+    """子串遮蔽去重（RC-e）：被更长命中词包含的短词不计入命中数。
+
+    _REQ_SIGNALS 含子串对（"大于"⊂"大于等于"、"同时满足"⊂"必须同时满足"等），
+    一处出现若双计 → 单一"≥数字阈值"即误满足 surface≥2，无关需求误注入（分页规则
+    实证两条件合覆盖方法论被注入）。计数前剔除被更长命中词包含的短词：
+    "大于等于50" 只计 大于等于 不计 大于；"大于50"（无 等于）仍计 大于。
+    命中词集非子串对不受影响。lessons/business/expert 三库统一走本函数。
+    """
+    return sum(1 for w in hitset
+               if not any(w != w2 and w in w2 for w2 in hitset))
+
+
 # v0.11.6（终极修复 RC-d）：REQ 域结构信号词表。
 # 根因：expert trigger 由人填方法论术语（判定表/AND门/枚举），而注入门 surface≥2 做
 # 「REQ 正文逐字命中」——业务散文需求（"必须满足以下全部条件：条件1/2/3，资金方既不是A
@@ -651,7 +682,9 @@ def _prior_kb_block(st, phase, spec, kind="lesson", top=3):
             continue
         if str(r.get("phase", "")) != str(phase_id):
             continue
-        surface = sum(1 for w in r.get("trigger", []) if w in rtext)
+        words = _trigger_words(r)
+        hitset = set(w for w in words if w in rtext)
+        surface = _dedup_substring_shadow(hitset)
         title_hit = bool(r.get("module")) and r["module"] in rtext
         relevant = surface >= 2 or title_hit
         if not relevant:
@@ -687,8 +720,11 @@ def _relevant_lessons_on_fail(st, phase, fail_context, spec, top=3):
         trusted = (r.get("status") == "endorsed") or (r.get("occurrences", 1) >= 3)
         if not trusted:
             continue
-        hit_fail = sum(1 for w in r.get("trigger", []) if w in fail_context)
-        hit_req = sum(1 for w in r.get("trigger", []) if w in req_text)
+        words = _trigger_words(r)
+        fail_hitset = set(w for w in words if w in fail_context)
+        hit_fail = _dedup_substring_shadow(fail_hitset)
+        req_hitset = set(w for w in words if w in req_text)
+        hit_req = _dedup_substring_shadow(req_hitset)
         if not (hit_fail >= 1 or hit_req >= 2):
             continue
         score = 5 * hit_fail + 3 * hit_req + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
@@ -720,7 +756,9 @@ def _prior_business_kb_block(st, phase, spec, top=3):
         if r.get("superseded_by"):
             continue
         # business phase 无关：不按 phase 过滤
-        surface = sum(1 for w in r.get("trigger", []) if w in rtext)
+        words = _trigger_words(r)
+        hitset = set(w for w in words if w in rtext)
+        surface = _dedup_substring_shadow(hitset)
         title_hit = bool(r.get("module")) and r["module"] in rtext
         relevant = surface >= 2 or title_hit
         if not relevant:
@@ -757,8 +795,11 @@ def _relevant_business_kb_on_fail(st, phase, fail_context, spec, top=3):
         trusted = (r.get("status") == "endorsed") or (r.get("occurrences", 1) >= 3)
         if not trusted:
             continue
-        hit_fail = sum(1 for w in r.get("trigger", []) if w in fail_context)
-        hit_req = sum(1 for w in r.get("trigger", []) if w in req_text)
+        words = _trigger_words(r)
+        fail_hitset = set(w for w in words if w in fail_context)
+        hit_fail = _dedup_substring_shadow(fail_hitset)
+        req_hitset = set(w for w in words if w in req_text)
+        hit_req = _dedup_substring_shadow(req_hitset)
         if not (hit_fail >= 1 or hit_req >= 2):
             continue
         score = 5 * hit_fail + 3 * hit_req + r.get("occurrences", 1) + (2 if r["status"] == "endorsed" else 0)
@@ -812,13 +853,10 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
         # v0.11.8（RC-f·编号条件归一）：语料（REQ+台账）先过 _req_signal_hits 把
         # 「1./2./3.」编号条件归一为「条件N」（仅当同时命中条件从句信号时生效），
         # 使存量 trigger 里的「条件1/条件2/条件3」无需重建数据即可命中台账编号条件。
-        words = []
-        for w in r.get("trigger", []):
-            words.extend(_split_tokens(str(w)))
+        words = _trigger_words(r)
         corpus_signals = set(_req_signal_hits(rtext))
         hitset = set(w for w in words if w in rtext or w in corpus_signals)
-        surface = sum(1 for w in hitset
-                      if not any(w != w2 and w in w2 for w2 in hitset))
+        surface = _dedup_substring_shadow(hitset)
         title_hit = bool(r.get("module")) and r["module"] in rtext
         relevant = surface >= 2 or title_hit
         if not relevant:
@@ -861,17 +899,13 @@ def _relevant_expert_on_fail(st, phase, fail_context, spec, top=3):
         if r.get("status") != "endorsed":
             continue
         # trigger 分词（legacy 畸形单元素串自愈，同预防式）
-        words = []
-        for w in r.get("trigger", []):
-            words.extend(_split_tokens(str(w)))
+        words = _trigger_words(r)
         # 失败侧命中（去子串遮蔽重计，同预防式 RC-e）
         fail_hitset = set(w for w in words if w in fail_context)
-        hit_fail = sum(1 for w in fail_hitset
-                       if not any(w != w2 and w in w2 for w2 in fail_hitset))
+        hit_fail = _dedup_substring_shadow(fail_hitset)
         # REQ 侧命中（含 _req_signal_hits 归一：编号条件归一，同预防式 RC-f）
         req_hitset = set(w for w in words if w in req_text or w in corpus_signals)
-        hit_req = sum(1 for w in req_hitset
-                      if not any(w != w2 and w in w2 for w2 in req_hitset))
+        hit_req = _dedup_substring_shadow(req_hitset)
         # 相关性门：失败文本命中≥1 或 REQ 命中≥2
         if not (hit_fail >= 1 or hit_req >= 2):
             continue
@@ -1238,6 +1272,11 @@ def _manifest_side_effect(st, phase, spec, workdir):
     """
     pid = phase["id"]
     req_id = (st.get("req_id") or "").strip()
+    # v0.11.10（缺陷4）：MANIFEST 索引仅 case-design 使用（REQ/TestCases/台账/知识 9 列
+    # 语义）；requirement-review 等其它 workflow 无 MANIFEST，Phase 0/1 号与 case-design
+    # 重叠不可误建（否则 requirement-review-out/ 会冒出语义错配的 MANIFEST.md）。
+    if spec.name != "case-design":
+        return
     if not req_id or pid not in (0, 1, 13, 14):
         return
     mp = _manifest_path(workdir, spec)
@@ -1701,7 +1740,18 @@ def cmd_gate(a):
         state_store.save(path, st)
         # gate-PASS 副作用（Phase 0 add / Phase 13 update testcase files）
         _manifest_side_effect(st, phase, spec, a.workdir)
-        print("\nGATE RESULT: PASS → 执行 `next` 查看下一阶段契约卡")
+        # v0.11.10（缺陷4）：无许可门 workflow（末阶段=auto，如 requirement-review）
+        # 在末阶段 auto-gate PASS 时即达终态 DONE。case-design 末阶段 15=license 不受影响
+        # （license 门走 cmd_gate 的 confirm/license 分支，永不进此 auto 分支）。
+        if phase["id"] == spec.last_phase and phase.get("gate") == "auto":
+            if spec.last_phase not in st["completed"]:
+                st["completed"].append(spec.last_phase)
+            st["status"] = "DONE"
+            state_store.log_event(st, "flow_done", phase=phase["id"], detail="last auto phase passed")
+            state_store.save(path, st)
+            print("\nGATE RESULT: PASS — 末阶段（自动门）已过，流程 DONE")
+        else:
+            print("\nGATE RESULT: PASS → 执行 `next` 查看下一阶段契约卡")
     else:
         st.setdefault("gate_rounds", {})
         rounds = st["gate_rounds"].get(str(phase["id"]), 0) + 1

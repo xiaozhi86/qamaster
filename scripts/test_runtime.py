@@ -442,6 +442,7 @@ def main():
     test_kb_reactive_respects_trust_gate()
     test_kb_capture_uses_ledger_corpus()
     test_kb_endorse_and_supersede()
+    test_kb_lesson_substring_shadow_and_token_selfheal()
     test_kb_threshold_recurrence_injected()
     test_kb_concurrent_add()
     test_kb_distill_replays_history()
@@ -474,6 +475,9 @@ def main():
     test_expert_ledger_numbered_cond_injection()
     # v0.11.9（RC-g）回归：补齐专家库反应式失败定向（失败文本命中→RELEVANT_EXPERT_KB）
     test_expert_reactive_on_fail()
+
+    # v0.11.10（缺陷4）回归：requirement-review 轻量状态机（注册 + 自动门 + 人工确认门 + 末阶段 DONE）
+    test_requirement_review_state_machine()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -1538,6 +1542,48 @@ def test_kb_endorse_and_supersede():
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def test_kb_lesson_substring_shadow_and_token_selfheal():
+    """lessons/business 补齐 expert 同款加固（缺陷5）：子串遮蔽去重 + trigger 分词自愈。
+
+    ① 子串遮蔽：trigger 含 大于+大于等于 子串对，无关分页 REQ 仅"大于等于"一处 →
+       大于 被遮蔽 → surface=1 → 不注入（修复前裸 sum 双计 surface=2 误注入）。
+    ② 分词自愈：legacy 畸形单元素 trigger ["并发|幂等|重复提交"] 读取时拆开命中。
+    两 case 均验证 shared helper（_trigger_words/_dedup_substring_shadow）生效。
+    """
+    print("\n[kb] lessons 补齐子串去重 + trigger 分词自愈（缺陷5）")
+    import qamaster_runtime as rt
+    import kb_store
+    from case_design import spec as _cd_spec
+    spec = _cd_spec()
+    workdir = tempfile.mkdtemp(prefix="qamaster-kb-lesson-shadow-")
+    try:
+        # ① 子串遮蔽：trigger 含 大于+大于等于
+        rid = "分页需求-20260815"
+        _kb_req_file(workdir, rid,
+                     "# %s\n\n## 分页规则\n\n查询接口返回条数大于等于50条时分页。\n" % rid)
+        fp = kb_store.fingerprint({"phase": "5", "dimension": "边界阈值"})
+        _kb_seed(workdir, [_kb_rec(fp, 5, "边界阈值", "endorsed", 1,
+                                   ["大于", "大于等于"],
+                                   "阈值边界经验", source_req="A")])
+        st = _kb_state(workdir, rid)
+        miss = rt._prior_kb_block(st, spec.get_phase(5), spec)
+        check("lessons 子串遮蔽：仅 大于等于 一处 → surface=1 → 不注入",
+              miss == "", "误注入: %s" % miss)
+        # ② 分词自愈：畸形单元素 trigger 整串一个 token
+        rid2 = "并发需求-20260809"
+        _kb_req_file(workdir, rid2, _KB_REQ_CONCURRENCY % rid2)
+        fp2 = kb_store.fingerprint({"phase": "5", "dimension": "并发幂等"})
+        _kb_seed(workdir, [_kb_rec(fp2, 5, "并发幂等", "endorsed", 1,
+                                   ["并发|幂等|重复提交"],
+                                   "畸形 trigger 并发经验", source_req="A")])
+        st2 = _kb_state(workdir, rid2)
+        prior = rt._prior_kb_block(st2, spec.get_phase(5), spec)
+        check("lessons 分词自愈：畸形单元素 trigger 拆开后命中注入",
+              "畸形 trigger 并发经验" in prior, prior)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def test_kb_threshold_recurrence_injected():
     """draft occ≥3 后预防/反应均注入（无需背书，跨需求置信门）。"""
     print("\n[kb] occ≥3 阈值门（无需背书即可注入）")
@@ -2567,6 +2613,94 @@ def test_expert_reactive_on_fail():
             "状态机方法论 endorsed", source_req="A")])
         miss = rt._relevant_expert_on_fail(st2, phase6, "界面按钮样式不对齐", spec)
         check("失败文本无命中且 REQ 无命中 → 不注入", miss == "", "应 no-op: %s" % miss)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_requirement_review_state_machine():
+    """requirement-review 轻量状态机（缺陷4·方案A）：8 阶段（0-7），Phase 4 人工确认门，
+    末阶段 Phase 7 为自动门、PASS 即达 DONE。无 MANIFEST / 无知识总结 / 无 Excel 许可门。
+
+    验证：①workflow 注册 + 阶段序；②Phase 0 产物缺失 FAIL → 补齐 PASS；③无机器检查项
+    的自动门（Phase 2/3/6）直接 PASS；④Phase 4 人工门未 confirm 禁止 next；⑤末阶段
+    auto-gate PASS → DONE。
+    """
+    print("\n[requirement-review] 轻量状态机：注册 + 自动门 + 人工确认门 + 末阶段 DONE")
+    workdir = tempfile.mkdtemp(prefix="qamaster-rr-sm-")
+    rr_out = "requirement-review-out"
+    rid = "评审需求-20260817"
+    try:
+        # ① 注册 + 阶段序
+        import qamaster_runtime as rt
+        rt._register_workflows()
+        from registry import get_workflow
+        spec = get_workflow("requirement-review")
+        check("requirement-review 已注册", spec is not None)
+        if spec is None:
+            return
+        ids = [p["id"] for p in spec.phases]
+        check("阶段编号 0-7 连续", ids == list(range(8)), "实际: %s" % ids)
+        check("Phase 4 为人工确认门", spec.get_phase(4)["gate"] == "confirm")
+        check("末阶段 Phase 7 为自动门", spec.get_phase(7)["gate"] == "auto")
+
+        # ② start → Phase 0
+        r = run(workdir, "start", "--workflow", "requirement-review", "--req-id", rid, req_id=rid, expect_rc=0)
+        check("start 输出契约卡 Phase 0", "RUNTIME CONTRACT" in r.stdout and "Phase 0" in r.stdout)
+
+        # ③ Phase 0 自动门：产物缺失 FAIL → 补齐 PASS
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 0 缺 REQ → gate FAIL", "GATE RESULT: FAIL" in r.stdout)
+        w(workdir, os.path.join(rr_out, "REQ_%s.md" % rid), "# %s\n\n## 下单\n\n用户下单。\n" % rid)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 0 补齐 REQ → gate PASS", "GATE RESULT: PASS" in r.stdout)
+        check("requirement-review 无 MANIFEST 副作用", not os.path.isfile(os.path.join(workdir, rr_out, "MANIFEST.md")))
+
+        # ④ 推进到 Phase 1（并行评审）
+        r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("next → Phase 1 并行评审", "Phase 1" in r.stdout and "并行评审" in r.stdout)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 1 缺问题清单 → gate FAIL", "GATE RESULT: FAIL" in r.stdout)
+        w(workdir, os.path.join(rr_out, "ReviewIssues_%s.md" % rid), "# 评审问题清单\n\n## 问题1\n\n- P1\n")
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 1 补齐问题清单 → gate PASS", "GATE RESULT: PASS" in r.stdout)
+
+        # ⑤ 无机器检查项的自动门（Phase 2 汇总 / Phase 3 方案 / Phase 6 复查）直接 PASS
+        for pid, nm in ((2, "结果汇总去重与冲突检测"), (3, "优化方案总览")):
+            r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+            check("next → Phase %d %s" % (pid, nm), "Phase %d" % pid in r.stdout)
+            r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+            check("Phase %d 无机器检查项 → gate PASS" % pid, "GATE RESULT: PASS" in r.stdout)
+
+        # ⑥ Phase 4 人工确认门：未 confirm 禁止 next
+        r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("next → Phase 4 用户确认", "Phase 4" in r.stdout and "用户确认" in r.stdout)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 4 人工门 → gate WAIT", "GATE RESULT: WAIT" in r.stdout)
+        r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=2)
+        check("Phase 4 WAIT 状态禁止 next", "RUNTIME_ERROR" in r.stdout)
+        r = run(workdir, "confirm", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 4 confirm 放行", "CONFIRM ACCEPTED" in r.stdout)
+
+        # ⑦ Phase 5 需求文档重构
+        r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("next → Phase 5 需求文档重构", "Phase 5" in r.stdout)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 5 缺最终文档 → gate FAIL", "GATE RESULT: FAIL" in r.stdout)
+        w(workdir, os.path.join(rr_out, "ReviewedReq_%s.md" % rid), "# 最终需求文档\n\n## 下单\n\n重构后。\n")
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 5 补齐最终文档 → gate PASS", "GATE RESULT: PASS" in r.stdout)
+
+        # ⑧ Phase 6 复查 → Phase 7 最终输出 → DONE
+        r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("next → Phase 6 自动复查", "Phase 6" in r.stdout)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 6 无机器检查项 → gate PASS", "GATE RESULT: PASS" in r.stdout)
+        r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("next → Phase 7 最终输出", "Phase 7" in r.stdout)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 7 自动门 PASS → 流程 DONE", "流程 DONE" in r.stdout)
+        st = json.load(open(os.path.join(workdir, ".qamaster", "requirement-review", rid, "state.json"), encoding="utf-8"))
+        check("末阶段 DONE 状态", st["status"] == "DONE", "实际: %s" % st["status"])
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

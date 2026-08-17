@@ -180,6 +180,37 @@ wf_dir = rt_dir / "workflows"
 for must in (wf_dir / "__init__.py", wf_dir / "registry.py", wf_dir / "case_design.py"):
     if not must.exists():
         err(f"{must.relative_to(ROOT)}: 缺失（通用 workflow 注册表）")
+# v0.11.10（缺陷4）：requirement-review 轻量状态机结构护栏
+for must in (rt_dir / "requirement_review_phases.py", wf_dir / "requirement_review.py"):
+    if not must.exists():
+        err(f"{must.relative_to(ROOT)}: 缺失（requirement-review workflow 阶段机）")
+if (rt_dir / "requirement_review_phases.py").exists():
+    import importlib.util
+    sys.path.insert(0, str(rt_dir))
+    try:
+        spec = importlib.util.spec_from_file_location("qamaster_rr_phases",
+                                                      rt_dir / "requirement_review_phases.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        err(f"runtime/requirement_review_phases.py: 加载失败 - {e}")
+        mod = None
+    finally:
+        try:
+            sys.path.remove(str(rt_dir))
+        except ValueError:
+            pass
+    if mod is not None:
+        ids = [p["id"] for p in mod.PHASES]
+        if ids != list(range(0, 8)):
+            err("runtime/requirement_review_phases.py: 阶段编号必须连续 0-7，实际: %s" % ids)
+        gates = {p["gate"] for p in mod.PHASES}
+        if not gates <= {"auto", "confirm"}:
+            err("runtime/requirement_review_phases.py: 非法 gate 类型（应无 license）: %s" % gates)
+        if mod.PHASE_BY_ID[4]["gate"] != "confirm":
+            err("runtime/requirement_review_phases.py: Phase 4 应为 confirm（用户确认门）")
+        if mod.PHASE_BY_ID[7]["gate"] != "auto":
+            err("runtime/requirement_review_phases.py: Phase 7 应为 auto（末阶段自动门）")
 rt_py = rt_dir / "qamaster_runtime.py"
 if rt_py.exists():
     _rt_txt = rt_py.read_text(encoding="utf-8")
