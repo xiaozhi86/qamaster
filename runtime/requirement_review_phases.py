@@ -13,10 +13,11 @@ requirement_review_phases.py — qamaster requirement-review 轻量状态机阶�
   6 自动复查 + 二次修复    — Self-Review 复查，发现问题就地修复
   7 最终输出               — 最终需求文档 + 评审问题清单
 
-与 case-design 的差异：requirement-review 是「单次评审产出」，无 MANIFEST 索引、
-无知识总结后置动作、无 Excel 许可门（末阶段=auto）；阶段门禁为确定性文件存在性
-检查（exists_any，req_id 无关 glob），人工确认门（Phase 4）复用控制器 confirm 机制，
-模型不可绕过。
+与 case-design 的差异：requirement-review 是「单次评审产出」，无知识总结后置动作、
+无 Excel 许可门（末阶段=auto）；阶段门禁为确定性文件存在性检查（exists_any，
+req_id 绑定 glob，{req_id} 占位经 _fmt_cmd 替换），人工确认门（Phase 4）复用控制器
+confirm 机制，模型不可绕过；Phase 0/1/5/7 副作用维护 requirement-review-out/MANIFEST.md
+聚合索引（多需求并发隔离）。
 
 gate 取值：
   auto    — 自动门：产物达标即放行（gate_checks 全部通过）
@@ -43,7 +44,7 @@ PHASES = [
         "produces": ["requirement-review-out/REQ_<需求标识>.md"],
         "exit_condition": "REQ 文件存在于磁盘（Runtime 机器判定）",
         "gate_checks": [
-            {"kind": "exists_any", "patterns": ["requirement-review-out/REQ_*.md"], "label": "需求文档已落盘"},
+            {"kind": "exists_any", "patterns": ["requirement-review-out/REQ_{req_id}.md"], "label": "需求文档已落盘"},
         ],
     },
     {
@@ -55,7 +56,7 @@ PHASES = [
         "produces": ["requirement-review-out/ReviewIssues_<需求标识>.md"],
         "exit_condition": "评审问题清单已落盘（Runtime 机器判定）",
         "gate_checks": [
-            {"kind": "exists_any", "patterns": ["requirement-review-out/ReviewIssues_*.md"], "label": "评审问题清单已落盘"},
+            {"kind": "exists_any", "patterns": ["requirement-review-out/ReviewIssues_{req_id}.md"], "label": "评审问题清单已落盘"},
         ],
     },
     {
@@ -97,7 +98,7 @@ PHASES = [
         "produces": ["requirement-review-out/ReviewedReq_<需求标识>.md"],
         "exit_condition": "最终需求文档已落盘（Runtime 机器判定）",
         "gate_checks": [
-            {"kind": "exists_any", "patterns": ["requirement-review-out/ReviewedReq_*.md"], "label": "最终需求文档已落盘"},
+            {"kind": "exists_any", "patterns": ["requirement-review-out/ReviewedReq_{req_id}.md"], "label": "最终需求文档已落盘"},
         ],
     },
     {
@@ -119,8 +120,8 @@ PHASES = [
         "produces": [],
         "exit_condition": "最终需求文档 + 评审问题清单均存在于磁盘（Runtime 机器判定）",
         "gate_checks": [
-            {"kind": "exists_any", "patterns": ["requirement-review-out/ReviewedReq_*.md"], "label": "最终需求文档存在"},
-            {"kind": "exists_any", "patterns": ["requirement-review-out/ReviewIssues_*.md"], "label": "评审问题清单存在"},
+            {"kind": "exists_any", "patterns": ["requirement-review-out/ReviewedReq_{req_id}.md"], "label": "最终需求文档存在"},
+            {"kind": "exists_any", "patterns": ["requirement-review-out/ReviewIssues_{req_id}.md"], "label": "评审问题清单存在"},
         ],
     },
 ]

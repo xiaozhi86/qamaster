@@ -807,6 +807,18 @@ disable-model-invocation: true
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 
+🔒 Runtime 受控流程与多需求并行（模型不可绕过）
+
+requirement-review 走与 case-design 相同的 Runtime 状态机（8 阶段 0-7），核心约束：
+
+- **阶段推进由 Runtime 裁决**：模型只负责当前阶段的思考与产物，无权决定下一阶段、宣布完成、跳过人工门禁。
+- **门禁 req_id 绑定**：Phase 0/1/5/7 的文件存在性门禁按 `REQ_{req_id}.md` / `ReviewIssues_{req_id}.md` / `ReviewedReq_{req_id}.md` 精确匹配——多需求并发评审时互不串扰（A 的产物不会误放行 B 的门禁）。
+- **人工确认门（Phase 4）不可绕过**：用户未明确确认前，Runtime 拒绝推进到 Phase 5。
+- **MANIFEST 自动维护**：`requirement-review-out/MANIFEST.md` 聚合索引由 Runtime 在 gate PASS 时自动维护，模型禁止 Write/Edit。
+- **多需求并行评审**：同一工程可对多个需求分别 `start --req-id <id>` 并发评审，状态按 `(requirement-review, req_id)` 分区落盘，互不覆盖。
+
+━━━━━━━━━━━━━━━━━━━━━━━
+
 📥 输入：
 <<<用户提供的需求文档或需求描述>>>
 

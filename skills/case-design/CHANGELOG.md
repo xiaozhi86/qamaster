@@ -6,6 +6,26 @@
 
 # 发布说明（面向使用者）
 
+## v0.11.12（2026-08-18，requirement-review 完整多需求并行评审支持）
+
+**本次发布把 requirement-review 从「单需求评审」升级为「同工程多需求并行评审」**——闭合 v0.11.10 引入 requirement-review 状态机时遗留的两处多需求缺口：门禁 req_id 未隔离（串扰）与无聚合索引（缺失）。
+
+**核心机制**：
+- **门禁 req_id 隔离**：`_run_check` 的 `exists_any` 支持 `{req_id}` 占位（经 `_fmt_cmd` 替换；case-design 的 pattern 不含占位符 → 恒等零变化）；`requirement_review_phases.py` 5 处 gate pattern 由 `REQ_*.md`/`ReviewIssues_*.md`/`ReviewedReq_*.md` 改为 `REQ_{req_id}.md`/`ReviewIssues_{req_id}.md`/`ReviewedReq_{req_id}.md`。多需求并发时 A 的产物不再误放行 B 的门禁（fail-closed）。
+- **requirement-review 聚合索引**：`manifest.py` 泛化为按 workflow 的 schema 注册表（case-design 与 requirement-review 各有独立列集/产物命名；所有函数加 `workflow="case-design"` 默认参，case-design 路径逐字节不变）；`_manifest_side_effect` 分派出 `_rr_manifest_side_effect`（Phase 0/1/5/7 写 `requirement-review-out/MANIFEST.md`），case-design 原逻辑原样搬入 `_case_design_manifest_side_effect`。
+- **生命周期对齐**：`cmd_manifest`/`cmd_bootstrap`/`cmd_start` 透传 `workflow=spec.name`，requirement-review 由此获得 manifest list/reconcile、重复评审已完成需求的归档/修改检测。
+
+**case-design 零影响**：`phases.py`/`case_design.py`/`state_store.py`/`check_plugin.py` 完全未改；`exists_any` 的 `_fmt_cmd` 对 case-design 无占位 pattern 为恒等；`manifest.py` 所有函数 `workflow` 默认 `"case-design"` 且 `COLUMNS`/`COLUMN_HEADERS` 旧名保留；case-design 的 `_manifest_side_effect` 逻辑原样搬入。全量 422 项断言（含 case-design 并发/锁测）保持绿。
+
+**变更文件**：
+- `runtime/qamaster_runtime.py`：`_run_check` exists_any 加 `_fmt_cmd`；`_manifest_side_effect` 分派 + 新增 `_rr_manifest_side_effect`；`cmd_manifest`/`cmd_bootstrap`/`cmd_start` 透传 workflow。
+- `runtime/manifest.py`：schema 注册表（case-design/requirement-review）+ 9 函数加 `workflow` 默认参。
+- `runtime/requirement_review_phases.py`：5 处 gate pattern req_id 绑定 + docstring。
+- `scripts/test_runtime.py`：新增 `test_requirement_review_concurrent_reqs`（门禁隔离回归）+ 改单 req 测试的 MANIFEST 断言。
+- `skills/requirement-review/{README.md,SKILL.md}` + 根 `README.md` + 本说明同步。
+
+---
+
 ## v0.11.11（2026-08-18，专家方法论自动识别·提炼·沉淀）
 
 **本次发布把专家方法论沉淀从"人肉"升级为"半自动"**——闭合 v0.11.3 留下的"沉淀侧仍靠人肉"缺口：新增 `kb extract-expert`（带确定性别忽略门 + 自动并入 REQ 域词）与 `kb endorse --all-drafts` 一键背书；`fail`/`patch` 纠正命中可抽象信号时 Runtime 置位强制提炼；专家信任门重开 `endorsed 或 occ≥3`——同方法论被 ≥3 个独立需求命中即自动生效（可 `kb supersede` 撤销）。

@@ -1014,7 +1014,8 @@ def _run_check(chk, st, spec):
     if kind == "exists_any":
         hits = []
         for pat in chk["patterns"]:
-            hits.extend(glob.glob(os.path.join(workdir, pat)))
+            resolved = _fmt_cmd(pat, st, spec)  # v0.11.12: {req_id} 占位（无占位 pattern 为恒等，case-design 不变）
+            hits.extend(glob.glob(os.path.join(workdir, resolved)))
         return (bool(hits), "%s: %s" % (chk["label"], ("命中 %d 个" % len(hits)) if hits else "缺失"))
     if kind == "phase_gate":
         # v0.7.0: 阶段出口门禁——调 verify_cases.py --phase-gate <N> <checkpoint> --req .. --ledger ..
@@ -1314,6 +1315,24 @@ def _resume_hint(st, spec):
 def _manifest_side_effect(st, phase, spec, workdir):
     """gate PASS 时 Runtime 在 FileLock 下更新 MANIFEST（best-effort，不阻断 gate）。
 
+    v0.11.12：按 workflow 分派到各自的副作用实现，使 requirement-review 也维护
+    聚合索引（requirement-review-out/MANIFEST.md）。case-design 逻辑原样迁至
+    _case_design_manifest_side_effect，行为逐字节不变。
+
+    失败不阻断 gate（MANIFEST 是 best-effort 索引；失步可 `manifest reconcile` 重建——C6 兜底）。
+    """
+    req_id = (st.get("req_id") or "").strip()
+    if not req_id:
+        return
+    if spec.name == "case-design":
+        _case_design_manifest_side_effect(st, phase, spec, workdir)
+    elif spec.name == "requirement-review":
+        _rr_manifest_side_effect(st, phase, spec, workdir)
+
+
+def _case_design_manifest_side_effect(st, phase, spec, workdir):
+    """case-design 的 MANIFEST 副作用（v0.11.10 缺陷4 前的原逻辑，逐字节保留）。
+
     Phase 0 PASS → manifest add（从 REQ_<id>.md 首个 # 标题抽需求名称）
     Phase 1 PASS → manifest update（台账文件列）
     Phase 13 PASS → manifest update（TestCases_<id>*.md 实际落盘文件列）
@@ -1327,11 +1346,6 @@ def _manifest_side_effect(st, phase, spec, workdir):
     """
     pid = phase["id"]
     req_id = (st.get("req_id") or "").strip()
-    # v0.11.10（缺陷4）：MANIFEST 索引仅 case-design 使用（REQ/TestCases/台账/知识 9 列
-    # 语义）；requirement-review 等其它 workflow 无 MANIFEST，Phase 0/1 号与 case-design
-    # 重叠不可误建（否则 requirement-review-out/ 会冒出语义错配的 MANIFEST.md）。
-    if spec.name != "case-design":
-        return
     if not req_id or pid not in (0, 1, 13, 14):
         return
     mp = _manifest_path(workdir, spec)
@@ -1370,6 +1384,41 @@ def _manifest_side_effect(st, phase, spec, workdir):
                 except Exception as ce:
                     print("  [WARN] 检查点清理失败（不阻断完成；可手动删除 .qamaster/%s/%s/checkpoint_*.md）: %s"
                           % (spec.name, req_id, ce))
+    except Exception as e:
+        print("  [WARN] MANIFEST 副作用失败（不阻断 gate；可执行 `manifest reconcile --req-id %s` 修复）: %s"
+              % (req_id, e))
+
+
+def _rr_manifest_side_effect(st, phase, spec, workdir):
+    """requirement-review 的 MANIFEST 副作用（v0.11.12 新增）。
+
+    Phase 0 PASS → manifest add（REQ_<id>.md；修改场景走 upsert）
+    Phase 1 PASS → manifest update（评审问题清单列）
+    Phase 5 PASS → manifest update（最终需求文档列）
+    Phase 7 PASS → manifest complete（置已完成）
+
+    失败不阻断 gate（best-effort）。
+    """
+    pid = phase["id"]
+    req_id = (st.get("req_id") or "").strip()
+    if pid not in (0, 1, 5, 7):
+        return
+    mp = _manifest_path(workdir, spec)
+    is_modify = bool(st.get("modify_of"))
+    wf = "requirement-review"
+    try:
+        with locking.FileLock(mp, timeout=30):
+            if pid == 0:
+                if is_modify:
+                    manifest.upsert(mp, req_id, workflow=wf, workdir=workdir, output_dir=spec.output_dir, reopen=True)
+                else:
+                    manifest.add(mp, req_id, workflow=wf, workdir=workdir, output_dir=spec.output_dir)
+            elif pid == 1:
+                manifest.update(mp, req_id, workflow=wf, review_issues="ReviewIssues_%s.md" % req_id)
+            elif pid == 5:
+                manifest.update(mp, req_id, workflow=wf, reviewed_req="ReviewedReq_%s.md" % req_id)
+            elif pid == 7:
+                manifest.complete(mp, req_id, workflow=wf)
     except Exception as e:
         print("  [WARN] MANIFEST 副作用失败（不阻断 gate；可执行 `manifest reconcile --req-id %s` 修复）: %s"
               % (req_id, e))
@@ -1527,7 +1576,7 @@ def cmd_bootstrap(a):
     # 修正：已完成/进行中 → 复用 req_id 走修改分支（start 检测后 upsert）；
     #       已归档       → 仍是归档重跑语义，追加日期（旧行保留归档，新需求另起）。
     mp = _manifest_path(workdir, spec)
-    existing_rows = manifest.load_rows(mp)
+    existing_rows = manifest.load_rows(mp, workflow=spec.name)
     hit = next((r for r in existing_rows if r["req_id"] == req_id), None)
     if hit is not None:
         hit_status = hit.get("status", "")
@@ -1580,7 +1629,7 @@ def cmd_start(a):
     # _manifest_side_effect Phase 0 据此走 upsert（复用既有行 + 重置为进行中）。
     try:
         _mp = _manifest_path(workdir, spec)
-        _rows = manifest.load_rows(_mp)
+        _rows = manifest.load_rows(_mp, workflow=spec.name)
         _hit = next((r for r in _rows if r["req_id"] == req_id), None)
         if _hit is not None and _hit.get("status") != manifest.STATUS_ARCHIVED:
             st["modify_of"] = {
@@ -2223,7 +2272,7 @@ def cmd_manifest(a):
     action = a.action
     if action == "list":
         # 只读，无需锁
-        rows = manifest.load_rows(mp)
+        rows = manifest.load_rows(mp, workflow=spec.name)
         if not rows:
             print("MANIFEST 为空或不存在: %s" % mp)
             return
@@ -2232,14 +2281,14 @@ def cmd_manifest(a):
         return
     if action == "reconcile":
         with locking.FileLock(mp, timeout=30):
-            ok, msg, cnt = manifest.reconcile(mp, workdir, spec.output_dir)
+            ok, msg, cnt = manifest.reconcile(mp, workdir, spec.output_dir, workflow=spec.name)
         print("MANIFEST RECONCILE: %s (%s, %d rows)" % ("OK" if ok else "FAIL", msg, cnt))
         return
     # add/update/complete 需 --req-id，全程持锁
     req_id = _require_req_id(a)
     with locking.FileLock(mp, timeout=30):
         if action == "add":
-            ok, msg = manifest.add(mp, req_id, workdir=workdir, output_dir=spec.output_dir)
+            ok, msg = manifest.add(mp, req_id, workdir=workdir, output_dir=spec.output_dir, workflow=spec.name)
         elif action == "update":
             fields = {}
             if a.name is not None:
@@ -2256,9 +2305,9 @@ def cmd_manifest(a):
                 fields["status"] = a.status
             if not fields:
                 _die("manifest update 需至少一个 --<field>")
-            ok, msg = manifest.update(mp, req_id, **fields)
+            ok, msg = manifest.update(mp, req_id, workflow=spec.name, **fields)
         elif action == "complete":
-            ok, msg = manifest.complete(mp, req_id)
+            ok, msg = manifest.complete(mp, req_id, workflow=spec.name)
         else:
             _die("未知 manifest 动作: %s" % action)
     print("MANIFEST %s: %s — %s" % (action, "OK" if ok else "FAIL", msg))

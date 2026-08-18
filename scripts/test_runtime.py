@@ -484,6 +484,8 @@ def main():
 
     # v0.11.10（缺陷4）回归：requirement-review 轻量状态机（注册 + 自动门 + 人工确认门 + 末阶段 DONE）
     test_requirement_review_state_machine()
+    # v0.11.12 回归：requirement-review 多需求并发门禁 req_id 隔离 + MANIFEST 聚合
+    test_requirement_review_concurrent_reqs()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -2801,7 +2803,7 @@ def test_expert_reactive_on_fail():
 
 def test_requirement_review_state_machine():
     """requirement-review 轻量状态机（缺陷4·方案A）：8 阶段（0-7），Phase 4 人工确认门，
-    末阶段 Phase 7 为自动门、PASS 即达 DONE。无 MANIFEST / 无知识总结 / 无 Excel 许可门。
+    末阶段 Phase 7 为自动门、PASS 即达 DONE。有 MANIFEST 聚合索引 / 无知识总结 / 无 Excel 许可门。
 
     验证：①workflow 注册 + 阶段序；②Phase 0 产物缺失 FAIL → 补齐 PASS；③无机器检查项
     的自动门（Phase 2/3/6）直接 PASS；④Phase 4 人工门未 confirm 禁止 next；⑤末阶段
@@ -2835,7 +2837,9 @@ def test_requirement_review_state_machine():
         w(workdir, os.path.join(rr_out, "REQ_%s.md" % rid), "# %s\n\n## 下单\n\n用户下单。\n" % rid)
         r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
         check("Phase 0 补齐 REQ → gate PASS", "GATE RESULT: PASS" in r.stdout)
-        check("requirement-review 无 MANIFEST 副作用", not os.path.isfile(os.path.join(workdir, rr_out, "MANIFEST.md")))
+        rr_rows = _MANIFEST.load_rows(os.path.join(workdir, rr_out, "MANIFEST.md"), workflow="requirement-review")
+        rr_ids = [row.get("req_id") for row in rr_rows]
+        check("Phase 0 PASS 写 MANIFEST 且含该 req 行", rid in rr_ids, "ids=%s" % rr_ids)
 
         # ④ 推进到 Phase 1（并行评审）
         r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
@@ -2883,6 +2887,68 @@ def test_requirement_review_state_machine():
         check("Phase 7 自动门 PASS → 流程 DONE", "流程 DONE" in r.stdout)
         st = json.load(open(os.path.join(workdir, ".qamaster", "requirement-review", rid, "state.json"), encoding="utf-8"))
         check("末阶段 DONE 状态", st["status"] == "DONE", "实际: %s" % st["status"])
+        rr_rows = _MANIFEST.load_rows(os.path.join(workdir, rr_out, "MANIFEST.md"), workflow="requirement-review")
+        rr_row = next((x for x in rr_rows if x.get("req_id") == rid), None)
+        check("末阶段 DONE 后 MANIFEST status=已完成", rr_row is not None and rr_row.get("status") == "已完成",
+              "row=%s" % rr_row)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_requirement_review_concurrent_reqs():
+    """requirement-review 多需求并发（v0.11.12）：门禁 req_id 隔离（A 的 REQ/问题清单不误放 B 的门），
+    状态分区独立，MANIFEST 两行共存。"""
+    print("\n[requirement-review] 多需求并发：门禁 req_id 隔离 + 状态分区 + MANIFEST 聚合")
+    workdir = tempfile.mkdtemp(prefix="qamaster-rr-conc-")
+    rr_out = "requirement-review-out"
+    rA = "并发评审甲-20260818"
+    rB = "并行评审乙-20260818"
+    try:
+        # A：start → Phase 0 落 REQ_A → gate PASS → next Phase 1 → 落问题清单 → gate PASS → next Phase 2
+        run(workdir, "start", "--workflow", "requirement-review", "--req-id", rA, req_id=rA, expect_rc=0)
+        w(workdir, os.path.join(rr_out, "REQ_%s.md" % rA), "# %s\n\n## 下单\n\n内容甲。\n" % rA)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rA, expect_rc=0)
+        check("A Phase 0 补齐 REQ → gate PASS", "GATE RESULT: PASS" in r.stdout)
+        run(workdir, "next", "--workflow", "requirement-review", req_id=rA, expect_rc=0)
+        w(workdir, os.path.join(rr_out, "ReviewIssues_%s.md" % rA), "# 评审问题清单\n\n## 问题1\n\n- P1\n")
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rA, expect_rc=0)
+        check("A Phase 1 补齐问题清单 → gate PASS", "GATE RESULT: PASS" in r.stdout)
+        run(workdir, "next", "--workflow", "requirement-review", req_id=rA, expect_rc=0)
+
+        # B：start → 不落 REQ_B → gate 应 FAIL（即便 REQ_A / ReviewIssues_A 已存在，req_id 隔离）
+        run(workdir, "start", "--workflow", "requirement-review", "--req-id", rB, req_id=rB, expect_rc=0)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
+        check("B Phase 0 门禁 req_id 隔离：缺 REQ_B → FAIL（不因 REQ_A 误放行）",
+              "GATE RESULT: FAIL" in r.stdout, r.stdout[-1200:])
+
+        # B 落盘 REQ_B → Phase 0 PASS；next → Phase 1，缺问题清单 → FAIL（不因 ReviewIssues_A 误放行）
+        w(workdir, os.path.join(rr_out, "REQ_%s.md" % rB), "# %s\n\n## 下单\n\n内容乙。\n" % rB)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
+        check("B Phase 0 补齐 REQ_B → gate PASS", "GATE RESULT: PASS" in r.stdout)
+        run(workdir, "next", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
+        check("B Phase 1 门禁 req_id 隔离：缺 ReviewIssues_B → FAIL（不因 ReviewIssues_A 误放行）",
+              "GATE RESULT: FAIL" in r.stdout, r.stdout[-1200:])
+
+        # A 状态未被 B 覆盖（分区隔离）
+        st_a = json.load(open(os.path.join(workdir, ".qamaster", "requirement-review", rA, "state.json"), encoding="utf-8"))
+        check("B 推进后 A 仍在 Phase 2（未被覆盖）", st_a["current_phase"] == 2,
+              "phase=%s" % st_a.get("current_phase"))
+        check("B 推进后 A 的 req_id 独立", st_a["req_id"] == rA)
+
+        # A/B 分区目录独立
+        check("A/B 分区目录独立",
+              os.path.isdir(os.path.join(workdir, ".qamaster", "requirement-review", rA)) and
+              os.path.isdir(os.path.join(workdir, ".qamaster", "requirement-review", rB)))
+
+        # MANIFEST 两行共存（requirement-review-out/MANIFEST.md）
+        rr_rows = _MANIFEST.load_rows(os.path.join(workdir, rr_out, "MANIFEST.md"), workflow="requirement-review")
+        rr_ids = [row.get("req_id") for row in rr_rows]
+        check("MANIFEST 两 req 行共存", rA in rr_ids and rB in rr_ids, "ids=%s" % rr_ids)
+
+        # status --all 列出两 req
+        rall = run(workdir, "status", "--all", "--workflow", "requirement-review", req_id=None, expect_rc=0)
+        check("status --all 列出两 req", rA in rall.stdout and rB in rall.stdout, rall.stdout[:400])
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

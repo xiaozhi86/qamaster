@@ -1,7 +1,7 @@
 # requirement-review — 需求文档多角色评审 Skill（Claude Code）
 
 > 版本：v0.2.0 · 更新：2026-08-18 · 版本变更明细见 `CHANGELOG.md`
-> Runtime 受控流程已随插件 v0.11.11 迁移（8 阶段状态机，见 §7）
+> Runtime 受控流程已随插件 v0.11.12 支持多需求并行评审（8 阶段状态机，见 §7）
 
 一套跑在 **Claude Code** 上的需求文档评审 Skill：输入需求文档（支持含图 / 扫描件 / Word / PDF / PPT / Excel），内部 7 个专家 Agent 并行评审，Review Master 汇总去重 + 冲突仲裁，经用户确认后自动重构出一份**高质量、可开发、可测试**的需求文档，并附评审问题详情清单。
 
@@ -191,7 +191,7 @@ SKILL.md 的「并行评审 + 汇总仲裁」9 阶段（0-9）已压缩为 **8 �
 
 **与 SKILL.md 9 阶段散文的映射**：阶段 2「结果汇总」+ 阶段 3「冲突检测」→ Phase 2；阶段 7「自动复查」+ 阶段 8「二次修复」→ Phase 6；其余一一对应。
 
-**与 case-design 的差异**：requirement-review 是「单次评审产出」，**无 MANIFEST 多需求索引、无知识总结后置动作、无 Excel 许可门**（末阶段=auto，gate PASS 即 DONE）；阶段门禁为确定性的文件存在性检查（req_id 无关的 glob），人工确认门（Phase 4）复用控制器 confirm 机制，模型不可绕过。无深度裁剪（`DEPTH_SKIPS` 全空，单次评审全阶段执行）。
+**与 case-design 的差异**：requirement-review 是「单次评审产出」，**有独立 MANIFEST 聚合索引（`requirement-review-out/MANIFEST.md`，列集与 case-design 不同）**，但**无知识总结后置动作、无 Excel 许可门**（末阶段=auto，gate PASS 即 DONE）；阶段门禁为确定性的文件存在性检查（req_id 绑定的 glob，`{req_id}` 占位经 `_fmt_cmd` 替换，多需求并发互不串扰），人工确认门（Phase 4）复用控制器 confirm 机制，模型不可绕过。无深度裁剪（`DEPTH_SKIPS` 全空，单次评审全阶段执行）。
 
 ---
 
@@ -252,6 +252,7 @@ python scripts/extract_text.py <文件路径> --full     # 全文（降本模式
 | `requirement-review-out/REQ_<需求标识>.md` | 预处理后的需求文档纯文本（第0阶段落盘，评审的唯一文本输入基准） |
 | `requirement-review-out/ReviewIssues_<需求标识>.md` | 7 Agent 并行评审问题清单（第1阶段落盘） |
 | `requirement-review-out/ReviewedReq_<需求标识>.md` | 重构后的最终需求文档（10 节齐全，第5阶段落盘） |
+| `requirement-review-out/MANIFEST.md` | 多需求聚合索引（Runtime 在 gate PASS 时自动维护，模型禁写） |
 
 > 需求标识由 Runtime `bootstrap` 预先派生（文件取首个 `#` 标题清洗，内联取首个非空行），所有产出物文件名直接用该标识，模型不派生 id。
 
@@ -267,7 +268,7 @@ requirement-review 走与 case-design 相同的 Runtime 受控流程（`runtime/
 - **人工确认门（Phase 4）不可绕过**：用户未明确确认前，Runtime 拒绝推进到 Phase 5。确认经 `confirm`，拒绝/反馈经 `reject`/`fail` 回退重走。
 - **门禁以机器判定为准**：auto 门的 PASS/FAIL 由文件存在性检查给出，模型禁止自证"已通过"。
 - **状态以 Runtime 为准**：每次接到用户新消息先 `status --req-id <id>` 恢复权威状态。
-- **无 MANIFEST 索引**：requirement-review 无多需求共享索引，控制器侧 `_manifest_side_effect` 对非 case-design workflow 直接跳过。
+- **有 MANIFEST 聚合索引**：requirement-review 有独立多需求共享索引 `requirement-review-out/MANIFEST.md`（列集：需求标识/需求名称/需求文档/评审问题清单/最终需求文档/状态/更新时间），由 Runtime 在 Phase 0/1/5/7 gate PASS 时自动维护（模型禁止 Write/Edit）；支持 `manifest list`/`manifest reconcile`，多需求并发评审互不覆盖。
 
 > 完整铁律见 `skills/case-design/SKILL.md` §「六条铁律」——requirement-review 与 case-design 共用同一套铁律（状态/门禁/业务规范/MANIFEST/KB 五条 + gate FAIL 自查通道）。
 
@@ -333,3 +334,6 @@ requirement-review/
 
 **Q6：和 case-design 是什么关系？**
 两者是同一插件（qamaster）下两个独立 skill，走同一套 Runtime 通用 workflow 引擎：`requirement-review` 负责「需求评审 → 产出高质量需求文档」，`case-design` 负责「需求文档 → 测试用例」。评审后的最终需求文档可直接作为 case-design 的输入。
+
+**Q7：能同时评审多个需求吗？**
+能。同一工程可对多个需求分别 `start --req-id <id>` 并发评审，状态按 `(requirement-review, req_id)` 分区落盘互不覆盖，门禁 req_id 绑定互不串扰，产出物与 MANIFEST 聚合索引按需求标识隔离。

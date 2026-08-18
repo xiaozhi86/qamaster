@@ -212,8 +212,8 @@ def register():
 - `runtime/requirement_review_phases.py` — 8 阶段（0-7）轻量状态机，把 SKILL.md 的「并行评审 + 汇总仲裁」9 阶段压缩为受控阶段：
   0 输入预处理与需求定位(auto) → 1 并行评审(auto) → 2 结果汇总去重+冲突检测(auto·无门禁) → 3 优化方案总览(auto·无门禁) → **4 用户确认(confirm)** → 5 需求文档重构(auto) → 6 自动复查+二次修复(auto·无门禁) → 7 最终输出(auto·last)。`DEPTH_SKIPS` 全空（单次评审，无深度裁剪）。
 - `runtime/workflows/requirement_review.py` — 把阶段机包成 `WorkflowSpec` 并显式 `register()`；`_EXTRA_PHASE4` 给 Phase 4 契约卡追加 requirement-review 专属确认话术。
-- 与 case-design 的差异：无 MANIFEST 索引、无知识总结后置动作、无 Excel 许可门（末阶段=auto）；门禁为确定性文件存在性检查（`exists_any`：`REQ_*.md` / `ReviewIssues_*.md` / `ReviewedReq_*.md`）；人工确认门（Phase 4）复用控制器 `confirm` 机制，模型不可绕过。
-- 控制器侧 `_manifest_side_effect` 增加 `if spec.name != "case-design": return` 护栏（v0.11.10 缺陷4）——无 MANIFEST 的 workflow 不会被 MANIFEST 副作用误写。
+- 与 case-design 的差异：无知识总结后置动作、无 Excel 许可门（末阶段=auto）；门禁为确定性文件存在性检查（`exists_any`：`REQ_{req_id}.md` / `ReviewIssues_{req_id}.md` / `ReviewedReq_{req_id}.md`，v0.11.12 起 req_id 绑定，此前为 `*` glob）；人工确认门（Phase 4）复用控制器 `confirm` 机制，模型不可绕过。
+- 控制器侧 `_manifest_side_effect` 由「`if spec.name != "case-design": return` 护栏」（v0.11.10 缺陷4）演进为按 workflow 分派（v0.11.12）：case-design 走 `_case_design_manifest_side_effect`（原逻辑原样搬入），requirement-review 走 `_rr_manifest_side_effect`（Phase 0/1/5/7 写 `requirement-review-out/MANIFEST.md`，列集独立）。
 
 > requirement-review 的 8 阶段明细见 §6.4；完整阶段定义见 `runtime/requirement_review_phases.py`（单一事实源）。
 
@@ -284,7 +284,7 @@ patch_directives[], history[], created_at, updated_at,
 | 6 | 自动复查 + 二次修复 | auto | 内存（无门禁） |
 | 7 | 最终输出 | auto | `exists_any ReviewedReq_*.md` + `exists_any ReviewIssues_*.md`（last） |
 
-无 MANIFEST 索引、无知识后置、无许可门；`DEPTH_SKIPS` 全空；门禁均为 req_id 无关的文件存在性 glob。
+有独立 MANIFEST 聚合索引（`requirement-review-out/MANIFEST.md`，v0.11.12 起）、无知识后置、无许可门；`DEPTH_SKIPS` 全空；门禁均为 req_id 绑定的文件存在性 glob（`{req_id}` 占位，v0.11.12 起）。
 
 ---
 
