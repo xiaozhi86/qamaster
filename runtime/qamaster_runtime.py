@@ -1240,7 +1240,7 @@ def _card(st, phase, spec, extra="", correction_context=None):
         if relb:
             lines.append("")
             lines.append(relb)
-        # v0.11.9: 反应式注入 ##RELEVANT_EXPERT_KB##（失败定向专家方法论，阶段适用+endorsed-only）
+        # v0.11.9: 反应式注入 ##RELEVANT_EXPERT_KB##（失败定向专家方法论，阶段适用+endorsed 或 occ≥3）
         rele = _relevant_expert_on_fail(st, phase, correction_context, spec)
         if rele:
             lines.append("")
@@ -1796,8 +1796,8 @@ def cmd_gate(a):
         if relb:
             print("")
             print(relb)
-        # v0.11.9: 反应式专家方法论定向——失败上下文查 expert KB（阶段适用+endorsed-only）
-        # No-op：无 KB_expert / 无 endorsed / 错阶段 / 无命中 → 不打印
+        # v0.11.9: 反应式专家方法论定向——失败上下文查 expert KB（阶段适用+endorsed 或 occ≥3）
+        # No-op：无 KB_expert / 无 endorsed 且 occ<3 / 错阶段 / 无命中 → 不打印
         rele = _relevant_expert_on_fail(st, phase, fail_detail, spec)
         if rele:
             print("")
@@ -1969,8 +1969,8 @@ def cmd_fail(a):
     print("按 output_write.md 修改流程起点判定：从本阶段起依次顺序执行至 Phase 14，不得跳阶段；")
     print("修改范围限定（只改问题点，无问题用例原样保留）。")
     # 1a·抽象信号提示（v0.11.11 升级为约束指令）：命中可抽象方法信号词时，约束模型必须跑
-    # kb extract-expert 提炼落 draft。置位 pending_expert_extraction 由 _flag_expert_candidate 完成；
-    # 此段仅 stdout 展示约束指令（卡片交付摘要回显 pending 状态）。
+    # kb extract-expert 提炼落 draft。pending_expert_extraction 由 _flag_expert_candidate 置位
+    # （软强制·非硬门——设计 §8.3：提炼失败不阻塞交付）；此段 stdout 约束指令是唯一强提醒面。
     _hint = _abstraction_hint(a.reason)
     if _hint:
         print("  [约束指令] 本阶段纠正命中可抽象方法信号(%s)。完成本阶段前必须执行：" % _hint)
@@ -2030,8 +2030,8 @@ def cmd_patch(a):
     print("  原因: %s" % a.reason)
     print("  (不回退 current_phase=%d；指令将由当前/后续阶段契约卡的 ##PATCH_FEEDBACK## 段注入)" % cur)
     # 1a·抽象信号提示（v0.11.11 升级为约束指令）：命中可抽象方法信号词时，约束模型必须跑
-    # kb extract-expert 提炼落 draft。置位 pending_expert_extraction 由 _flag_expert_candidate 完成；
-    # 此段仅 stdout 展示约束指令（卡片交付摘要回显 pending 状态）。
+    # kb extract-expert 提炼落 draft。pending_expert_extraction 由 _flag_expert_candidate 置位
+    # （软强制·非硬门——设计 §8.3：提炼失败不阻塞交付）；此段 stdout 约束指令是唯一强提醒面。
     _hint = _abstraction_hint(a.reason)
     if _hint:
         print("  [约束指令] 本阶段纠正命中可抽象方法信号(%s)。完成本阶段前必须执行：" % _hint)
@@ -2328,7 +2328,7 @@ def cmd_kb(a):
         if (a.kind or "lesson") == "expert":
             # expert 检索路径（每阶段每轮·含自检轮）：预防式 _prior_expert_kb_block 与
             # 反应式 _relevant_expert_on_fail 双 helper（v0.11.9 起补齐反应式失败定向），
-            # 均走同一 expert 过滤（applicable_phases 适用门 + endorsed-only 信任门 + 相关性门）。
+            # 均走同一 expert 过滤（applicable_phases 适用门 + endorsed 或 occ≥3 信任门 + 相关性门）。
             if a.context:
                 block = _relevant_expert_on_fail(st_q, phase, a.context, spec, top=a.top or 3)
                 _print_block("RELEVANT_EXPERT_KB（反应式·失败定向·会注入）", block or "(无命中)")
@@ -2472,7 +2472,9 @@ def cmd_kb(a):
         rec = {
             "kind": "expert", "phase": "", "dimension": a.dimension or "通用",
             "error_type": "方法提炼", "module": a.module or "",
-            "source_req": a.source_req or "manual", "captured": kb_store._today(),
+            # 优先 --req-id（fail/patch 强制提炼的约束指令传入 req_id）作来源需求——
+            # 使同 category|principle 跨独立需求累积 occ 达 ≥3 自动生效（设计 §3 项3 核心闭环）。
+            "source_req": (a.req_id or a.source_req or "manual"), "captured": kb_store._today(),
             "raw_text": a.principle.strip(), "status": "draft",
             "occurrences": 1, "trigger": trig,
             "category": a.category.strip(), "applicable_phases": ap_list,

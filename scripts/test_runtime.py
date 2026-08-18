@@ -477,6 +477,7 @@ def main():
     test_expert_reactive_on_fail()
     # v0.11.11（专家方法论自动沉淀）回归：extract-expert 忽略门/落盘/域词并入 + 一键背书 + 置位
     test_extract_expert_ignore_gate_and_drop()
+    test_extract_expert_occ_accumulates_cross_reqs()
     test_endorse_all_drafts()
     test_flag_expert_candidate_sets_state()
 
@@ -1413,7 +1414,7 @@ def test_kb_fingerprint_coarse_recurrence():
 
 def test_kb_preventive_dual_gate():
     """4 条种子：endorsed+surface≥2 / draft occ=1+surface≥2[不注入] / 错阶段 / 被废止。仅 endorsed 注入。"""
-    print("\n[kb] 预防式双门（相关+信任）：仅 endorsed 那条注入")
+    print("\n[kb] 预防式双门（相关+信任）：仅 endorsed（或 occ≥3）那条注入")
     import qamaster_runtime as rt
     import kb_store
     from case_design import spec as _cd_spec
@@ -2073,9 +2074,9 @@ def test_kb_business_separate_from_lessons():
 
 
 # =============================================================================
-# KB 专家方法论库（expert KB）· 7 项自证（v0.11.5：闭合 draft→endorse→注入 闭环）
+# KB 专家方法论库（expert KB）· 自证（v0.11.5：闭合 draft→endorse→注入 闭环）
 # 约束：No-op 基线（无 KB_expert.md → PRIOR_EXPERT_KB='' + METHODOLOGY_CAPTURE 逐字节等于静态基串，
-#   护 150/0）/ 信任门 endorsed-only（无 occ≥3 逃生口——错方法论污染所有未来设计）/ 适用性门
+#   护 150/0）/ 信任门 endorsed 或 occ≥3（v0.11.11 重开逃生口——错方法论污染所有未来设计）/ 适用性门
 #   （phase∈applicable_phases）/ 相关性门（surface≥2 或 module 标题命中）/ 模型禁写 /
 #   _pending_endorse_drafts 故意不套适用性门（endorse 是跨阶段人工动作，服务可见性而非注入）。
 # =============================================================================
@@ -2158,7 +2159,7 @@ def test_expert_draft_blocked_trust_gate():
         block = rt._prior_expert_kb_block(st, phase6, spec)
         check("draft occ=1 过适用+相关 → PRIOR_EXPERT_KB 仍空（信任门阻断）",
               block == "", "draft occ=1 不应注入: %s" % block)
-        # v0.11.11: occ=3（draft 累积 ≥3 独立需求命中）→ 自动生效注入（无 occ≥3 逃生口反转）
+        # v0.11.11: occ=3（draft 累积 ≥3 独立需求命中）→ 自动生效注入（occ≥3 逃生口重开）
         rec3 = _kb_expert_rec(
             fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
             "draft", 3, ["全部条件", "条件1", "条件2", "判定表"],
@@ -2341,6 +2342,37 @@ def test_extract_expert_ignore_gate_and_drop():
         check("extract-expert 自动并入 REQ 域词（条件1/条件2/条件3）",
               "条件1" in trig and "条件2" in trig and "条件3" in trig,
               "trigger=%s" % trig)
+        # source_req 取自 --req-id（非 manual）→ 跨独立需求 occ 可累积（设计 §3 项3 occ≥3 自动生效）
+        check("extract-expert source_req 取自 --req-id", recs[0].get("source_req") == rid,
+              "source_req=%s" % recs[0].get("source_req"))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_extract_expert_occ_accumulates_cross_reqs():
+    """同 category|principle 经两个不同 --req-id 走 extract-expert → 合并为一条 occ=2、source_reqs 含两需求。"""
+    print("\n[kb-expert] extract-expert 跨独立需求 occ 累积（occ≥3 自动生效的前提）")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-occ-")
+    try:
+        for rid in ("expert-occ-A", "expert-occ-B"):
+            _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+            r = run(workdir, "kb", "extract-expert",
+                    "--reason", "边界只测 min/max 漏 min+1",
+                    "--req-id", rid,
+                    "--category", "边界值",
+                    "--principle", "边界内邻接值须独立用例",
+                    "--applicable-phases", "6/8",
+                    req_id=rid, expect_rc=0)
+            check("extract-expert（%s）rc=0" % rid, r.returncode == 0,
+                  "rc=%d\n%s" % (r.returncode, r.stdout[:300]))
+        recs = kb_store.load_records(_kb_expert_path_of(workdir))
+        check("同指纹合并为一条", len(recs) == 1, "recs=%d" % len(recs))
+        check("occ=2（跨两独立需求累积）", recs[0].get("occurrences") == 2,
+              "occ=%s" % recs[0].get("occurrences"))
+        check("source_reqs 含两需求",
+              set(recs[0].get("source_reqs", [])) == {"expert-occ-A", "expert-occ-B"},
+              "source_reqs=%s" % recs[0].get("source_reqs"))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

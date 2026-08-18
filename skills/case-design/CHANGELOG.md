@@ -19,7 +19,7 @@
 **变更文件**：
 - `runtime/qamaster_runtime.py`：信任门两行重开 + docstring；`_flag_expert_candidate` + `cmd_fail`/`cmd_patch` 挂接；`_EXPERT_CATEGORIES` 词表常量；`cmd_kb` 增 `extract-expert` + `endorse --all-drafts`；argparse 增 `extract-expert` action / `--reason` / `--all-drafts`。
 - `runtime/kb_store.py`：`endorse_all(path, kind=None)` 批量背书；`_HEADER_LINES_EXPERT` 信任门表述更新。
-- `scripts/test_runtime.py`：翻转 `test_expert_draft_blocked_trust_gate`（occ=3 现注入）；新增 occ≥3 自动生效 / occ=1 仍阻断 / extract-expert 忽略门 / endorse --all-drafts 测试。
+- `scripts/test_runtime.py`：翻转 `test_expert_draft_blocked_trust_gate`（occ=3 现注入）；新增 occ≥3 自动生效 / occ=1 仍阻断 / extract-expert 忽略门+落盘+域词并入+source_req 取自 --req-id / 跨独立需求 occ 累积 / _flag_expert_candidate 置位 / endorse --all-drafts 测试。
 - `skills/case-design/references/expert_kb.md`：§五 信任门表 / §六 三门过滤 / §一 捕获时机 / §八 命令速查同步。
 - `skills/case-design/SKILL.md`：铁律 #5 信任门表述 + extract-expert/一键背书命令同步。
 - `skills/case-design/CHANGELOG.md`：本说明。
