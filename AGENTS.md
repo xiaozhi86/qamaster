@@ -16,7 +16,7 @@
 ## 产出位置
 
 - case-design → 项目根的 `case-design-out/`（自动创建）；**Runtime 控制层状态在 `.qamaster/case-design/<需求标识>/state.json`**（按需求标识分区隔离，多需求互不覆盖）。`case-design-out/MANIFEST.md` 为多需求共享索引，由 Runtime 在 gate PASS 时自动维护。
-- requirement-review → 项目根的 `requirement-review/`。
+- requirement-review → 项目根的 `requirement-review-out/`（自动创建）；**Runtime 控制层状态在 `.qamaster/requirement-review/<需求标识>/state.json`**（按需求标识分区隔离，多需求互不覆盖）。
 
 ## 依赖
 

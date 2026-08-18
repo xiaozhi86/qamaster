@@ -1,5 +1,7 @@
 # case-design — 企业级测试用例设计 Skill（Claude Code）
 
+> 版本：v0.11.10 · 更新：2026-08-18 · 版本变更明细见 `CHANGELOG.md`
+
 一套跑在 **Claude Code** 上的测试用例设计 Skill：输入需求文档，自动走「需求定位 → 澄清 → 规格建模 → 风险分析 → 方法匹配 → 测试点 → 用例生成 → 去重 → 覆盖率 → 自查 → 写入 → 人工审核 → 知识总结 → Excel」全流程，产出 Markdown / Excel 测试用例、澄清台账、知识总结，并维护多需求索引。
 
 采用**渐进式加载**：常驻核心 ~6K tokens，各阶段细则按需读取 `references/`，回读核对与知识综合用 `scripts/` 脚本返回摘要，显著降低每次请求的 token 消耗。
@@ -43,7 +45,7 @@
 | **openpyxl** | 仅生成 Excel 时需要 | 缺失时 Skill 会自动尝试 `pip install` 并兜底报错 |
 | **操作系统** | Windows / macOS / Linux 均可 | Windows 用 `python`，macOS/Linux 用 `python3` |
 
-> 四个自带脚本（`scripts/verify_md.py`、`scripts/verify_cases.py`、`scripts/verify_knowledge.py`、`scripts/project_cases.py`）只用 Python 标准库，**无 openpyxl 也能运行**（只是不能产出 Excel）。
+> 自带脚本中，`verify_md.py`、`verify_cases.py`、`verify_knowledge.py`、`verify_kb.py`、`project_cases.py` 只用 Python 标准库，**无 openpyxl 也能运行**（只是不能产出 Excel）。`gen_excel.py` 依赖 openpyxl（缺失时自动 `pip install` 兜底）；`extract_doc.py` 处理非 Markdown 文档时按文件类型需对应第三方库/OCR 引擎（`.docx`/`.pdf`/`.pptx`/`.xlsx`/`.png` 等，缺失时打印 `[FAIL]` 并硬阻断要求用户补 Markdown/纯文本，不静默降级）。
 
 ---
 
@@ -232,6 +234,9 @@ Skill 有固定输入协议，最简形式如下（直接粘贴给 Claude）：
 | **技术实现摘要** | 否（开发提供） | 存储设计/接口契约/状态机实现/异常重试补偿——提供后可在用例中直接断言真实表/字段/Key，闭合"禁止杜撰存储信息"（见 SKILL.md §5） |
 | **业务规则与历史缺陷** | 否（业务/产品提供） | 隐含规则/合规红线/运营异常/真实边界——补隐含规则与运营现实，闭合"禁止脑补业务规则" |
 | **历史缺陷摘要** | 否（缺陷反哺） | 从 bug tracker 导出的历史缺陷，每条强制映射为≥1 用例覆盖，是最高发现力来源 |
+| **设计文档** | 否（开发/架构提供） | 技术方案、调用链路、字段映射、错误处理、测试要点章节；提供后第0阶段整文落盘 `DESIGN_<需求标识>.md`，其"测试要点"章节成为 #8-H 反向追溯硬门基准（每条须被用例覆盖）。含接口描述（接口名/facade/方法签名/入参出参/错误码/@Service/@RestfulApi/Dubbo 方法）时亦触发契约驱动分支 |
+
+> **设计文档输入（v0.8.0·可选通道）**：用 `<<<设计文档开始>>>` / `<<<设计文档结束>>>` 包裹，与需求文档并列。提供后：① 第0阶段整文落盘 `case-design-out/DESIGN_<需求标识>.md`（非 .md 文件路径须经 `scripts/extract_doc.py --kind design` 落盘）；② 第2阶段覆盖矩阵新增"8.11 设计文档测试要点覆盖"维度；③ 第7阶段测试点建模须引用设计文档测试要点；④ 第8/10/13阶段 `#8-H` 反向设计文档测试要点追溯（漏覆盖即 exit=1）。设计文档无任何可追溯章节时，须从正文/字段映射/异常处理补建 `## 测试要点` 章节，不得 SKIP。
 
 ### 6.4 配合 Skill 的交互流程
 
@@ -286,12 +291,15 @@ Skill 会跳过完整设计流程，先做源 .md 一致性校验，通过后直
 
 | 文件 | 命名 | 内容 |
 |---|---|---|
-| 索引 | `case-design-out/MANIFEST.md` | 所有需求的快速定位入口（一个文件，跨需求） |
+| 索引 | `case-design-out/MANIFEST.md` | 所有需求的快速定位入口（一个文件，跨需求，由 Runtime 自动维护，模型禁写） |
 | 需求文档 | `case-design-out/REQ_<需求标识>.md` | 保存你提供的需求文档（**强制**，第0阶段落盘；#4/#5 反向追溯的唯一基准，不落盘则"完整覆盖"承诺失效） |
+| 设计文档 | `case-design-out/DESIGN_<需求标识>.md` | 你提供的开发/架构设计文档（可选通道，第0阶段整文落盘；#8-H 反向设计文档测试要点追溯基准） |
 | 澄清台账 | `case-design-out/Clarification_Ledger_<需求标识>.md` | 澄清问答，跨会话保留，避免重复提问 |
 | 测试用例 | `case-design-out/TestCases_<需求标识>.md`（默认单文件）/ `case-design-out/TestCases_<需求标识>_PARTn.md`（压缩后仍超预算才拆） | 15 列用例表；默认单文件，仅超 24000 token 才拆最小 PART |
 | 测试用例 Excel | `case-design-out/TestCases_<需求标识>.xlsx` | 与 .md 字段完全一致，用户确认后生成 |
 | 知识总结 | `case-design-out/Knowledge_<需求标识>.md` | 13 维度业务知识沉淀，审核通过后生成 |
+
+> 另有三类 **Runtime 独占维护的跨需求共享知识库**（模型禁止 Write/Edit，非单需求产出物；`MANIFEST.md` 已在上面"索引"行列明）：`case-design-out/KB_lessons.md`（自我进化经验库·纠正原话）、`case-design-out/KB_business.md`（业务历史知识库·聚合 Knowledge 元数据）、`case-design-out/KB_expert.md`（专家方法论库·从纠正中提炼的通用方法）。三者由 Runtime 在 `FileLock` 下维护，经 `python runtime/qamaster_runtime.py kb <action>` 沉淀/背书/检索；模型只"读到" Runtime 注入的 `##PRIOR_LESSONS##`/`##RELEVANT_LESSONS##`/`##PRIOR_BUSINESS_KB##`/`##PRIOR_EXPERT_KB##` 软上下文并据此修正（详见 SKILL.md §5）。无 KB 文件时输出与无 KB 逐字节一致。
 
 > 用例 ID 通过功能缩写区分模块（如 `TestCases_订单创建-20260702_CREATE_001`、`..._PAY_001`）。**默认写入同一个** `case-design-out/TestCases_<需求标识>.md`；仅合并体压缩后仍 > 24000 token 才拆最小 PART `case-design-out/TestCases_<需求标识>_PARTn.md`（写前规模评估，不按模块拆）。
 
@@ -329,8 +337,8 @@ Skill 会在**项目根目录下的 `case-design-out/` 子目录**写 `TestCases
 
 ### 8.5 跨会话状态保留
 
-- `case-design-out/` 下的 `MANIFEST.md`、`Clarification_Ledger_*.md`、`Knowledge_*.md` **跨会话有效**。
-- 新会话处理同一需求时，Skill 第0阶段会读入索引和台账，**不会重复提问已解决问题**。
+- `case-design-out/` 下的 `MANIFEST.md`、`Clarification_Ledger_*.md`、`Knowledge_*.md`、`KB_lessons.md`、`KB_business.md`、`KB_expert.md` **跨会话有效**。
+- 新会话处理同一需求时，Skill 第0阶段会读入索引和台账，**不会重复提问已解决问题**；跨需求复用经验/业务/方法论时，第0阶段起注入 `##PRIOR_LESSONS##`/`##PRIOR_BUSINESS_KB##`，每阶段每轮注入 `##PRIOR_EXPERT_KB##`（自我进化知识系统的消费侧）。
 - 若换了项目根目录（`case-design-out/` 下文件不存在），视为首次处理，会重新澄清——属正常行为。
 
 ### 8.6 完整输出与门禁
@@ -360,26 +368,30 @@ case-design/
 ├── SKILL.md                    # 常驻核心（frontmatter + 主流程 + ref 索引）
 ├── README.md                   # 本说明
 ├── references/                 # 各阶段细则（按需读取，不常驻）
-│   ├── phase0_manifest.md      # 第0阶段：需求定位 + MANIFEST 索引管理
+│   ├── phase0_manifest.md      # 第0阶段：需求定位 + MANIFEST 索引管理 + 非 Markdown 解析落盘
 │   ├── clarification.md        # 第1阶段：澄清机制 + 澄清台账
-│   ├── coverage.md             # 第2/7阶段：覆盖矩阵 + 需求/测试点维度
-│   ├── modeling.md             # 第3-4/8阶段：SDD + G/W/T + 字段规范
+│   ├── coverage.md             # 第2/7阶段：覆盖矩阵 + 需求/测试点/设计文档测试要点维度
+│   ├── modeling.md             # 第3-4/8阶段：SDD + G/W/T + 字段规范 + 接口契约模型
 │   ├── risk.md                 # 第5阶段：风险优先级 P0-P3
 │   ├── methods.md              # 第6阶段：方法动态匹配决策表
 │   ├── quality_rules.md        # 第8阶段：避坑 + AI友好 + 存储保护
 │   ├── dedup_coverage.md       # 第9-10阶段：去重 + 覆盖率 + 停止条件 + 规模分级
-│   ├── selfcheck.md            # 第11阶段：15项自查（含断言完整性/对抗生成遍/业务行为来源追溯）+ 自修/阻断决策
+│   ├── selfcheck.md            # 第11阶段：自查（含断言完整性/对抗生成遍/业务行为来源追溯）+ 自修/阻断决策
 │   ├── output_write.md         # 第12-13阶段：完整输出 + 写入机制 + 修改流程 + 临时文件清理
 │   ├── review_gate.md          # 第14阶段：人工审核门禁 + 质量门禁 checkbox
 │   ├── excel.md                # Excel 输出协议 + 脚本生成机制 + 校验
 │   ├── safety_perf.md          # 安全 / 性能 / 兼容 / 本地化（按需）
 │   ├── knowledge.md            # 知识总结 13 维度 + 生成机制 + 范例
+│   ├── expert_kb.md            # 专家知识库：用户纠正分类决策树 + 可提炼判定 + endorse 流程
 │   └── example.md              # 端到端范例（不确定格式时读）
 └── scripts/                    # 降本脚本（Skill 自动调用）
     ├── verify_md.py            # 回读核对·结构：返回行数/表头/末行/列宽摘要，不把整份 .md 读进上下文
-    ├── verify_cases.py         # 回读核对·内容与覆盖（文件入口）+ 第8阶段出口 gate 内存入口（run_inmemory，写前零文件操作）：枚举/四段/固定列/等级/ID + 断言/存储/重复/过度设计/需求追溯 + 覆盖统计与规则/风险/测试点追溯（ID精确+token兜底）
+    ├── verify_cases.py         # 回读核对·内容与覆盖（文件入口）+ 第8阶段出口 gate 内存入口（run_inmemory，写前零文件操作）：枚举/四段/固定列/等级/ID + 断言/存储/重复/过度设计/需求追溯 + 覆盖统计与规则/风险/测试点/设计文档测试要点追溯（ID精确+token兜底）
     ├── verify_knowledge.py     # 知识总结结构校验：13维度齐全+顺序/元数据/来源统计
-    └── project_cases.py        # 知识综合：抽 5 列紧凑投影，不把整份 15 列 .md 读进上下文
+    ├── verify_kb.py            # KB 三库结构校验：记录字段/ID 前缀/状态合法性
+    ├── project_cases.py        # 知识综合：抽 5 列紧凑投影，不把整份 15 列 .md 读进上下文
+    ├── gen_excel.py            # Excel 生成：openpyxl 脚本（缺失时自动 pip install 兜底）+ 结构/数据完整性校验
+    └── extract_doc.py          # 非 Markdown 需求/设计文档解析落盘（.docx/.pdf/.pptx/.xlsx/.png 等，OCR 降级即硬阻断）
 
 case-design/config/             # 领域配置（可选，方向3）
 └── domain_config.json          # 业务锚点/关键词维度/异常子类/过度设计豁免类型，缺失用内置默认
