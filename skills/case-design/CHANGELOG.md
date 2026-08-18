@@ -23,6 +23,7 @@
 - `runtime/requirement_review_phases.py`：5 处 gate pattern req_id 绑定 + docstring。
 - `scripts/test_runtime.py`：新增 `test_requirement_review_concurrent_reqs`（门禁隔离回归）+ 改单 req 测试的 MANIFEST 断言。
 - `skills/requirement-review/{README.md,SKILL.md}` + 根 `README.md` + 本说明同步。
+- `.claude-plugin/plugin.json` + `marketplace.json`：版本字段 `1.0.0` → `1.0.1`（插件版本随本次发布递增）。
 
 ---
 
