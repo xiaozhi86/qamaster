@@ -633,6 +633,34 @@ def _flag_expert_candidate(st, reason):
     return bool(hit)
 
 
+def _build_expert_rec(a, workdir, spec, status_default="draft"):
+    """构建 expert 记录 dict（add-expert / extract-expert 共享，消除双写漂移·设计 §4.2）。
+
+    v0.11.11（项2）：抽公共落盘逻辑——source_req 优先 --req-id（fail/patch 约束指令传入
+    req_id 作来源需求），使同 category|principle 跨独立需求累积 occ 达 ≥3 自动生效
+    （设计 §3 项3 核心闭环）；触发词自动并入 REQ 域信号词（护 RC-d/RC-f 词域错配不回归）。
+    add-expert 保留人肉精调（status 可 --status 直接 endorsed），extract-expert 恒 draft。
+    """
+    trig = []
+    if a.trigger:
+        trig = _split_tokens(a.trigger)
+    sig = _req_signal_hits(_req_corpus_text(workdir, spec, a.req_id or a.source_req or ""))
+    if sig:
+        trig = sorted(set(trig) | set(sig))
+    ap_list = []
+    if a.applicable_phases:
+        ap_list = [int(x) for x in _split_tokens(a.applicable_phases) if x.isdigit()]
+    return {
+        "kind": "expert", "phase": "", "dimension": a.dimension or "通用",
+        "error_type": "方法提炼", "module": a.module or "",
+        "source_req": (a.req_id or a.source_req or "manual"), "captured": kb_store._today(),
+        "raw_text": a.principle.strip(), "status": status_default,
+        "occurrences": 1, "trigger": trig,
+        "category": a.category.strip(), "applicable_phases": ap_list,
+        "principle": a.principle.strip(),
+    }
+
+
 def _render_lessons_block(cands, tag, footer=""):
     """渲染经验块（人类原话 verbatim）。cands=[(score, rec), ...]，已排序截断。"""
     if not cands:
@@ -949,7 +977,8 @@ def _relevant_expert_on_fail(st, phase, fail_context, spec, top=3):
 # RC-a 修复因复制注入门而自我挫败）。endorse 是**跨需求的人工判断**，"这条方法论通不通用"
 # 与"相不相关本次 REQ"是两个问题；机器词面预筛不该挡住人眼。暴露给人看（本 helper）与
 # 注入（_prior_expert_kb_block，相关性门保留）从此解耦。
-# 现规则：非 superseded 且非 endorsed 的 expert draft 全列（top 截断防噪声，不分先后）。
+# 现规则：非 superseded 且非 endorsed 且 occ<3 的 expert draft 全列（top 截断防噪声，不分先后）；
+# occ≥3 已自动生效（信任门 endorsed 或 occ≥3）无需人背书，不再重复提示（v0.11.11）。
 # 不触碰契约卡 PRIOR_EXPERT_KB 渲染路径（信任门不松、draft 仍不注入）。
 # No-op：无 KB_expert.md / 无 draft → 返 []（护 150/0：mcap 空列表短路 → 逐字节等于静态基串）。
 def _pending_endorse_drafts(st, phase, spec, top=5):
@@ -964,6 +993,9 @@ def _pending_endorse_drafts(st, phase, spec, top=5):
         # 信任门：此处故意跳过——纳入 draft（这正是要暴露给人 endorse 的对象）
         if r.get("status") == "endorsed":
             continue  # 已 endorsed 已注入 PRIOR_EXPERT_KB，不再重复提示
+        # v0.11.11: occ≥3 已自动生效（信任门 endorsed 或 occ≥3）→ 无需人背书，跳过
+        if (r.get("occurrences", 1) or 1) >= 3:
+            continue
         # v0.11.6: 不套相关性门（词域错配死锁根因，见上）——draft 无条件暴露给人
         cands.append(r)
         if len(cands) >= top:
@@ -2410,36 +2442,15 @@ def cmd_kb(a):
             _die("kb add-expert 需 --category <方法类目>（如 边界值/状态迁移/契约测试）")
         if not a.principle:
             _die("kb add-expert 需 --principle \"<方法原则>\"（脱业务后仍成立的通用原则）")
-        trig = []
-        if a.trigger:
-            trig = _split_tokens(a.trigger)
-        # v0.11.6（终极修复 RC-d）：自动并入来源 REQ 的域信号词（词域错配根因）。
-        # 方法论术语给人读、REQ 域实词给注入门 surface 匹配——不补则 endorsed 后仍恒 surface<2。
-        # 与人工 trigger 并集去重；upsert 指纹合并时 trigger 亦取并集（跨需求累积不丢）。
-        # 来源：优先当前 --req-id（审核门上下文），退化 --source-req；无 REQ 文件 → 不添。
-        # v0.11.8（RC-f）：改扫 REQ+台账语料——结构性规则常经澄清引入（台账 Q32 引入
-        # AND 门），只扫 REQ 正文则 1./2./3. 编号条件无法归一并入，写入侧仍词域错配。
-        sig = _req_signal_hits(_req_corpus_text(workdir, spec, a.req_id or a.source_req or ""))
-        if sig:
-            trig = sorted(set(trig) | set(sig))
-        ap_list = []
-        if a.applicable_phases:
-            ap_list = [int(x) for x in _split_tokens(a.applicable_phases)
-                       if x.isdigit()]
-        rec = {
-            "kind": "expert", "phase": "", "dimension": a.dimension or "通用",
-            "error_type": "方法提炼", "module": a.module or "",
-            "source_req": a.source_req or "manual", "captured": kb_store._today(),
-            "raw_text": a.principle.strip(), "status": a.status or "draft",
-            "occurrences": 1, "trigger": trig,
-            "category": a.category.strip(), "applicable_phases": ap_list,
-            "principle": a.principle.strip(),
-        }
+        # v0.11.11（项2·共享落盘逻辑）：抽 _build_expert_rec 统一 source_req（优先 --req-id）/
+        # 触发词 REQ 域词并入/applicable_phases 解析，消除与 extract-expert 的双写漂移。
+        # （RC-d/RC-f 词域错配根治逻辑已并入 helper，见 _build_expert_rec docstring。）
+        rec = _build_expert_rec(a, workdir, spec, status_default=(a.status or "draft"))
         with locking.FileLock(p, timeout=30):
             fp = kb_store.upsert_lesson(p, rec)
         _audit(a.req_id, "kb_add_expert", detail="id=%s cat=%s" % (fp, rec["category"]))
         print("KB ADD-EXPERT: OK — id=%s（指纹去重：同 category|principle 已合并则 occ++）" % fp)
-        print("  draft 状态——未 endorse 不注入；人工 `kb endorse --kind expert --id %s` 后进 ##PRIOR_EXPERT_KB##" % fp)
+        print("  draft 状态——未 endorse 且 occ<3 不注入；occ≥3 自动生效，或人工 `kb endorse --kind expert --id %s` 后进 ##PRIOR_EXPERT_KB##" % fp)
         _verify_kb_after_write(spec, p)
         return
     if action == "extract-expert":
@@ -2458,28 +2469,9 @@ def cmd_kb(a):
                  % ("/".join(_EXPERT_CATEGORIES), a.category.strip()))
         if not a.principle:
             _die("kb extract-expert 需 --principle \"<脱业务原则>\"（非空）")
-        trig = []
-        if a.trigger:
-            trig = _split_tokens(a.trigger)
-        # v0.11.11: 自动并入 REQ 域词（同 add-expert，护 RC-d/RC-f 不回归）。
-        sig = _req_signal_hits(_req_corpus_text(workdir, spec, a.req_id or a.source_req or ""))
-        if sig:
-            trig = sorted(set(trig) | set(sig))
-        ap_list = []
-        if a.applicable_phases:
-            ap_list = [int(x) for x in _split_tokens(a.applicable_phases)
-                       if x.isdigit()]
-        rec = {
-            "kind": "expert", "phase": "", "dimension": a.dimension or "通用",
-            "error_type": "方法提炼", "module": a.module or "",
-            # 优先 --req-id（fail/patch 强制提炼的约束指令传入 req_id）作来源需求——
-            # 使同 category|principle 跨独立需求累积 occ 达 ≥3 自动生效（设计 §3 项3 核心闭环）。
-            "source_req": (a.req_id or a.source_req or "manual"), "captured": kb_store._today(),
-            "raw_text": a.principle.strip(), "status": "draft",
-            "occurrences": 1, "trigger": trig,
-            "category": a.category.strip(), "applicable_phases": ap_list,
-            "principle": a.principle.strip(),
-        }
+        # v0.11.11（项2·共享落盘逻辑）：与 add-expert 同走 _build_expert_rec，source_req 优先
+        # --req-id（occ 跨独立需求累积的前提）· 触发词并入 REQ 域词 · applicable_phases 解析。
+        rec = _build_expert_rec(a, workdir, spec, status_default="draft")
         with locking.FileLock(p, timeout=30):
             fp = kb_store.upsert_lesson(p, rec)
         _audit(a.req_id, "kb_extract_expert", detail="id=%s cat=%s" % (fp, rec["category"]))

@@ -316,7 +316,7 @@ Skill 会跳过完整设计流程，先做源 .md 一致性校验，通过后直
 |---|---|---|---|
 | **经验库** | `case-design-out/KB_lessons.md` | 每次审核 `fail`/`patch` 的**纠正原话**（出错阶段 + 维度 + 原文 + 触发词） | **自动**：你指出用例错误时 Runtime 自动捕获为 draft |
 | **业务库** | `case-design-out/KB_business.md` | 各需求 `Knowledge_*.md` 的**业务知识元数据**（按"更新模块"聚合） | 手动：`kb reconcile --kind business` |
-| **专家库** | `case-design-out/KB_expert.md` | **可跨需求复用的通用测试设计方法论**（如"多条件 AND 门须判定表 2^n 穷举"） | 手动：`kb add-expert` 落 draft |
+| **专家库** | `case-design-out/KB_expert.md` | **可跨需求复用的通用测试设计方法论**（如"多条件 AND 门须判定表 2^n 穷举"） | 自动：`kb extract-expert` 提炼落 draft；手动：`kb add-expert` 精调 |
 
 > 三份库都由 Runtime 在 FileLock 下独占维护，**你不需要（也不应该）手动编辑**，全部经 `kb` 命令操作。
 
@@ -326,7 +326,7 @@ Skill 会跳过完整设计流程，先做源 .md 一致性校验，通过后直
 |---|---|---|
 | **沉淀经验**（自动） | 审核时说"这条用例断言不对，应返回 400" | Runtime 自动把这条纠正捕获进 `KB_lessons.md`（draft 状态） |
 | **背书经验**（手动） | `kb list --kind all --status draft` 看草稿，`kb endorse <id>` 采纳 | 采纳后，下次开工 / 再犯同类错时**自动注入提醒** |
-| **沉淀方法论**（手动） | `kb add-expert --category 判定表 --principle "多条件 AND 门须 2^n 穷举" --applicable-phases 6/8` | 落 draft，`kb endorse --kind expert --id <id>` 后每阶段注入 |
+| **沉淀方法论**（半自动） | `kb extract-expert --reason "…" --category 判定表 --principle "多条件 AND 门须 2^n 穷举" --applicable-phases 6/8`（纠正命中抽象信号时 Runtime 强制提炼） | 落 draft；occ≥3 自动生效，或 `kb endorse --kind expert --all-drafts` 一键背书后每阶段注入 |
 | **聚合业务知识**（手动） | `kb reconcile --kind business` | 从各 `Knowledge_*.md` 汇总到 `KB_business.md` |
 
 > **为什么不自动注入草稿？** 新草稿（draft / occ=1）**永不注入**，须满足**信任门**（人工 endorse，或同一坑被 ≥3 个独立需求踩中）才回流——防止未经确认的错误经验污染后续所有设计。
@@ -347,14 +347,16 @@ Skill 会跳过完整设计流程，先做源 .md 一致性校验，通过后直
 python runtime/qamaster_runtime.py kb list --kind all --status draft   # 看有哪些草稿待你背书
 python runtime/qamaster_runtime.py kb endorse <id>                     # 背书一条经验（经验库）
 python runtime/qamaster_runtime.py kb endorse --kind expert --id <id>  # 背书一条方法论（专家库）
-python runtime/qamaster_runtime.py kb add-expert --category <类> --principle "<通用原则>" --applicable-phases 6/8  # 沉淀方法论
+python runtime/qamaster_runtime.py kb endorse --kind expert --all-drafts  # 一键背书全部方法论草稿
+python runtime/qamaster_runtime.py kb extract-expert --reason "<纠正原话>" --category <类> --principle "<通用原则>" --applicable-phases 6/8  # 自动提炼（带忽略门）
+python runtime/qamaster_runtime.py kb add-expert --category <类> --principle "<通用原则>" --applicable-phases 6/8  # 手动精调沉淀方法论
 python runtime/qamaster_runtime.py kb reconcile --kind business        # 从 Knowledge_*.md 聚合业务库
 python runtime/qamaster_runtime.py kb query --phase 6                  # 预览某阶段会注入哪些经验
 python runtime/qamaster_runtime.py kb supersede --id <旧id> --by <新id>  # 方法论迭代：用新的替代旧的
 python runtime/qamaster_runtime.py kb prune                            # 清理已废止记录
 ```
 
-> 完整命令族：`list / show / query / distill / reconcile / add-lesson / add-expert / endorse / supersede / prune`，`--kind lesson|business|expert` 三库可选。判断"这条纠正能不能提炼成通用方法论"见 `references/expert_kb.md` 决策树。
+> 完整命令族：`list / show / query / distill / reconcile / add-lesson / add-expert / extract-expert / endorse / supersede / prune`，`--kind lesson|business|expert` 三库可选。判断"这条纠正能不能提炼成通用方法论"见 `references/expert_kb.md` 决策树。
 
 ### 8.5 与 requirement-review 的关系
 
@@ -491,7 +493,7 @@ Skill 会做写前规模评估（输出 token 预算）：**默认单文件** `c
 新草稿（`draft`）**永不注入**，必须过**信任门**（人工 `kb endorse <id>`，或同一坑被 ≥3 个独立需求踩中）才回流。先 `kb list --kind all --status draft` 看草稿，再 `kb endorse <id>` 背书；背完下次开工/再犯同类错时即自动注入提醒（详见 §8）。
 
 **Q11：怎么把我教的方法论沉淀成永久复用？**
-`kb add-expert --category <类> --principle "<脱业务后仍成立的通用原则>" --applicable-phases <阶段>` 落 draft，再 `kb endorse --kind expert --id <id>` 背书。**只存通用方法、不存具体业务**（业务知识归 `Knowledge_*.md`/`KB_business.md`）；判断"能不能提炼"见 `references/expert_kb.md` 决策树（详见 §8.4）。
+`kb extract-expert --reason "<纠正原话>" --category <类> --principle "<脱业务后仍成立的通用原则>" --applicable-phases <阶段>`（纠正命中抽象信号时自动触发）或 `kb add-expert ...` 落 draft；同一方法论被 ≥3 个独立需求命中即**自动生效**，否则 `kb endorse --kind expert --all-drafts` 一键背书。**只存通用方法、不存具体业务**（业务知识归 `Knowledge_*.md`/`KB_business.md`）；判断"能不能提炼"见 `references/expert_kb.md` 决策树（详见 §8.4）。
 
 ---
 

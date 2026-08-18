@@ -206,7 +206,7 @@ flowchart TD
 | 人工确认门 | Phase 1 澄清 / Phase 14 审核 / Phase 15 Excel 许可；完整模式必须用户 confirm | 跳过澄清/默认审核通过/未经许可生成 Excel |
 | 断点续跑 | 状态按 (workflow,req_id) 分区落盘 `.qamaster/case-design/<req_id>/state.json`；二次 `start` 恢复而非重置；`status --all` 查看全部在途需求 | 长会话状态丢失、重复生成覆盖、多需求互相覆盖 |
 | 审核反馈回退 | `fail --to <阶段>` 回退到受影响最深阶段，从起点依次重走到 Phase 14 | 修改场景跳阶段 |
-| 自证测试 | `scripts/test_runtime.py`：406 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行、多需求并发隔离、legacy 迁移、MANIFEST 并发/重建 | Runtime 自身正确性 |
+| 自证测试 | `scripts/test_runtime.py`：411 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行、多需求并发隔离、legacy 迁移、MANIFEST 并发/重建 | Runtime 自身正确性 |
 
 > 设计方案见 [`qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md`](qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md)。
 
@@ -515,7 +515,7 @@ pip3 install openpyxl     # macOS / Linux
 ├─ codex/prompts/                   # Codex 自定义 prompt（拷到 ~/.codex/prompts/）
 ├─ .cursor/rules/                   # 平台三：Cursor rule
 ├─ scripts/check_plugin.py          # 插件结构自检（含 Runtime 完整性校验）
-├─ scripts/test_runtime.py          # Runtime 自证测试（406 项断言，无 LLM）
+├─ scripts/test_runtime.py          # Runtime 自证测试（411 项断言，无 LLM）
 └─ .github/workflows/check-plugin.yml  # CI
 ```
 
@@ -532,13 +532,13 @@ python scripts/test_runtime.py
 
 `check_plugin.py` 校验三平台适配层、skills 结构与 **Runtime 完整性**：`plugin.json` / `marketplace.json` 字段、各 `SKILL.md` frontmatter、`commands/` 与 `.cursor/rules/` frontmatter、Codex 适配必要文件、`runtime/` 核心文件存在性 + 阶段注册表（编号 0-15 连续、人工门/许可门类型、引用细则存在）、以及不应入库的 `__pycache__`/`.pyc`。CI 还会字节编译 runtime 与 skill 脚本做语法检查。
 
-`test_runtime.py` 为 Runtime 自证测试（无 LLM，406 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪，**以及多需求并行隔离（同 workdir 两 req 状态/检查点互不覆盖 + 降级对账不误报）、MANIFEST 并发更新、Phase 0 gate PASS 自动建索引、legacy 状态迁移、bootstrap 幂等、manifest reconcile 重建**，以及**自我进化知识库**（经验/业务/专家三库·捕获·预防+反应+方法论三链注入·相关性+信任双门过滤（专家库三门，endorsed 或 occ≥3）·去重·跨需求累计·触发词双词域（自动补 REQ 域实词+子串遮蔽去重）·`kb query --top` 预览，详见下方「自我进化知识系统」节）。
+`test_runtime.py` 为 Runtime 自证测试（无 LLM，411 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪，**以及多需求并行隔离（同 workdir 两 req 状态/检查点互不覆盖 + 降级对账不误报）、MANIFEST 并发更新、Phase 0 gate PASS 自动建索引、legacy 状态迁移、bootstrap 幂等、manifest reconcile 重建**，以及**自我进化知识库**（经验/业务/专家三库·捕获·预防+反应+方法论三链注入·相关性+信任双门过滤（专家库三门，endorsed 或 occ≥3）·去重·跨需求累计·触发词双词域（自动补 REQ 域实词+子串遮蔽去重）·`kb query --top` 预览，详见下方「自我进化知识系统」节）。
 
 本地运行完整检查：
 
 ```bash
 python scripts/check_plugin.py            # 插件结构自检（含 Runtime 完整性）
-python scripts/test_runtime.py            # Runtime 自证测试（406 项断言，无 LLM）
+python scripts/test_runtime.py            # Runtime 自证测试（411 项断言，无 LLM）
 python -m py_compile runtime/*.py skills/case-design/scripts/*.py   # 脚本语法检查
 python skills/case-design/scripts/verify_cases.py --dump-rules      # 打印校验规则契约
 ```

@@ -478,6 +478,7 @@ def main():
     # v0.11.11（专家方法论自动沉淀）回归：extract-expert 忽略门/落盘/域词并入 + 一键背书 + 置位
     test_extract_expert_ignore_gate_and_drop()
     test_extract_expert_occ_accumulates_cross_reqs()
+    test_add_expert_occ_accumulates_cross_reqs()
     test_endorse_all_drafts()
     test_flag_expert_candidate_sets_state()
 
@@ -2372,6 +2373,36 @@ def test_extract_expert_occ_accumulates_cross_reqs():
               "occ=%s" % recs[0].get("occurrences"))
         check("source_reqs 含两需求",
               set(recs[0].get("source_reqs", [])) == {"expert-occ-A", "expert-occ-B"},
+              "source_reqs=%s" % recs[0].get("source_reqs"))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_add_expert_occ_accumulates_cross_reqs():
+    """同 category|principle 经两个不同 --req-id 走 add-expert → 合并为一条 occ=2、source_reqs 含两需求。
+
+    v0.11.11（项2·共享落盘逻辑回归锚点）：add-expert 与 extract-expert 同走 _build_expert_rec，
+    source_req 优先 --req-id（此前 add-expert 恒 "manual"，occ 永不累积 → occ≥3 自动生效单向失效）。
+    """
+    print("\n[kb-expert] add-expert 跨独立需求 occ 累积（source_req 取自 --req-id）")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-addocc-")
+    try:
+        for rid in ("expert-addocc-A", "expert-addocc-B"):
+            _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+            r = run(workdir, "kb", "add-expert",
+                    "--category", "判定表",
+                    "--principle", "AND门须判定表穷举2^n全行",
+                    "--applicable-phases", "6/8",
+                    req_id=rid, expect_rc=0)
+            check("add-expert（%s）rc=0" % rid, r.returncode == 0,
+                  "rc=%d\n%s" % (r.returncode, r.stdout[:300]))
+        recs = kb_store.load_records(_kb_expert_path_of(workdir))
+        check("同指纹合并为一条", len(recs) == 1, "recs=%d" % len(recs))
+        check("occ=2（跨两独立需求累积）", recs[0].get("occurrences") == 2,
+              "occ=%s" % recs[0].get("occurrences"))
+        check("source_reqs 含两需求",
+              set(recs[0].get("source_reqs", [])) == {"expert-addocc-A", "expert-addocc-B"},
               "source_reqs=%s" % recs[0].get("source_reqs"))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
