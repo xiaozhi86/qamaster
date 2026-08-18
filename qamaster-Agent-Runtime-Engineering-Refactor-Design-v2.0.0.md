@@ -1,6 +1,6 @@
 # qamaster Agent Runtime Engineering 重构详细设计方案
 
-版本：v2.1.0
+版本：v2.2.0
 日期：2026-08-18
 作者：xiaozhi
 
@@ -10,15 +10,16 @@
 
 ---
 
-## 0. 版本演进说明（v1.0.0 → v2.1.0）
+## 0. 版本演进说明（v1.0.0 → v2.2.0）
 
 | 版本 | 内容 | 状态 |
 |---|---|---|
 | v1.0.0 | 早期愿景：`engine/gate/validator/memory` 分目录、yaml 流程定义、`state/runtime-state.json` | 已被更务实的实现取代，**保留为历史愿景** |
 | v2.0.0 | 校正到**真实落地架构**（单控制器 + 注册表 + 分区状态），并新增三大改造：① 多需求并行；② 通用 workflow 引擎；③ MANIFEST 多需求索引协调权回归 Runtime（强化"与模型无关"） | 已被 v2.1.0 取代，**保留为历史设计** |
-| **v2.1.0** | 在 v2.0.0 之上补齐两大落地：④ requirement-review 全状态机迁移完成（第二 workflow）；⑤ 自我进化知识系统（经验/业务/专家三库 + 双/三门注入）。同步铁律 5→6 条、CLI 增 `patch`/`kb`、断言 122→383 | **当前权威设计** |
+| **v2.1.0** | 在 v2.0.0 之上补齐两大落地：④ requirement-review 全状态机迁移完成（第二 workflow）；⑤ 自我进化知识系统（经验/业务/专家三库 + 双/三门注入）。同步铁律 5→6 条、CLI 增 `patch`/`kb`、断言 122→383 | 已被 v2.2.0 取代，保留为历史设计 |
+| **v2.2.0** | requirement-review 完整多需求并行评审：门禁 req_id 隔离（`exists_any` 支持 `{req_id}` 占位）+ 独立 MANIFEST 聚合索引（`manifest.py` 泛化为按 workflow 的 schema 注册表）；case-design 零影响。断言 383→422 | **当前权威设计** |
 
-**v1.0.0 为何被取代**：原愿景的分目录（engine/gate/validator/memory）与 yaml 流程定义在实践中偏重，最终按"一个 workflow 无关控制器 + 一个阶段注册表 + 分区状态存储"的务实结构落地。v2.0.0 的首要工作是**让设计文档与真实代码对齐**（v1.0.0 的目录结构从未实现，长期是文档与代码的悬空）；v2.1.0 继续这一对齐——补记 v2.0.0 之后落地的 requirement-review 第二 workflow 与自我进化知识系统。
+**v1.0.0 为何被取代**：原愿景的分目录（engine/gate/validator/memory）与 yaml 流程定义在实践中偏重，最终按"一个 workflow 无关控制器 + 一个阶段注册表 + 分区状态存储"的务实结构落地。v2.0.0 的首要工作是**让设计文档与真实代码对齐**（v1.0.0 的目录结构从未实现，长期是文档与代码的悬空）；v2.1.0 继续这一对齐——补记 v2.0.0 之后落地的 requirement-review 第二 workflow 与自我进化知识系统；v2.2.0 再次对齐——补记 requirement-review 多需求并行评审（门禁 req_id 隔离 + 独立 MANIFEST 聚合索引）落地。
 
 **与两份细化设计的关系**（互补、不互斥，本文是总览）：
 
@@ -26,7 +27,7 @@
 - [`COVERAGE_HARDENING_DESIGN-v1.0.0.md`](COVERAGE_HARDENING_DESIGN-v1.0.0.md) — 覆盖率四道硬门（需求条目 + 测试点 + 风险 + 安全）+ 设计文档作为正式追溯源。
 - [`skills/case-design/EXPERT_KB_AUTO_SEDIMENT_DESIGN-v1.0.0.md`](skills/case-design/EXPERT_KB_AUTO_SEDIMENT_DESIGN-v1.0.0.md) — 专家方法论沉淀侧自动化（自动识别可抽象反馈 + `kb extract-expert` 自动提炼 + occ≥3 自动生效 / 一键背书）。
 
-本文（v2.1.0）描述**流程控制层**的整体架构、多需求并行机制与自我进化知识系统；上面三份描述**质量门禁层**与**自我进化沉淀侧**的细节。两层共同兑现"Runtime 控制流程、模型执行任务"。
+本文（v2.2.0）描述**流程控制层**的整体架构、多需求并行机制与自我进化知识系统；上面三份描述**质量门禁层**与**自我进化沉淀侧**的细节。两层共同兑现"Runtime 控制流程、模型执行任务"。
 
 ---
 
@@ -117,7 +118,7 @@ qamaster/
 │  ├─ KB_lessons.md                    # 自我进化经验库（Runtime 锁控·模型禁写）
 │  ├─ KB_business.md                   # 业务历史知识库（Runtime 锁控·模型禁写）
 │  └─ KB_expert.md                     # 专家方法论库（Runtime 锁控·模型禁写）
-├─ requirement-review-out/             # requirement-review 产物层（REQ/ReviewIssues/ReviewedReq）
+├─ requirement-review-out/             # requirement-review 产物层（REQ/ReviewIssues/ReviewedReq/MANIFEST）
 └─ .qamaster/                          # Runtime 控制层根（gitignore，按 workflow/req_id 分区）
    ├─ case-design/<req_id>/
    │  ├─ state.json
@@ -127,7 +128,7 @@ qamaster/
       └─ checkpoint_<N>.md
 ```
 
-> 与 v1.0.0 的差异：v1.0.0 写的 `runtime/engine|gate|validator|memory/`、`workflow/case-design-flow.yaml`、`state/runtime-state.json` **均未实现**；真实结构是上图的"控制器 + 注册表 + 分区状态"。v2.0.0 以此为准；v2.1.0 新增 `requirement_review_phases.py`（第二 workflow 阶段机）与 `kb_store.py`（三 KB 的独占维护），产物层新增三 KB 文件与 `requirement-review-out/`。
+> 与 v1.0.0 的差异：v1.0.0 写的 `runtime/engine|gate|validator|memory/`、`workflow/case-design-flow.yaml`、`state/runtime-state.json` **均未实现**；真实结构是上图的"控制器 + 注册表 + 分区状态"。v2.0.0 以此为准；v2.1.0 新增 `requirement_review_phases.py`（第二 workflow 阶段机）与 `kb_store.py`（三 KB 的独占维护），产物层新增三 KB 文件与 `requirement-review-out/`；v2.2.0 新增 requirement-review 独立 MANIFEST 索引（`manifest.py` 按 workflow schema 泛化）。
 
 ---
 
@@ -154,7 +155,7 @@ qamaster/
 - 同一 req_id 不同 workflow（未来 skill）也隔离（路径含 workflow 段），天然不冲突。
 - `state_store.save` 保留原子写（tmp + `os.replace`，4 次重试防 AV 锁），仅防单写者中断/杀毒锁，不再承担并发职责。
 
-**唯一例外**：`case-design-out/MANIFEST.md` 是多需求共享可变资源，需锁——见 §8。
+**唯一例外**：各 workflow 的 `MANIFEST.md`（`case-design-out/MANIFEST.md` 与 `requirement-review-out/MANIFEST.md`，v0.11.12 起）是多需求共享可变资源，需锁——见 §8。
 
 ### 4.3 多需求可见性
 
@@ -275,14 +276,14 @@ patch_directives[], history[], created_at, updated_at,
 
 | # | 阶段 | gate | 出口检查 |
 |---|---|---|---|
-| 0 | 输入预处理与需求定位 | auto | `exists_any requirement-review-out/REQ_*.md` |
-| 1 | 并行评审（7 Agent） | auto | `exists_any ReviewIssues_*.md` |
+| 0 | 输入预处理与需求定位 | auto | `exists_any REQ_{req_id}.md` |
+| 1 | 并行评审（7 Agent） | auto | `exists_any ReviewIssues_{req_id}.md` |
 | 2 | 结果汇总去重 + 冲突检测 | auto | 内存（无门禁） |
 | 3 | 优化方案总览 | auto | 内存（无门禁） |
 | 4 | 用户确认 | confirm | 人工确认门（复用控制器 confirm） |
-| 5 | 需求文档重构 | auto | `exists_any ReviewedReq_*.md` |
+| 5 | 需求文档重构 | auto | `exists_any ReviewedReq_{req_id}.md` |
 | 6 | 自动复查 + 二次修复 | auto | 内存（无门禁） |
-| 7 | 最终输出 | auto | `exists_any ReviewedReq_*.md` + `exists_any ReviewIssues_*.md`（last） |
+| 7 | 最终输出 | auto | `exists_any ReviewedReq_{req_id}.md` + `exists_any ReviewIssues_{req_id}.md`（last） |
 
 有独立 MANIFEST 聚合索引（`requirement-review-out/MANIFEST.md`，v0.11.12 起）、无知识后置、无许可门；`DEPTH_SKIPS` 全空；门禁均为 req_id 绑定的文件存在性 glob（`{req_id}` 占位，v0.11.12 起）。
 
@@ -307,12 +308,16 @@ patch_directives[], history[], created_at, updated_at,
 
 模型被剥夺对 MANIFEST 的写权限后，MANIFEST 的所有变更都成为**gate PASS 的确定性副作用**，在每条 PASS 路径上由 Runtime 在 `FileLock` 下执行（`_manifest_side_effect`）：
 
-| 触发点（gate PASS） | Runtime 副作用 |
-|---|---|
-| Phase 0（需求落盘） | `manifest add`（从 `REQ_<id>.md` 首个 `#` 标题抽需求名称） |
-| Phase 1（澄清完成） | `manifest update`（台账文件列） |
-| Phase 13（写盘回读通过） | `manifest update`（glob `TestCases_<id>*.md` 实际落盘文件列） |
-| Phase 14（审核通过 confirm） | `manifest complete`（置已完成） |
+| workflow | 触发点（gate PASS） | Runtime 副作用 |
+|---|---|---|
+| case-design | Phase 0（需求落盘） | `manifest add`（从 `REQ_<id>.md` 首个 `#` 标题抽需求名称） |
+| case-design | Phase 1（澄清完成） | `manifest update`（台账文件列） |
+| case-design | Phase 13（写盘回读通过） | `manifest update`（glob `TestCases_<id>*.md` 实际落盘文件列） |
+| case-design | Phase 14（审核通过 confirm） | `manifest complete`（置已完成） |
+| requirement-review | Phase 0（需求落盘） | `manifest add`（`REQ_<id>.md`） |
+| requirement-review | Phase 1（并行评审） | `manifest update`（评审问题清单列） |
+| requirement-review | Phase 5（文档重构） | `manifest update`（最终需求文档列） |
+| requirement-review | Phase 7（最终输出） | `manifest complete`（置已完成） |
 
 副作用是 best-effort（锁超时失败不阻断 gate；MANIFEST 是索引不是事实源），失步用 `manifest reconcile` 从磁盘 `REQ_*.md`/`TestCases_*.md` 重建兜底（C6）。auto 门 PASS（`cmd_gate`）、人工门 PASS、`confirm` 三条路径都调用同一副作用，模型无从影响是否/何时更新。
 
@@ -332,9 +337,9 @@ patch_directives[], history[], created_at, updated_at,
 
 ## 8. MANIFEST 并发协议（v2.0.0·新增）
 
-- **资源**：`<workdir>/case-design-out/MANIFEST.md`；锁文件 `.manifest.lock`（同目录）。
+- **资源**：`<workdir>/{case-design-out,requirement-review-out}/MANIFEST.md`（按 workflow 各一份，列集独立，v0.11.12 起）；锁文件 `.manifest.lock`（同目录）。
 - **所有权**：`runtime/manifest.py` 是唯一 read-modify-write 路径；`cmd_manifest` 全程持 `FileLock(timeout=30)`，写用 tmp + `os.replace` 原子替换。
-- **列**：需求标识 | 需求名称 | 需求文档 | 设计文档 | 台账文件 | 测试用例文件 | 知识总结 | 状态 | 更新时间。
+- **列**：按 workflow schema 决定——case-design：需求标识 | 需求名称 | 需求文档 | 设计文档 | 台账文件 | 测试用例文件 | 知识总结 | 状态 | 更新时间；requirement-review：需求标识 | 需求名称 | 需求文档 | 评审问题清单 | 最终需求文档 | 状态 | 更新时间。
 - **子命令**：`add`（插新行，重复报错）/ `update`（改指定列，幂等）/ `complete`（置已完成）/ `list`（只读 JSON）/ `reconcile`（从磁盘重建兜底）。
 - **模型权限**：明确禁止 `Write/Edit(MANIFEST.md)`（铁律 4）；`check_plugin.py` 加回归护栏 `re.search(r"(Write|Edit)\([^)]*MANIFEST\.md", skill_text)` 命中即报错。
 - **为何强化"与模型无关"**：MANIFEST 变更成为 gate PASS 的确定性副作用，模型无法影响多需求索引的协调——"Runtime 负责控制"从状态层延伸到索引层。
@@ -458,9 +463,10 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 
 ## 13. 验证体系
 
-`scripts/test_runtime.py` 全套断言（v0.11.10 达 **383 项**），含并发/迁移/索引/自我进化知识库测试：
+`scripts/test_runtime.py` 全套断言（v0.11.12 达 **422 项**），含并发/迁移/索引/自我进化知识库测试：
 
 - `test_concurrent_reqs`：同 workdir 两 req 各推进到 Phase 2，断言 state/checkpoint 互不覆盖，audit 不误报对方用例，MANIFEST 两行共存，`status --all` 列出两 req（**并发的核心证明**）。
+- `test_requirement_review_concurrent_reqs`：同 workdir 两需求并发评审，断言门禁 req_id 隔离（A 的 REQ/问题清单不误放行 B 的门）、状态分区独立、`requirement-review-out/MANIFEST.md` 两行共存、`status --all` 列出两 req（requirement-review 多需求并发的核心证明）。
 - `test_manifest_concurrent_update`：12 线程并发 `manifest update`，无损坏无丢行。
 - `test_phase0_manifest_created_on_pass`：空 MANIFEST 下 Phase 0 gate PASS 后 MANIFEST 被创建（验证 C1 时序）。
 - `test_legacy_migration`：v2+req_id 旧 state 迁移到新分区；req_id 为空拒绝迁移并告警。
@@ -469,7 +475,7 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 
 回归护栏 `scripts/check_plugin.py`：校验 `locking.py`/`manifest.py`/`kb_store.py`/`requirement_review_phases.py`/`workflows/{__init__,registry,case_design,requirement_review}.py` 存在、`bootstrap`/`manifest`/`kb` 子命令存在、SKILL 文本不含 `Write/Edit(MANIFEST.md)` 权限示例；另校验 requirement-review 阶段机连续 0-7、Phase 4=confirm、Phase 7=auto、无 license 门；README 断言计数一致性护栏。
 
-最终状态：`py_compile runtime/*.py runtime/workflows/*.py` 通过；`check_plugin.py` rc=0；`test_runtime.py` 383 通过 / 0 失败。
+最终状态：`py_compile runtime/*.py runtime/workflows/*.py` 通过；`check_plugin.py` rc=0；`test_runtime.py` 422 通过 / 0 失败。
 
 ---
 
@@ -482,6 +488,7 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 | Phase 2.5 | 覆盖率四道硬门 + 设计文档追溯（COVERAGE_HARDENING_DESIGN） | ✅ 已完成 |
 | Phase 3 | 多需求并行 + 通用 workflow 引擎 + MANIFEST Runtime 接管（v2.0.0） | ✅ 已完成 |
 | **Phase 4** | **requirement-review 全状态机迁移（第二 workflow）+ 自我进化知识系统（经验/业务/专家三库）（本文 v2.1.0）** | **✅ 已完成** |
+| **Phase 4.5** | **requirement-review 完整多需求并行评审（门禁 req_id 隔离 + 独立 MANIFEST 聚合索引）（本文 v2.2.0）** | **✅ 已完成** |
 | Phase 5 | interface-test 新 skill；Phase dict→dataclass；跨 workflow 共享索引 | 后续 |
 
 ---
@@ -500,4 +507,4 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 
 qamaster 从"依赖模型理解流程的 Skill"升级为"由 Runtime 控制流程、模型执行任务、任何模型不可绕过"的企业级 Agent 系统，并支持同工程多需求并行、跨需求自我进化。
 
-核心原则不变：**Runtime 控制流程，模型执行任务，任何模型不可绕过。** v2.1.0 在 v2.0.0 基础上把"不可绕过"进一步延伸：从状态层（state.json 单写、门禁机器判定）到索引层（MANIFEST 由 Runtime 在 gate PASS 副作用维护）再到知识层（三 KB 由 Runtime 独占维护、模型禁写），通过状态分区让"多需求并行、互不干扰"成为引擎内建能力，通过通用 workflow 引擎让第二个 skill（requirement-review）继承同一套隔离 + 强控。
+核心原则不变：**Runtime 控制流程，模型执行任务，任何模型不可绕过。** v2.1.0 在 v2.0.0 基础上把"不可绕过"进一步延伸：从状态层（state.json 单写、门禁机器判定）到索引层（MANIFEST 由 Runtime 在 gate PASS 副作用维护）再到知识层（三 KB 由 Runtime 独占维护、模型禁写），通过状态分区让"多需求并行、互不干扰"成为引擎内建能力，通过通用 workflow 引擎让第二个 skill（requirement-review）继承同一套隔离 + 强控。v2.2.0 补齐 requirement-review 的多需求并行：门禁 req_id 绑定（`{req_id}` 占位）+ 独立 MANIFEST 聚合索引（`manifest.py` 按 workflow schema 泛化），使第二 workflow 也具备"同工程多需求并行、互不串扰"的完整能力，且对 case-design 零影响。

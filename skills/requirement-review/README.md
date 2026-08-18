@@ -180,14 +180,14 @@ SKILL.md 的「并行评审 + 汇总仲裁」9 阶段（0-9）已压缩为 **8 �
 
 | # | 阶段 | gate | 出口检查 |
 |---|---|---|---|
-| 0 | 输入预处理与需求定位 | auto | `REQ_*.md` 已落盘（extract_text.py 预处理） |
-| 1 | 并行评审（7 Agent） | auto | `ReviewIssues_*.md` 已落盘 |
+| 0 | 输入预处理与需求定位 | auto | `REQ_{req_id}.md` 已落盘（extract_text.py 预处理） |
+| 1 | 并行评审（7 Agent） | auto | `ReviewIssues_{req_id}.md` 已落盘 |
 | 2 | 结果汇总去重 + 冲突检测 | auto | 内存（无门禁） |
 | 3 | 优化方案总览 | auto | 内存（无门禁） |
 | 4 | 用户确认 | **confirm** | 人工确认门（复用控制器 confirm 机制） |
-| 5 | 需求文档重构 | auto | `ReviewedReq_*.md` 已落盘 |
+| 5 | 需求文档重构 | auto | `ReviewedReq_{req_id}.md` 已落盘 |
 | 6 | 自动复查 + 二次修复 | auto | 内存（无门禁） |
-| 7 | 最终输出 | auto | `ReviewedReq_*.md` + `ReviewIssues_*.md` 均存在（last） |
+| 7 | 最终输出 | auto | `ReviewedReq_{req_id}.md` + `ReviewIssues_{req_id}.md` 均存在（last） |
 
 **与 SKILL.md 9 阶段散文的映射**：阶段 2「结果汇总」+ 阶段 3「冲突检测」→ Phase 2；阶段 7「自动复查」+ 阶段 8「二次修复」→ Phase 6；其余一一对应。
 
