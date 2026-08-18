@@ -424,12 +424,12 @@ case-design 内置**三个相互独立的知识库**，让"踩过的坑"、"沉�
 
 > 过滤后候选为空 → 注入返回空串 → 输出与"没有知识库"时**字节一致**。即**无 KB 文件即零影响**，是回归基线（新增此系统不改变任何既有产出）。
 
-### 专家方法论库：功能与内容来源（0.11.3 / v0.11.9 终版）
+### 专家方法论库：功能与内容来源（v0.11.3 起 · v0.11.11 终版）
 
 **功能**——把"人教过的测试设计方法论"变成跨需求可复用的注入资产：
 
-- **沉淀**：`kb add-expert` 落结构化方法论记录（`draft` 状态，不注入）；同 `category|principle` 指纹去重合并（触发词跨需求取并集、occurrences 按不同来源需求累计）。
-- **暴露**：draft 永不注入，但 Phase 14/15 契约卡 `##METHODOLOGY_CAPTURE##` 的"待 endorse draft"子节**无条件**列出（不做相关性预筛——endorse 是跨需求的人工判断），人看得见才 endorse 得了。
+- **沉淀**：`kb add-expert`（人肉精调）与 `kb extract-expert`（自动提炼，带确定性忽略门 + category 词表校验）**共享同一落盘逻辑**（抽公共 `_build_expert_rec`，消除双写漂移）落结构化方法论记录（`draft` 状态，不注入）；同 `category|principle` 指纹去重合并（触发词跨需求取并集、occurrences 按不同来源需求累计）。
+- **暴露**：draft 永不注入，但 Phase 14/15 契约卡 `##METHODOLOGY_CAPTURE##` 的"待 endorse draft"子节**无条件**列出（不做相关性预筛——endorse 是跨需求的人工判断；occ≥3 已自动生效的 draft 不再重复提示），人看得见才 endorse 得了——单条 `kb endorse --kind expert --id <id>`，或一键全背 `kb endorse --kind expert --all-drafts`。
 - **注入**：`kb endorse` 后，每张契约卡 `##PRIOR_EXPERT_KB##` 注入 **三门过滤 + top-3** 结果：适用门（当前 phase ∈ `applicable_phases`）→ 信任门（**endorsed 或 occ≥3**）→ 相关性门（触发词对**需求正文 + 澄清台账**语料 surface≥2，子串遮蔽去重后计数，或模块标题命中）。每条只渲染 category / principle / 适用阶段 / 触发词——**绝不全量送模型**。**v0.11.9 补反应式失败定向**：`gate` 失败 / `fail` / `patch` 时，用失败上下文文本做 surface 命中，注入 `##RELEVANT_EXPERT_KB##`（失败文本命中≥1 或 REQ 命中≥2，同 lessons/business 反应链），对齐此前只有 lessons/business 有反应式定向、expert 缺失的不对称。
 - **防词域错配（v0.11.6 / v0.11.8 根因修复）**：触发词为**双词域**——方法论术语（判定表/AND门，给人读）+ REQ 域实词（全部条件/条件1/既不是…，供注入门逐字匹配）。`add-expert` 写入时自动从来源 REQ + 台账命中 REQ 域信号词并入触发词；读取时对历史触发词先分词（存量畸形格式自愈）。**v0.11.8 补两层**：①相关性门扫描语料从"仅 REQ 正文"扩到"REQ + 澄清台账"（结构性规则常经澄清引入，如台账 Q32 二轮需求变更引入三前置条件 AND 门，REQ 正文永远没有）；②「1./2./3.」编号条件归一为「条件1/2/3」，使存量 trigger 无需重建数据即可命中台账编号条件。
 
@@ -450,11 +450,14 @@ case-design 内置**三个相互独立的知识库**，让"踩过的坑"、"沉�
 ### CLI 人工管理（`kb` 子命令）
 
 ```bash
+kb extract-expert --reason "<纠正原话>" --category <类> --principle "<脱业务原则>" \
+              [--applicable-phases 6/8/11] [--req-id <来源需求>]            # 自动提炼方法论落 draft（确定性忽略门：reason 不含可抽象信号则拒绝；category 须取词表；自动并入 REQ 域触发词）
 kb add-expert --category <类> --principle "<脱业务原则>" \
-              [--applicable-phases 6/8/11] [--trigger <词>] [--req-id <来源需求>]  # 沉淀方法论 draft（自动补 REQ 域触发词）
+              [--applicable-phases 6/8/11] [--trigger <词>] [--req-id <来源需求>]  # 人工精调沉淀方法论 draft（自动补 REQ 域触发词）
 kb query [--phase N] [--kind lesson|business|expert] [--top K] [--against <req_id>]  # 预览哪些经验/方法论会被注入（--top 仅作用于预览；真实注入恒为 top-3 防噪）
 kb list --kind all --status draft                         # 列出待 endorse 草稿（含专家库）
 kb endorse <id>                                           # 背书草稿经验，纳入注入候选（专家库：kb endorse --kind expert --id <id>）
+kb endorse --kind expert --all-drafts                     # 一键背书专家库全部 draft（occ≥3 已自动生效的除外）
 kb supersede --id <旧id> --by <新id>                      # 方法论迭代：废止旧记录
 kb prune                                                  # 清理已废止记录
 kb reconcile --kind business                              # 从 Knowledge_*.md 重建/汇聚业务库
