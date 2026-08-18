@@ -21,9 +21,10 @@
 5. [验证 Skill 已生效](#5-验证-skill-已生效)
 6. [使用步骤](#6-使用步骤)
 7. [产出物说明](#7-产出物说明)
-8. [注意事项](#8-注意事项)
-9. [Skill 目录结构](#9-skill-目录结构)
-10. [常见问题 FAQ](#10-常见问题-faq)
+8. [自我进化知识系统（如何使用）](#8-自我进化知识系统如何使用)
+9. [注意事项](#9-注意事项)
+10. [Skill 目录结构](#10-skill-目录结构)
+11. [常见问题 FAQ](#11-常见问题-faq)
 
 ---
 
@@ -53,7 +54,7 @@
 
 ### 3.1 获取 Skill 文件
 
-拿到 `case-design/` 整个目录（或 `case-design-skill.zip` 解压后得到该目录）。目录结构见 [第9节](#9-skill-目录结构)。
+拿到 `case-design/` 整个目录（或 `case-design-skill.zip` 解压后得到该目录）。目录结构见 [第10节](#10-skill-目录结构)。
 
 ### 3.2 选择安装位置
 
@@ -154,7 +155,7 @@ python3 -c "import openpyxl; print('openpyxl', openpyxl.__version__)"
 若以上均无反应，检查：
 - 目录路径是否正确（`SKILL.md` 是否在 `.claude/skills/case-design/` 下）。
 - 是否重启了 Claude Code 会话。
-- frontmatter 是否完整（见 [8.1](#81-关于-disable-model-invocation)）。
+- frontmatter 是否完整（见 [9.1](#91-关于-disable-model-invocation)）。
 
 ---
 
@@ -194,7 +195,7 @@ D:\qa\order-cases\        ← 在这里打开 Claude Code（项目根目录）
 使用 case-design skill，帮我设计下面的需求的测试用例。
 ```
 
-**方式二：自动触发（需先改配置，见 [8.1](#81-关于-disable-model-invocation)）**
+**方式二：自动触发（需先改配置，见 [9.1](#91-关于-disable-model-invocation)）**
 
 删掉 frontmatter 里的 `disable-model-invocation: true` 后，直接描述任务即可自动加载：
 
@@ -305,9 +306,65 @@ Skill 会跳过完整设计流程，先做源 .md 一致性校验，通过后直
 
 ---
 
-## 8. 注意事项
+## 8. 自我进化知识系统（如何使用）
 
-### 8.1 关于 `disable-model-invocation`
+> **一句话**：你踩过的坑、沉淀的业务知识、教过的方法论，会自动沉淀进三份知识库，**下次开工 / 犯错时自动回流提醒你**，越用越准。**机制归 Runtime、内容归你**——模型只能自动"起草"（draft），是否采纳（endorse）由你拍板。
+
+### 8.1 三份知识库是什么
+
+| 知识库 | 文件 | 收什么 | 怎么进库 |
+|---|---|---|---|
+| **经验库** | `case-design-out/KB_lessons.md` | 每次审核 `fail`/`patch` 的**纠正原话**（出错阶段 + 维度 + 原文 + 触发词） | **自动**：你指出用例错误时 Runtime 自动捕获为 draft |
+| **业务库** | `case-design-out/KB_business.md` | 各需求 `Knowledge_*.md` 的**业务知识元数据**（按"更新模块"聚合） | 手动：`kb reconcile --kind business` |
+| **专家库** | `case-design-out/KB_expert.md` | **可跨需求复用的通用测试设计方法论**（如"多条件 AND 门须判定表 2^n 穷举"） | 手动：`kb add-expert` 落 draft |
+
+> 三份库都由 Runtime 在 FileLock 下独占维护，**你不需要（也不应该）手动编辑**，全部经 `kb` 命令操作。
+
+### 8.2 知识怎么回流（自动 vs 手动）
+
+| 动作 | 你需要做什么 | 结果 |
+|---|---|---|
+| **沉淀经验**（自动） | 审核时说"这条用例断言不对，应返回 400" | Runtime 自动把这条纠正捕获进 `KB_lessons.md`（draft 状态） |
+| **背书经验**（手动） | `kb list --kind all --status draft` 看草稿，`kb endorse <id>` 采纳 | 采纳后，下次开工 / 再犯同类错时**自动注入提醒** |
+| **沉淀方法论**（手动） | `kb add-expert --category 判定表 --principle "多条件 AND 门须 2^n 穷举" --applicable-phases 6/8` | 落 draft，`kb endorse --kind expert --id <id>` 后每阶段注入 |
+| **聚合业务知识**（手动） | `kb reconcile --kind business` | 从各 `Knowledge_*.md` 汇总到 `KB_business.md` |
+
+> **为什么不自动注入草稿？** 新草稿（draft / occ=1）**永不注入**，须满足**信任门**（人工 endorse，或同一坑被 ≥3 个独立需求踩中）才回流——防止未经确认的错误经验污染后续所有设计。
+
+### 8.3 知识怎么被用起来（三道注入链）
+
+| 注入链 | 时机 | 注入什么 | 你看到的 |
+|---|---|---|---|
+| **预防链** | 开工前（每阶段契约卡） | `##PRIOR_LESSONS##` / `##PRIOR_BUSINESS_KB##` / `##PRIOR_EXPERT_KB##` | 开工即提示"这类坑以前栽过，自查是否又中" |
+| **反应链** | `gate` 失败 / `fail` / `patch` 时 | `##RELEVANT_LESSONS##` 等 | 定向提示"上次怎么改对的" |
+| **方法论链** | 每阶段每轮（含自检轮） | `##PRIOR_EXPERT_KB##`（top-3） | 常驻参考"这条方法论适用本阶段" |
+
+> 注入**不是整库粘贴**——每条记录先过**相关性门**（触发词命中当前需求/失败上下文）+ **信任门**（endorsed 或 occ≥3）才进上下文，且恒为 top-3 软参考，**永不作硬门禁**。无 KB 文件 / 无命中时输出与无 KB **逐字节一致**（零影响）。
+
+### 8.4 常用 `kb` 命令速查
+
+```bash
+python runtime/qamaster_runtime.py kb list --kind all --status draft   # 看有哪些草稿待你背书
+python runtime/qamaster_runtime.py kb endorse <id>                     # 背书一条经验（经验库）
+python runtime/qamaster_runtime.py kb endorse --kind expert --id <id>  # 背书一条方法论（专家库）
+python runtime/qamaster_runtime.py kb add-expert --category <类> --principle "<通用原则>" --applicable-phases 6/8  # 沉淀方法论
+python runtime/qamaster_runtime.py kb reconcile --kind business        # 从 Knowledge_*.md 聚合业务库
+python runtime/qamaster_runtime.py kb query --phase 6                  # 预览某阶段会注入哪些经验
+python runtime/qamaster_runtime.py kb supersede --id <旧id> --by <新id>  # 方法论迭代：用新的替代旧的
+python runtime/qamaster_runtime.py kb prune                            # 清理已废止记录
+```
+
+> 完整命令族：`list / show / query / distill / reconcile / add-lesson / add-expert / endorse / supersede / prune`，`--kind lesson|business|expert` 三库可选。判断"这条纠正能不能提炼成通用方法论"见 `references/expert_kb.md` 决策树。
+
+### 8.5 与 requirement-review 的关系
+
+自我进化知识系统**目前只在 case-design 生效**（requirement-review 是单次评审产出，无知识总结后置动作、无经验捕获挂载点）。评审产出的最终需求文档 `ReviewedReq_*.md` 可直接作为 case-design 输入，再经 case-design 沉淀经验 / 业务知识。
+
+---
+
+## 9. 注意事项
+
+### 9.1 关于 `disable-model-invocation`
 
 当前 `SKILL.md` 设了 `disable-model-invocation: true`，含义：**模型不会自动加载本 Skill，必须用 `/case-design` 显式触发**。
 
@@ -318,30 +375,30 @@ Skill 会跳过完整设计流程，先做源 .md 一致性校验，通过后直
   ```
   保存后重启 Claude Code 会话即可。
 
-### 8.2 产出目录会被写入文件
+### 9.2 产出目录会被写入文件
 
 Skill 会在**项目根目录下的 `case-design-out/` 子目录**写 `TestCases_*.md`、`Clarification_Ledger_*.md`、`Knowledge_*.md`、`TestCases_*.xlsx`，并由 Runtime 自动维护索引文件 `MANIFEST.md`（模型不直接写，铁律 4）；流程控制层状态写 `.qamaster/case-design/<需求标识>/`（已默认 `.gitignore`，多需求分区隔离）。建议：
 - 在**专用项目文件夹**运行，不要在系统目录或代码仓库根目录直接跑（除非你确要这么用）。
 - Excel 生成会临时在 `case-design-out/` 下建 `.py` 脚本和中间文件，用完即自动删除；正式产出物不会被删。
 
-### 8.3 Excel 依赖 openpyxl
+### 9.3 Excel 依赖 openpyxl
 
 - 要生成 Excel 必须装 openpyxl（见 [4.3](#43-安装-openpyxl生成-excel-才需要)）。
 - 缺失时 Skill 会尝试 `pip install openpyxl` 自动安装；自动安装失败会**显式报错**，不会静默降级为文本表格。
 - 严禁用文本工具直接写 `.xlsx`（会产出损坏文件）——Skill 已强制走 openpyxl 脚本生成。
 
-### 8.4 Windows 用 `python`
+### 9.4 Windows 用 `python`
 
 - Windows 环境调用 Python 用 `python`（不是 `python3`）。Skill 内部脚本调用已适配。
 - 若系统里 `python` 指向 Microsoft Store 占位符，请从 python.org 安装真实 Python 并加入 PATH。
 
-### 8.5 跨会话状态保留
+### 9.5 跨会话状态保留
 
 - `case-design-out/` 下的 `MANIFEST.md`、`Clarification_Ledger_*.md`、`Knowledge_*.md`、`KB_lessons.md`、`KB_business.md`、`KB_expert.md` **跨会话有效**。
 - 新会话处理同一需求时，Skill 第0阶段会读入索引和台账，**不会重复提问已解决问题**；跨需求复用经验/业务/方法论时，第0阶段起注入 `##PRIOR_LESSONS##`/`##PRIOR_BUSINESS_KB##`，每阶段每轮注入 `##PRIOR_EXPERT_KB##`（自我进化知识系统的消费侧）。
 - 若换了项目根目录（`case-design-out/` 下文件不存在），视为首次处理，会重新澄清——属正常行为。
 
-### 8.6 完整输出与门禁
+### 9.6 完整输出与门禁
 
 - 每轮用例**一次性写入**文件（不增量、不分条），写入后回读核对。
 - **阶段出口机器校验**：第3/5/8阶段在写前于内存内跑 `verify_cases.py`（≤2轮有界自修，零临时文件），缺陷在阶段出口就地拦住，不拖到写后才发现；第5/8阶段另跑有界 critique 循环（≤2轮）查机器查不出的漏标/漏测（检查14 含**界面结构遗漏**盲区）。
@@ -350,18 +407,18 @@ Skill 会在**项目根目录下的 `case-design-out/` 子目录**写 `TestCases
 - 完整模式下，.md 写入后**必须等人工审核通过**才进 Excel；连跑/轻量模式可标注"待审核"后自动推进，但 **P0 风险模块仍守审核门禁**。
 - 自动放行**只放宽"等待人工"时点，不放宽任何质量底线**（脑补禁令、断言可观测、存储合规、去重、覆盖率等全不变）。
 
-### 8.7 不要手动改产出物格式
+### 9.7 不要手动改产出物格式
 
 - 测试用例表的 15 列字段顺序、4 个固定值列（编辑模式=STEP / 标签=AI / 责任人=AI / 用例状态=Completed）**不可改动**，否则 Excel 转换校验会不通过。
 - 要改用例内容请走"修改流程"（告诉 Claude 问题点），不要手动编辑 `case-design-out/TestCases_*.md` 再转 Excel（会因一致性校验失败被拒）。
 
-### 8.8 关于"16 列 / 15 列"
+### 9.8 关于"16 列 / 15 列"
 
 原版文档多处文字写"16 列"，但字段顺序表实际为 **15 个字段**，系原文计数不一致。本 Skill 已统一为 **15 列**，`scripts/verify_md.py` 按权威 15 字段清单校验。
 
 ---
 
-## 9. Skill 目录结构
+## 10. Skill 目录结构
 
 ```
 case-design/
@@ -401,7 +458,7 @@ case-design/config/             # 领域配置（可选，方向3）
 
 ---
 
-## 10. 常见问题 FAQ
+## 11. 常见问题 FAQ
 
 **Q1：Skill 没被识别 / `/case-design` 无效？**
 检查：① `SKILL.md` 是否在 `.claude/skills/case-design/` 下；② 是否重启了 Claude Code 会话；③ frontmatter 的 `name` 和 `description` 是否完整。
@@ -429,6 +486,12 @@ Skill 会做写前规模评估（输出 token 预算）：**默认单文件** `c
 
 **Q9：阶段出口校验会不会拖慢或卡死？**
 不会无限循环。5 个有界循环（第5机器 gate / 第5 critique / 第8机器 gate / 第8检查14 critique / 第11自查）各自 ≤2~3 轮独立计数、不嵌套；机器 gate 的自修是确定性修复（补序号、改枚举、补固定列），命中即修即过，token 增量小；critique 是真正花 token 的对抗式遍历，但只 2 轮且只重型需求跑满。2 轮未过即升级阻断转人工，不空转。
+
+**Q10：知识库草稿怎么一直没生效？**
+新草稿（`draft`）**永不注入**，必须过**信任门**（人工 `kb endorse <id>`，或同一坑被 ≥3 个独立需求踩中）才回流。先 `kb list --kind all --status draft` 看草稿，再 `kb endorse <id>` 背书；背完下次开工/再犯同类错时即自动注入提醒（详见 §8）。
+
+**Q11：怎么把我教的方法论沉淀成永久复用？**
+`kb add-expert --category <类> --principle "<脱业务后仍成立的通用原则>" --applicable-phases <阶段>` 落 draft，再 `kb endorse --kind expert --id <id>` 背书。**只存通用方法、不存具体业务**（业务知识归 `Knowledge_*.md`/`KB_business.md`）；判断"能不能提炼"见 `references/expert_kb.md` 决策树（详见 §8.4）。
 
 ---
 
