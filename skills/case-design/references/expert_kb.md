@@ -15,7 +15,7 @@
 
 用户对测试用例的纠正补充**或测试设计方法论指导**（含审核/许可环节给出的通用方法建议，如"多条件判定须用判定表穷举 2^n 组合"），按下树**三选一**路由，禁止串台：
 
-> **捕获时机（v0.11.4·闭合"方法论漏沉淀"根因）**：`fail`/`patch` 触发时 `_maybe_capture_lesson` 自动捕获 verbatim 入 `KB_lessons.md`，`_abstraction_hint` 提示可抽象者走 `kb add-expert`；但**审核门(14)/许可门(15)的方法论反馈是对话式给出、不经 fail/patch**（无 reason 字段供 Runtime 嗅探），故这两阶段契约卡常驻 `##METHODOLOGY_CAPTURE##` 提醒——由见到反馈的模型主动分类并执行 `kb add-expert`/`kb add-lesson`。**禁止以写入 Claude 个人记忆/项目记忆（`~/.claude/.../memory`）替代**：个人记忆不注入 qamaster 任何阶段、对后续需求设计不可见；方法论须经 Runtime `kb` 命令落盘（draft）方可经人工 endorse 注入 `##PRIOR_EXPERT_KB##`。
+> **捕获时机（v0.11.11·自动识别+提炼）**：`fail`/`patch` 触发时 `_maybe_capture_lesson` 自动捕获 verbatim 入 `KB_lessons.md`；同时 `_flag_expert_candidate` 嗅探 reason 命中可抽象信号（`_ABSTRACTION_SIGNALS`）→ 置位 `pending_expert_extraction`，约束模型必须跑 `kb extract-expert` 提炼落 draft（带确定性别忽略门：reason 不含信号即拒绝）。但**审核门(14)/许可门(15)的方法论反馈是对话式给出、不经 fail/patch**（无 reason 字段供 Runtime 嗅探），故这两阶段契约卡常驻 `##METHODOLOGY_CAPTURE##` 提醒——由见到反馈的模型主动分类并执行 `kb add-expert`/`kb extract-expert`/`kb add-lesson`。**禁止以写入 Claude 个人记忆/项目记忆（`~/.claude/.../memory`）替代**：个人记忆不注入 qamaster 任何阶段、对后续需求设计不可见；方法论须经 Runtime `kb` 命令落盘（draft）方可经 endorse 或 occ≥3 注入 `##PRIOR_EXPERT_KB##`。
 
 ```
 用户纠正
@@ -34,10 +34,10 @@
   │   → 再分两支：
   │     │
   │     ├─ 能提炼为【通用方法论】？（见下"二、可提炼判定"）
-  │     │   → 路由：kb add-expert 沉淀 draft
-  │     │     命令：kb add-expert --category <类> --principle "<原则>" \
-  │     │            --applicable-phases <阶段> --trigger <触发词>
-  │     │     状态：draft（不注入）；人工 endorse 后进 ##PRIOR_EXPERT_KB##
+  │     │   → 路由：kb extract-expert 沉淀 draft（fail/patch 命中信号时 Runtime 已强制）
+  │     │     命令：kb extract-expert --reason "<纠正原话>" --req-id <id> \
+  │     │            --category <类> --principle "<原则>" --applicable-phases <阶段>
+  │     │     状态：draft（不注入）；endorse 或 occ≥3 后进 ##PRIOR_EXPERT_KB##
   │     │
   │     └─ 不可提炼（仅本次业务特例）？
   │         → 路由：留 KB_lessons.md（经验库，原话）
@@ -49,7 +49,7 @@
         不可提炼的方法层部分留 KB_lessons.md。三类各归其位。
 ```
 
-**路由铁律**：① 走 Knowledge，②可提炼走 KB_expert，②不可提炼走 KB_lessons。**禁止**把需求层业务知识写进专家库（违反"只存方法不存业务"）；**禁止**把仅本次业务特例强行抽象进专家库（污染跨需求方法论）；**禁止**以 Claude 个人记忆/项目记忆替代 `kb add-expert`/`kb add-lesson` 沉淀方法论（个人记忆不注入任何阶段，对后续需求设计不可见——v0.11.4 根因修复）。
+**路由铁律**：① 走 Knowledge，②可提炼走 KB_expert，②不可提炼走 KB_lessons。**禁止**把需求层业务知识写进专家库（违反"只存方法不存业务"）；**禁止**把仅本次业务特例强行抽象进专家库（污染跨需求方法论）；**禁止**以 Claude 个人记忆/项目记忆替代 `kb add-expert`/`kb extract-expert`/`kb add-lesson` 沉淀方法论（个人记忆不注入任何阶段，对后续需求设计不可见——v0.11.4 根因修复）。
 
 ---
 
@@ -134,21 +134,23 @@
 
 ---
 
-## 五、信任门：endorsed-only（无 occ≥3 逃生口）
+## 五、信任门：endorsed 或 occ≥3
 
 | 门 | lessons/business | **expert** |
 |----|----|----|
-| 注入条件 | endorsed **OR** occ≥3 | **仅 endorsed**（无 occ≥3 逃生口） |
-| draft 行为 | 可存不注入 | 可存不注入 |
-| 逃生口理由 | 经验/业务知识偶发误判可容忍 | 方法论跨需求传播，错方法论**污染所有未来设计**，质量优先于速度 |
+| 注入条件 | endorsed **OR** occ≥3 | **endorsed OR occ≥3**（v0.11.11 重开逃生口） |
+| draft 行为 | 可存不注入 | 可存不注入（occ<3 且未 endorse 时不注入） |
+| 逃生口理由 | 经验/业务知识偶发误判可容忍 | occ≥3 是 ≥3 个独立需求命中同一指纹的强现实信号（非模型自信）；自动生效记录可 supersede 撤销 |
 
 **endorse 流程**：
 1. `kb add-expert --category <类> --principle "<原则>" --applicable-phases <阶段> --trigger <词>` → 落盘 `KB_expert.md`，`status=draft`，不注入
 2. 人工审阅 principle 是否真通用（脱业务成立）、category 是否准确、applicable_phases 是否合理
-3. `kb endorse --kind expert --id <KB-expert-xxxxxxxxxxxx>` → `status=endorsed` → 进 `##PRIOR_EXPERT_KB##`
+3. `kb endorse --kind expert --id <KB-expert-xxxxxxxxxxxx>` → `status=endorsed` → 进 `##PRIOR_EXPERT_KB##`（或 `--all-drafts` 一键全背）
 4. 误沉淀的 endorsed 记录 → `kb supersede --kind expert --id <id> --by <newid>` 归档，不再注入
 
-**draft 状态的记录**：结构合法（`verify_kb.py` 通过），但 Runtime 不注入——`_prior_expert_kb_block` 的信任门 `if r.get("status") != "endorsed": continue` 直接跳过。
+**自动生效（v0.11.11）**：同一 `category|principle[:40]` 指纹被 ≥3 个独立需求命中（`occurrences≥3`）→ 即便 `status=draft` 也注入（信任门 `status != "endorsed" and occurrences < 3` 才跳过）。误生效 → `kb supersede` 撤销。
+
+**draft 状态的记录**：结构合法（`verify_kb.py` 通过），但 occ<3 且未 endorse 时 Runtime 不注入——`_prior_expert_kb_block` 的信任门 `if r.get("status") != "endorsed" and (r.get("occurrences", 1) or 1) < 3: continue` 跳过。
 
 ---
 
@@ -157,7 +159,7 @@
 `_prior_expert_kb_block`（runtime）每阶段每轮（含自检轮）执行**三门过滤**：
 
 1. **适用性门**：当前 phase ∈ 记录 `applicable_phases`（空列表视为全阶段适用兜底）
-2. **信任门**：`status == "endorsed"`（endorsed-only，无 occ≥3 逃生口）
+2. **信任门**：`status == "endorsed"` **或** `occurrences ≥ 3`（v0.11.11 重开 occ≥3 逃生口）
 3. **相关性门**：trigger 在 REQ 文本命中 ≥2 **或** module 标题命中 REQ
 
 三门全过 → 渲染进 `##PRIOR_EXPERT_KB##`（`_render_expert_block`：category/principle/applicable_phases/trigger），注入当前阶段契约卡。
@@ -188,18 +190,18 @@
 ## 八、维护命令速查
 
 ```bash
-# 沉淀 draft（不注入）
-python runtime/qamaster_runtime.py kb add-expert \
+# 沉淀 draft（不注入）—— 自动提炼入口（v0.11.11：带确定性别忽略门，纠正原话命中可抽象信号才落盘）
+python runtime/qamaster_runtime.py kb extract-expert \
+  --reason "边界只测 min/max 漏 min+1" \
+  --req-id <req_id> \
   --category 边界值 \
   --principle "边界内邻接值 min+1/max-1 是 off-by-one 高发区，须独立用例不得合并" \
-  --applicable-phases 6/8/11 \
-  --trigger 边界/阈值/min/max/邻接 \
-  --module <需求名> \
-  --source-req <req_id>
-# （分隔符接受 / | , 、，可任选；但同一命令内勿混用以免可读性下降）
+  --applicable-phases 6/8/11
+# （reason 不含可抽象方法信号时 Runtime 拒绝：自动忽略，不进专家库）
 
-# endorse 后注入
+# endorse 后注入（单条 / 一键全背）
 python runtime/qamaster_runtime.py kb endorse --kind expert --id KB-expert-xxxxxxxxxxxx
+python runtime/qamaster_runtime.py kb endorse --kind expert --all-drafts
 
 # 查询某阶段适用方法论（验证注入）
 python runtime/qamaster_runtime.py kb query --kind expert --phase 6 --against <req文件>

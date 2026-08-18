@@ -56,7 +56,7 @@ _HEADER_LINES_EXPERT = [
     "> 由 qamaster Runtime 经 `kb add-expert` 沉淀 draft、人工 `kb endorse` 后注入 ##PRIOR_EXPERT_KB##。",
     "> **只存通用方法知识，不记录具体业务知识**（业务知识归 Knowledge_*.md/KB_business）。",
     "> **模型禁止 Write/Edit 本文件**（进化机制与模型无关铁律；方法论内容归属人类）。",
-    "> 仅 endorsed 记录才注入（无 occ≥3 逃生口）——错方法论污染所有未来设计，质量优先于速度。",
+    "> 仅 endorsed 或 occ≥3 记录才注入（v0.11.11 重开 occ≥3 逃生口）——错方法论污染所有未来设计，质量优先于速度；occ≥3 是强现实信号而非模型自信。",
     "",
     "---",
     "",
@@ -388,6 +388,28 @@ def endorse(path, rec_id):
     records[idx]["status"] = "endorsed"
     _save_records(path, records)
     return (True, "endorsed id=%s" % rec_id)
+
+
+def endorse_all(path, kind=None):
+    """批量背书：所有非 superseded_by 且 status==draft 的记录置 endorsed（一键背书）。
+
+    v0.11.11：闭合 RC-c（单条 endorse 摩擦）——用户回「通过」即全背。返回 (count, message)。
+    `kind` 可选过滤（lesson/business/expert），None 全库。调用方须持锁。
+    """
+    records = load_records(path)
+    count = 0
+    for r in records:
+        if r.get("superseded_by"):
+            continue
+        if r.get("status") != "draft":
+            continue
+        if kind is not None and r.get("kind") != kind:
+            continue
+        r["status"] = "endorsed"
+        count += 1
+    if count:
+        _save_records(path, records)
+    return (count, "endorsed %d draft(s)" % count)
 
 
 def supersede(path, old_id, new_id):

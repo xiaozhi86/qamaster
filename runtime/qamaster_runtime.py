@@ -424,10 +424,18 @@ _ABSTRACTION_SIGNALS = (
     "脱敏", "越权", "注入", "热更新", "重复提交",
 )
 
+# v0.11.11（项2）：expert category 词表（对齐 references/expert_kb.md §三 10 类）。
+# extract-expert 强制校验 category ∈ 本词表（确定性），防模型自由造类目污染方法决策匹配。
+_EXPERT_CATEGORIES = (
+    "边界值", "等价类", "状态迁移", "判定表", "场景法",
+    "错误推测", "契约测试", "安全", "幂等", "并发",
+)
+
 
 def _abstraction_hint(reason):
     """纠正 reason 命中可抽象方法信号词 → 返回命中词串；否则返回 ""。
-    纯 stdlib 子串匹配，零模型。仅用于 cmd_fail/cmd_patch 打印非约束性提示，
+    纯 stdlib 子串匹配，零模型。cmd_fail/cmd_patch 借此打印约束提炼指令，
+    _flag_expert_candidate 借此置位 pending_expert_extraction；
     不触碰 _maybe_capture_lesson（护其静默/150/0 不变量）。"""
     if not reason:
         return ""
@@ -572,7 +580,7 @@ def _methodology_capture_hint(st, phase, spec):
         trig = r.get("trigger") or []
         trig_str = "/".join(str(t) for t in trig[:6]) if trig else "(无)"
         lines.append("    - %s [%s] %s （触发词: %s）" % (rid, cat, prin, trig_str))
-    lines.append("  → 人工审阅 principle 真通用后 `kb endorse --kind expert --id <id>`。")
+    lines.append("  → 人工审阅 principle 真通用后 `kb endorse --kind expert --id <id>`（或一键全背 `kb endorse --kind expert --all-drafts`）。")
     lines.append("    注意：trigger 若只含方法论术语（判定表/AND门等，REQ 正文不出现），endorse 后仍不会注入；")
     lines.append("    须保证 trigger 含 ≥2 个 REQ 域实词（会在需求正文逐字出现的信号词，如 全部条件/条件1/既不是/也不是）。")
     return "\n".join(lines)
@@ -609,6 +617,20 @@ def _maybe_capture_lesson(st, phase, reason, spec):
         print("  [WARN] 经验沉淀失败(不阻断): %s"
               % traceback.format_exc().splitlines()[-1])
     return None
+
+
+def _flag_expert_candidate(st, reason):
+    """纠正 reason 命中可抽象方法信号 → 置 st["pending_expert_extraction"]=reason，强制提炼。
+
+    v0.11.11（项1·自动识别）：把 _abstraction_hint 从"非约束 stdout 提示"升级为"有状态位的
+    约束指令"——fail/patch 通道 reason 是 CLI 参数、Runtime 可嗅探，命中即置位，卡片约束模型
+    必须跑 `kb extract-expert` 提炼落 draft（不执行视为漏沉淀）。纯 stdlib，零模型；不触碰
+    _maybe_capture_lesson（护其静默/150/0 不变量）。返回是否命中（bool）。
+    """
+    hit = _abstraction_hint(reason)
+    if hit:
+        st["pending_expert_extraction"] = (reason or "").strip()
+    return bool(hit)
 
 
 def _render_lessons_block(cands, tag, footer=""):
@@ -817,12 +839,13 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
     2. tag="PRIOR_EXPERT_KB"
     3. **按 applicable_phases 过滤**：当前 phase ∈ 记录 applicable_phases 才候选
        （空 applicable_phases 视为全阶段适用兜底）——实现"不适用的无需使用"
-    4. **信任门 endorsed-only**：仅 status==endorsed 才注入（删掉 occ≥3 逃生口）
-       ——方法论跨需求传播，错方法论污染所有未来设计，质量优先于速度
+    4. **信任门 endorsed 或 occ≥3**（v0.11.11 重开 occ≥3 逃生口）：status==endorsed，或
+       同指纹被 ≥3 个独立需求命中（occurrences≥3）才注入——方法论跨需求传播，
+       错方法论污染所有未来设计，质量优先于速度；occ≥3 是强现实信号而非模型自信
     相关性门同 lessons/business（surface≥2 或 module 标题命中）；
     v0.11.6：trigger 元素读取时先过 _split_tokens（legacy 畸形单元素串自愈）。
     每阶段每轮注入（含自检轮）：调用方 _card 不加 phase==0 守卫，0-14 全覆盖。
-    No-op：无 KB_expert.md / 无 endorsed 记录 / 当前 phase 无适用 / 无相关 → 返回 "" → 卡片逐字节一致。
+    No-op：无 KB_expert.md / 无 endorsed / 当前 phase 无适用 / 无相关 → 返回 "" → 卡片逐字节一致。
     """
     p = _kb_path(st.get("workdir", os.getcwd()), spec, "expert")
     if not os.path.isfile(p):
@@ -838,8 +861,8 @@ def _prior_expert_kb_block(st, phase, spec, top=3):
         ap = r.get("applicable_phases") or []
         if ap and str(phase_id) not in [str(x) for x in ap]:
             continue
-        # 信任门：endorsed-only（无 occ≥3 逃生口）
-        if r.get("status") != "endorsed":
+        # 信任门：endorsed 或 occ≥3（v0.11.11 重开 occ≥3 逃生口）
+        if r.get("status") != "endorsed" and (r.get("occurrences", 1) or 1) < 3:
             continue
         # 相关性门：surface≥2 或 module 标题命中。
         # v0.11.6（终极修复 RC-d）：存量 trigger 元素读取时先过 _split_tokens——
@@ -875,10 +898,10 @@ def _relevant_expert_on_fail(st, phase, fail_context, spec, top=3):
     helper，expert 无（"原地修复→重跑 gate"纠错循环里，专家方法论不被针对该具体失败原因
     定向检索，只在下次卡片渲染时以预防式身份重现）。本 helper 镜像 _relevant_lessons_on_fail
     的失败文本命中语义（hit_fail≥1 或 hit_req≥2），同时保留 _prior_expert_kb_block 的 expert
-    特有过滤：applicable_phases 适用门 + endorsed-only 信任门（无 occ≥3 逃生口——错方法论
-    污染所有未来设计）+ trigger 分词 + REQ 侧 _req_signal_hits 归一（子串遮蔽去重 + 编号
-    条件归一，护 RC-e/RC-f 不回归）。
-    No-op：无 KB_expert.md / 无 endorsed / 错阶段 / 失败文本无命中 → 返回 ""。
+    特有过滤：applicable_phases 适用门 + 信任门（endorsed 或 occ≥3——v0.11.11 重开
+    occ≥3 逃生口；错方法论污染所有未来设计，occ≥3 是强现实信号）+ trigger 分词 + REQ 侧
+    _req_signal_hits 归一（子串遮蔽去重 + 编号条件归一，护 RC-e/RC-f 不回归）。
+    No-op：无 KB_expert.md / 无 endorsed 且 occ<3 / 错阶段 / 失败文本无命中 → 返回 ""。
     """
     p = _kb_path(st.get("workdir", os.getcwd()), spec, "expert")
     if not os.path.isfile(p) or not (fail_context or "").strip():
@@ -895,8 +918,8 @@ def _relevant_expert_on_fail(st, phase, fail_context, spec, top=3):
         ap = r.get("applicable_phases") or []
         if ap and str(phase_id) not in [str(x) for x in ap]:
             continue
-        # 信任门：endorsed-only（无 occ≥3 逃生口，同预防式）
-        if r.get("status") != "endorsed":
+        # 信任门：endorsed 或 occ≥3（v0.11.11 重开 occ≥3 逃生口，同预防式）
+        if r.get("status") != "endorsed" and (r.get("occurrences", 1) or 1) < 3:
             continue
         # trigger 分词（legacy 畸形单元素串自愈，同预防式）
         words = _trigger_words(r)
@@ -1938,19 +1961,22 @@ def cmd_fail(a):
     # v0.9.0: 纠正发生 → 自动沉淀候选经验(draft)，纯 Runtime/静默/best-effort
     # 不阻断纠正（锁失败仅 WARN）；落 draft/occ=1 不过信任门→预防/反应都不注入（护 150/0）
     _maybe_capture_lesson(st, target["id"], a.reason, spec)
+    # v0.11.11（项1）：reason 命中可抽象方法信号 → 置位 pending_expert_extraction，强制提炼。
+    _flag_expert_candidate(st, a.reason)
     state_store.log_event(st, "rollback", phase=target["id"], detail=a.reason or "")
     state_store.save(path, st)
     print("ROLLBACK: 已回退到 Phase %d (%s)，原因: %s" % (target["id"], target["name"], a.reason or ""))
     print("按 output_write.md 修改流程起点判定：从本阶段起依次顺序执行至 Phase 14，不得跳阶段；")
     print("修改范围限定（只改问题点，无问题用例原样保留）。")
-    # 1a·抽象信号提示（非约束）：命中可抽象方法信号词时提示人工提炼为专家方法论。
-    # 不自动沉淀、不改铁律#5、不触碰 _maybe_capture_lesson（护其静默/150/0）；仅 stdout 提示。
+    # 1a·抽象信号提示（v0.11.11 升级为约束指令）：命中可抽象方法信号词时，约束模型必须跑
+    # kb extract-expert 提炼落 draft。置位 pending_expert_extraction 由 _flag_expert_candidate 完成；
+    # 此段仅 stdout 展示约束指令（卡片交付摘要回显 pending 状态）。
     _hint = _abstraction_hint(a.reason)
     if _hint:
-        print("  [提示·非约束] 此纠正含可抽象方法信号(%s)。" % _hint)
-        print("           若能脱业务提炼为通用方法论，可人工执行：")
-        print("           kb add-expert --category <类> --principle \"<脱业务原则>\" \\")
-        print("             --applicable-phases <阶段> --trigger <词>  (draft; endorse 后注入 ##PRIOR_EXPERT_KB##)")
+        print("  [约束指令] 本阶段纠正命中可抽象方法信号(%s)。完成本阶段前必须执行：" % _hint)
+        print("           kb extract-expert --reason \"%s\" --req-id %s --category <类> " % (a.reason, req_id))
+        print("             --principle \"<脱业务原则>\" --applicable-phases <阶段>")
+        print("           提炼落 draft；不执行视为漏沉淀。")
     print()
     # correction_context 传入 reason → _card 追加反应式 ##RELEVANT_LESSONS## 块（失败定向）
     print(_card(st, target, spec, correction_context=a.reason))
@@ -1995,20 +2021,23 @@ def cmd_patch(a):
     st["patch_directives"].append(directive)
     # v0.9.0: 纠正发生 → 自动沉淀候选经验(draft)，纯 Runtime/静默/best-effort
     _maybe_capture_lesson(st, target["id"], a.reason, spec)
+    # v0.11.11（项1）：reason 命中可抽象方法信号 → 置位 pending_expert_extraction，强制提炼。
+    _flag_expert_candidate(st, a.reason)
     state_store.log_event(st, "patch", phase=cur,
                           detail="→ Phase %d %s：%s" % (target["id"], target["name"], a.reason[:80]))
     state_store.save(path, st)
     print("PATCH: 已登记增量反哺指令 → Phase %d (%s)" % (target["id"], target["name"]))
     print("  原因: %s" % a.reason)
     print("  (不回退 current_phase=%d；指令将由当前/后续阶段契约卡的 ##PATCH_FEEDBACK## 段注入)" % cur)
-    # 1a·抽象信号提示（非约束）：命中可抽象方法信号词时提示人工提炼为专家方法论。
-    # 不自动沉淀、不改铁律#5、不触碰 _maybe_capture_lesson（护其静默/150/0）；仅 stdout 提示。
+    # 1a·抽象信号提示（v0.11.11 升级为约束指令）：命中可抽象方法信号词时，约束模型必须跑
+    # kb extract-expert 提炼落 draft。置位 pending_expert_extraction 由 _flag_expert_candidate 完成；
+    # 此段仅 stdout 展示约束指令（卡片交付摘要回显 pending 状态）。
     _hint = _abstraction_hint(a.reason)
     if _hint:
-        print("  [提示·非约束] 此纠正含可抽象方法信号(%s)。" % _hint)
-        print("           若能脱业务提炼为通用方法论，可人工执行：")
-        print("           kb add-expert --category <类> --principle \"<脱业务原则>\" \\")
-        print("             --applicable-phases <阶段> --trigger <词>  (draft; endorse 后注入 ##PRIOR_EXPERT_KB##)")
+        print("  [约束指令] 本阶段纠正命中可抽象方法信号(%s)。完成本阶段前必须执行：" % _hint)
+        print("           kb extract-expert --reason \"%s\" --req-id %s --category <类> " % (a.reason, req_id))
+        print("             --principle \"<脱业务原则>\" --applicable-phases <阶段>")
+        print("           提炼落 draft；不执行视为漏沉淀。")
     print()
     # correction_context 传入 reason → _card 追加反应式 ##RELEVANT_LESSONS## 块（失败定向）
     print(_card(st, spec.get_phase(cur), spec, correction_context=a.reason))
@@ -2206,9 +2235,9 @@ def cmd_manifest(a):
 
 
 def cmd_kb(a):
-    """KB_lessons.md 自我进化经验库维护（Runtime 独占，全程持 FileLock）。
+    """KB 三库自我进化经验库维护（Runtime 独占，全程持 FileLock）。
 
-    镜像 cmd_manifest 纪律：模型禁止直接 Write/Edit KB_lessons.md（进化机制与模型
+    镜像 cmd_manifest 纪律：模型禁止直接 Write/Edit KB_*.md（进化机制与模型
     无关铁律；经验内容归属人类）。捕获已由 fail/patch 自动触发，本命令族供人
     背书/废止/清理/检索/回放/补录。纯 Runtime，零模型调用。
 
@@ -2306,7 +2335,7 @@ def cmd_kb(a):
             else:
                 block = _prior_expert_kb_block(st_q, phase, spec, top=a.top or 3)
                 _print_block("PRIOR_EXPERT_KB（预防式·每阶段每轮·会注入）", block or "(无命中)")
-            print("  （top=%d；信任门：仅 endorsed；适用门：phase∈applicable_phases；相关性门：surface≥2 或标题命中）"
+            print("  （top=%d；信任门：endorsed 或 occ≥3；适用门：phase∈applicable_phases；相关性门：surface≥2 或标题命中）"
                   % (a.top or 3))
             return
         if a.context:
@@ -2413,9 +2442,61 @@ def cmd_kb(a):
         print("  draft 状态——未 endorse 不注入；人工 `kb endorse --kind expert --id %s` 后进 ##PRIOR_EXPERT_KB##" % fp)
         _verify_kb_after_write(spec, p)
         return
+    if action == "extract-expert":
+        # v0.11.11（项2·自动提炼）：带"纠正原话 + 确定性忽略门 + 强制校验"的提取入口。
+        # 与 add-expert 共享落盘逻辑（同 category|principle 指纹 → upsert 自动 occ++）。
+        # 忽略门（确定性）：reason 不含可抽象方法信号 → 拒绝（不进专家库，机器实现"不适合则忽略"）。
+        p = _kb_path(workdir, spec, "expert")
+        if not a.reason:
+            _die("kb extract-expert 需 --reason \"<纠正原话 verbatim>\"（fail/patch 纠正原话）")
+        if not _abstraction_hint(a.reason):
+            _die("此纠正不含可抽象方法信号，已自动忽略（不进专家库）")
+        if not a.category:
+            _die("kb extract-expert 需 --category <方法类目>")
+        if a.category.strip() not in _EXPERT_CATEGORIES:
+            _die("kb extract-expert --category 须取词表值（%s），收到「%s」"
+                 % ("/".join(_EXPERT_CATEGORIES), a.category.strip()))
+        if not a.principle:
+            _die("kb extract-expert 需 --principle \"<脱业务原则>\"（非空）")
+        trig = []
+        if a.trigger:
+            trig = _split_tokens(a.trigger)
+        # v0.11.11: 自动并入 REQ 域词（同 add-expert，护 RC-d/RC-f 不回归）。
+        sig = _req_signal_hits(_req_corpus_text(workdir, spec, a.req_id or a.source_req or ""))
+        if sig:
+            trig = sorted(set(trig) | set(sig))
+        ap_list = []
+        if a.applicable_phases:
+            ap_list = [int(x) for x in _split_tokens(a.applicable_phases)
+                       if x.isdigit()]
+        rec = {
+            "kind": "expert", "phase": "", "dimension": a.dimension or "通用",
+            "error_type": "方法提炼", "module": a.module or "",
+            "source_req": a.source_req or "manual", "captured": kb_store._today(),
+            "raw_text": a.principle.strip(), "status": "draft",
+            "occurrences": 1, "trigger": trig,
+            "category": a.category.strip(), "applicable_phases": ap_list,
+            "principle": a.principle.strip(),
+        }
+        with locking.FileLock(p, timeout=30):
+            fp = kb_store.upsert_lesson(p, rec)
+        _audit(a.req_id, "kb_extract_expert", detail="id=%s cat=%s" % (fp, rec["category"]))
+        print("KB EXTRACT-EXPERT: OK — id=%s（落 draft；指纹去重：同 category|principle 已合并则 occ++）" % fp)
+        print("  draft 状态——未 endorse 且 occ<3 不注入；occ≥3 自动生效，或人工 `kb endorse --kind expert --id %s`" % fp)
+        _verify_kb_after_write(spec, p)
+        return
     if action == "endorse":
+        # v0.11.11（项3·一键背书）：--all-drafts 批量背书（闭合 RC-c 单条摩擦）。
+        if a.all_drafts:
+            with locking.FileLock(p, timeout=30):
+                cnt, msg = kb_store.endorse_all(p, kind=(a.kind if a.kind in ("lesson", "business", "expert") else None))
+            _audit(a.req_id, "kb_endorse_all", detail="kind=%s n=%d" % (a.kind, cnt))
+            print("KB ENDORSE-ALL: %d 条 draft 已背书（%s）" % (cnt, msg))
+            if cnt == 0:
+                print("  （无待背书 draft，no-op）")
+            return
         if not a.id:
-            _die("kb endorse 需 --id <经验id>")
+            _die("kb endorse 需 --id <经验id>（或 --all-drafts 一键全背）")
         with locking.FileLock(p, timeout=30):
             ok, msg = kb_store.endorse(p, a.id)
         _audit(a.req_id, "kb_endorse", detail="id=%s" % a.id)
@@ -2557,7 +2638,8 @@ def main():
 
     sp = sub.add_parser("kb", help="KB 经验库维护（自我进化·Runtime 独占，模型禁止 Write/Edit）")
     sp.add_argument("action", choices=["list", "show", "query", "distill", "reconcile",
-                                       "add-lesson", "add-expert", "endorse", "supersede", "prune"])
+                                       "add-lesson", "add-expert", "extract-expert",
+                                       "endorse", "supersede", "prune"])
     sp.add_argument("--kind", default="lesson", choices=["lesson", "business", "expert", "all"],
                     help="KB 种类：lesson=经验库（默认）/business=业务知识库/expert=专家方法论库/all=合并读（list）")
     sp.add_argument("--id", default=None, help="经验 id（show/endorse/supersede --id/prune --id）")
@@ -2571,16 +2653,20 @@ def main():
     sp.add_argument("--older-than", default=None, type=int, help="prune：N 天前（配合 --status draft）")
     sp.add_argument("--summary", default=None, help="add-lesson：经验原文（人类原话 verbatim）")
     sp.add_argument("--trigger", default=None,
-                    help="add-lesson/add-expert：触发词，'/' 或 '|' 或 ',' 或 '、'/'，' 分隔")
+                    help="add-lesson/add-expert/extract-expert：触发词，'/' 或 '|' 或 ',' 或 '、'/'，' 分隔")
     sp.add_argument("--module", default=None, help="add-lesson/add-expert：模块/需求名（仅溯源展示）")
-    sp.add_argument("--source-req", default=None, help="add-lesson/add-expert：来源需求 id")
-    # add-expert 专用（专家方法论结构化字段）
+    sp.add_argument("--source-req", default=None, help="add-lesson/add-expert/extract-expert：来源需求 id")
+    # add-expert / extract-expert 专用（专家方法论结构化字段）
     sp.add_argument("--category", default=None,
-                    help="add-expert：方法类目（边界值/等价类/状态迁移/判定表/场景法/错误推测/契约测试/安全/幂等/并发…）")
+                    help="add-expert/extract-expert：方法类目（边界值/等价类/状态迁移/判定表/场景法/错误推测/契约测试/安全/幂等/并发）")
     sp.add_argument("--principle", default=None,
-                    help="add-expert：方法原则（脱业务后仍成立的通用原则，人类标注非模型生成）")
+                    help="add-expert/extract-expert：方法原则（脱业务后仍成立的通用原则，人类标注非模型生成）")
     sp.add_argument("--applicable-phases", dest="applicable_phases", default=None,
-                    help="add-expert：适用阶段，'/' 或 '|' 或 ',' 或 '、'/'，' 分隔（如 6/8/11）；空则全阶段适用兜底")
+                    help="add-expert/extract-expert：适用阶段，'/' 或 '|' 或 ',' 或 '、'/'，' 分隔（如 6/8/11）；空则全阶段适用兜底")
+    sp.add_argument("--reason", default=None,
+                    help="extract-expert：纠正原话 verbatim（fail/patch 的 --reason）；命中可抽象信号才落 draft，否则忽略")
+    sp.add_argument("--all-drafts", dest="all_drafts", action="store_true",
+                    help="endorse：一键背书全部 draft（替代逐条 --id）")
     _ri(sp)
     _wf(sp)
     _wd(sp)

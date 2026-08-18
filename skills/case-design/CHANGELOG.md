@@ -6,6 +6,27 @@
 
 # 发布说明（面向使用者）
 
+## v0.11.11（2026-08-18，专家方法论自动识别·提炼·沉淀）
+
+**本次发布把专家方法论沉淀从"人肉"升级为"半自动"**——闭合 v0.11.3 留下的"沉淀侧仍靠人肉"缺口：新增 `kb extract-expert`（带确定性别忽略门 + 自动并入 REQ 域词）与 `kb endorse --all-drafts` 一键背书；`fail`/`patch` 纠正命中可抽象信号时 Runtime 置位强制提炼；专家信任门重开 `endorsed 或 occ≥3`——同方法论被 ≥3 个独立需求命中即自动生效（可 `kb supersede` 撤销）。
+
+**核心机制**：
+- **自动识别**（`_flag_expert_candidate`）：`cmd_fail`/`cmd_patch` 里 reason 命中 `_ABSTRACTION_SIGNALS` → 置位 `st["pending_expert_extraction"]`，并把原"非约束提示"升级为"约束指令"（模型必须跑 `kb extract-expert` 提炼落 draft）。无命中 → 逐字节不变（护 150/0）。
+- **自动提炼**（`kb extract-expert`）：`--reason` 纠正原话 + `--category`（强制 ∈ `_EXPERT_CATEGORIES` 10 类词表）+ `--principle`（非空）+ `--applicable-phases`。忽略门（确定性）：reason 不含可抽象信号 → 拒绝。自动并入 REQ 域词（复用 add-expert 的 `_req_signal_hits`，护 RC-d/RC-f）。
+- **信任门重开 occ≥3**：`_prior_expert_kb_block` / `_relevant_expert_on_fail` 由 `status != "endorsed"` 改为 `status != "endorsed" and (occurrences or 1) < 3`。这是对 v0.11.3 经用户确认的 endorsed-only 的显式反转，由"≥3 独立需求现实验证 + 可 supersede 撤销"双重兜底。
+- **一键背书**（`kb_store.endorse_all` + `kb endorse --all-drafts`）：用户回「通过」→ 模型跑一条命令全背，闭合 RC-c 单条 endorse 摩擦。
+
+**变更文件**：
+- `runtime/qamaster_runtime.py`：信任门两行重开 + docstring；`_flag_expert_candidate` + `cmd_fail`/`cmd_patch` 挂接；`_EXPERT_CATEGORIES` 词表常量；`cmd_kb` 增 `extract-expert` + `endorse --all-drafts`；argparse 增 `extract-expert` action / `--reason` / `--all-drafts`。
+- `runtime/kb_store.py`：`endorse_all(path, kind=None)` 批量背书；`_HEADER_LINES_EXPERT` 信任门表述更新。
+- `scripts/test_runtime.py`：翻转 `test_expert_draft_blocked_trust_gate`（occ=3 现注入）；新增 occ≥3 自动生效 / occ=1 仍阻断 / extract-expert 忽略门 / endorse --all-drafts 测试。
+- `skills/case-design/references/expert_kb.md`：§五 信任门表 / §六 三门过滤 / §一 捕获时机 / §八 命令速查同步。
+- `skills/case-design/SKILL.md`：铁律 #5 信任门表述 + extract-expert/一键背书命令同步。
+- `skills/case-design/CHANGELOG.md`：本说明。
+- `.claude-plugin/plugin.json` + `marketplace.json`：版本字段为 `1.0.0`（与 skill 语义版本 0.11.x 解耦），本次不改。
+
+---
+
 ## v0.11.3（2026-08-11，专家知识库 KB_expert.md·从用户纠正中自我进化测试设计方法论）
 
 **本次发布补齐"从用户纠正中提炼通用测试设计方法论"的闭环**——既有 `KB_lessons.md`（人类原话 verbatim）与 `KB_business.md`（业务知识聚合）之外，新增第三类 KB `KB_expert.md`（`kind=expert`），专门存**脱业务实体后仍成立的通用测试设计方法论**，经 `endorse` 后按阶段适用性注入 case-design 0-14 阶段每轮（含自检轮）。

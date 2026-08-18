@@ -458,7 +458,7 @@ def main():
     test_kb_business_separate_from_lessons()
     test_kb_query_top_preview()
 
-    # KB 专家方法论库（v0.11.7·机制与模型无关·10 项·护 150/0 endorsed-only）
+    # KB 专家方法论库（v0.11.7·机制与模型无关·护 150/0·endorsed 或 occ≥3）
     test_expert_noop_preserves_baseline()
     test_expert_draft_blocked_trust_gate()
     test_expert_endorsed_injected()
@@ -475,6 +475,10 @@ def main():
     test_expert_ledger_numbered_cond_injection()
     # v0.11.9（RC-g）回归：补齐专家库反应式失败定向（失败文本命中→RELEVANT_EXPERT_KB）
     test_expert_reactive_on_fail()
+    # v0.11.11（专家方法论自动沉淀）回归：extract-expert 忽略门/落盘/域词并入 + 一键背书 + 置位
+    test_extract_expert_ignore_gate_and_drop()
+    test_endorse_all_drafts()
+    test_flag_expert_candidate_sets_state()
 
     # v0.11.10（缺陷4）回归：requirement-review 轻量状态机（注册 + 自动门 + 人工确认门 + 末阶段 DONE）
     test_requirement_review_state_machine()
@@ -2132,8 +2136,8 @@ def test_expert_noop_preserves_baseline():
 
 
 def test_expert_draft_blocked_trust_gate():
-    """draft + 过适用性门 + 过相关性门 → 仍返 ''（endorsed-only 信任门阻断，无 occ≥3 逃生口）。"""
-    print("\n[kb-expert] draft 过双门仍不注入（endorsed-only 信任门，无 occ≥3 逃生口）")
+    """draft + 过适用性门 + 过相关性门 → occ<3 仍返 ''（信任门阻断）；occ≥3 自动生效注入。"""
+    print("\n[kb-expert] draft occ<3 阻断（信任门）；occ≥3 自动生效注入")
     import qamaster_runtime as rt
     import kb_store
     from case_design import spec as _cd_spec
@@ -2152,17 +2156,18 @@ def test_expert_draft_blocked_trust_gate():
         st = _kb_state(workdir, rid)
         phase6 = spec.get_phase(6)
         block = rt._prior_expert_kb_block(st, phase6, spec)
-        check("draft 过适用+相关 → PRIOR_EXPERT_KB 仍空（信任门阻断）",
-              block == "", "draft 不应注入: %s" % block)
-        # 即便 occ=3（draft 累积）仍不注入——expert 无 occ≥3 逃生口
+        check("draft occ=1 过适用+相关 → PRIOR_EXPERT_KB 仍空（信任门阻断）",
+              block == "", "draft occ=1 不应注入: %s" % block)
+        # v0.11.11: occ=3（draft 累积 ≥3 独立需求命中）→ 自动生效注入（无 occ≥3 逃生口反转）
         rec3 = _kb_expert_rec(
             fp, "判定表", "N个AND门前置条件须判定表穷举2^n全行", [6, 8, 11],
             "draft", 3, ["全部条件", "条件1", "条件2", "判定表"],
             "判定表穷举方法论 draft occ=3", source_req="A")
         _kb_seed_expert(workdir, [rec3])
         block3 = rt._prior_expert_kb_block(st, phase6, spec)
-        check("draft occ=3 仍不注入（expert 无 occ≥3 逃生口）",
-              block3 == "", "occ≥3 不应放行 expert: %s" % block3)
+        check("draft occ=3 自动生效注入（expert occ≥3 逃生口重开）",
+              bool(block3) and "##PRIOR_EXPERT_KB##" in block3,
+              "occ≥3 应放行 expert: %s" % block3)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -2289,6 +2294,108 @@ def test_add_expert_trigger_tokenization():
               "id=%s" % recs[0].get("id"))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_extract_expert_ignore_gate_and_drop():
+    """kb extract-expert：reason 无抽象信号 → 拒绝（忽略门）；有信号 → 落 draft + 并入 REQ 域词；category 越界 → 拒绝。"""
+    print("\n[kb-expert] extract-expert 忽略门/落盘/域词并入/category 越界拒绝")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-extract-")
+    try:
+        rid = "expert-extract-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        ep = _kb_expert_path_of(workdir)
+        # ① 忽略门：reason 无抽象信号 → 拒绝（rc=2），不落盘
+        r = run(workdir, "kb", "extract-expert",
+                "--reason", "RK16 没引",
+                "--req-id", rid,
+                "--category", "判定表",
+                "--principle", "随便一条原则",
+                req_id=rid, expect_rc=2)
+        check("忽略门：无抽象信号 reason → 拒绝", "已自动忽略" in r.stdout, r.stdout[:300])
+        check("忽略门拒绝后 KB_expert.md 不创建", not os.path.isfile(ep), "不应落盘")
+        # ② category 越界 → 拒绝
+        r = run(workdir, "kb", "extract-expert",
+                "--reason", "边界只测 min/max 漏 min+1",
+                "--req-id", rid,
+                "--category", "任意自造类",
+                "--principle", "边界内邻接值须独立用例",
+                req_id=rid, expect_rc=2)
+        check("category 越界 → 拒绝", "须取词表值" in r.stdout, r.stdout[:300])
+        # ③ 有信号 + 合法 category → 落 draft + 自动并入 REQ 域词
+        r = run(workdir, "kb", "extract-expert",
+                "--reason", "边界只测 min/max 漏 min+1",
+                "--req-id", rid,
+                "--category", "边界值",
+                "--principle", "边界内邻接值 min+1/max-1 是 off-by-one 高发区",
+                "--applicable-phases", "6/8/11",
+                req_id=rid, expect_rc=0)
+        check("extract-expert rc=0", r.returncode == 0, "rc=%d\n%s" % (r.returncode, r.stdout[:300]))
+        check("extract-expert 输出 OK", "KB EXTRACT-EXPERT: OK" in r.stdout, r.stdout[:300])
+        check("KB_expert.md 被创建", os.path.isfile(ep), "应落盘")
+        recs = kb_store.load_records(ep)
+        check("落盘一条 expert draft", len(recs) == 1 and recs[0].get("status") == "draft",
+              "recs=%s" % recs[0].get("status") if recs else "无记录")
+        # 域词并入（RC-d/RC-f）：REQ 含 全部条件/条件1/条件2/条件3 → trigger 应含编号条件归一
+        trig = recs[0].get("trigger", []) if recs else []
+        check("extract-expert 自动并入 REQ 域词（条件1/条件2/条件3）",
+              "条件1" in trig and "条件2" in trig and "条件3" in trig,
+              "trigger=%s" % trig)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_endorse_all_drafts():
+    """kb endorse --all-drafts：多条 expert draft → 全 endorsed；再 endorse → no-op。"""
+    print("\n[kb-expert] endorse --all-drafts 一键背书")
+    import kb_store
+    workdir = tempfile.mkdtemp(prefix="qamaster-kbexp-endorseall-")
+    try:
+        rid = "expert-endorseall-req"
+        _kb_req_file(workdir, rid, _KB_REQ_EXPERT % rid)
+        fp1 = kb_store.fingerprint({"kind": "expert", "category": "判定表",
+                                     "principle": "AND门须判定表穷举2^n全行"})
+        fp2 = kb_store.fingerprint({"kind": "expert", "category": "边界值",
+                                     "principle": "边界内邻接值min+1/max-1须独立用例"})
+        _kb_seed_expert(workdir, [
+            _kb_expert_rec(fp1, "判定表", "AND门须判定表穷举2^n全行", [6, 8, 11],
+                           "draft", 1, ["判定表", "组合"], "draft 1", source_req="A"),
+            _kb_expert_rec(fp2, "边界值", "边界内邻接值min+1/max-1须独立用例", [6, 8, 11],
+                           "draft", 1, ["边界", "阈值"], "draft 2", source_req="A"),
+        ])
+        r = run(workdir, "kb", "endorse", "--kind", "expert", "--all-drafts",
+                req_id=rid, expect_rc=0)
+        check("endorse --all-drafts rc=0", r.returncode == 0, "rc=%d\n%s" % (r.returncode, r.stdout[:300]))
+        check("endorse --all-drafts 输出 2 条", "2 条 draft 已背书" in r.stdout, r.stdout[:300])
+        recs = kb_store.load_records(_kb_expert_path_of(workdir))
+        check("全部 endorsed", all(rr.get("status") == "endorsed" for rr in recs),
+              "status=%s" % [rr.get("status") for rr in recs])
+        # 再 endorse → no-op（0 条）
+        r2 = run(workdir, "kb", "endorse", "--kind", "expert", "--all-drafts",
+                 req_id=rid, expect_rc=0)
+        check("再次 endorse → no-op（0 条）", "0 条 draft 已背书" in r2.stdout, r2.stdout[:300])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_flag_expert_candidate_sets_state():
+    """_flag_expert_candidate：命中信号 → 置位 pending_expert_extraction；无命中 → 不写。"""
+    print("\n[kb-expert] _flag_expert_candidate 置位 pending_expert_extraction")
+    import qamaster_runtime as rt
+    st = {"workdir": tempfile.mkdtemp(prefix="qamaster-flag-")}
+    try:
+        hit = rt._flag_expert_candidate(st, "边界只测 min/max 漏 min+1")
+        check("命中信号 → 返回 True", hit is True)
+        check("命中信号 → 置位 pending_expert_extraction",
+              st.get("pending_expert_extraction") == "边界只测 min/max 漏 min+1",
+              "st=%s" % st.get("pending_expert_extraction"))
+        st2 = {"workdir": st["workdir"]}
+        hit2 = rt._flag_expert_candidate(st2, "RK16 没引")
+        check("无信号 → 返回 False", hit2 is False)
+        check("无信号 → 不写 pending_expert_extraction",
+              "pending_expert_extraction" not in st2, "st2=%s" % st2)
+    finally:
+        shutil.rmtree(st["workdir"], ignore_errors=True)
 
 
 def test_verify_kb_softwarn_pipe_trigger():
@@ -2557,12 +2664,13 @@ def test_expert_ledger_numbered_cond_injection():
 
 def test_expert_reactive_on_fail():
     """反应式专家方法论定向（RC-g）：失败文本命中→注入 ##RELEVANT_EXPERT_KB##；
-    错阶段 / draft / 失败文本无命中且 REQ 无命中 → ''。
+    错阶段 / draft occ<3 / 失败文本无命中且 REQ 无命中 → ''。
+    v0.11.11：信任门重开 occ≥3——draft occ=3 反应式也注入。
 
     镜像 test_kb_business_reactive_injects_on_fail 与 test_kb_reactive_failure_targeted，
-    但保留 expert 特有过滤：applicable_phases 适用门 + endorsed-only 信任门（无 occ≥3 逃生口）。
+    但保留 expert 特有过滤：applicable_phases 适用门 + 信任门（endorsed 或 occ≥3）。
     """
-    print("\n[kb-expert] 反应式失败定向（RC-g）：失败文本命中→注入；错阶段/draft/无命中→''")
+    print("\n[kb-expert] 反应式失败定向（RC-g）：失败文本命中→注入；错阶段/draft occ<3/无命中→''")
     import qamaster_runtime as rt
     import kb_store
     from case_design import spec as _cd_spec
@@ -2590,7 +2698,7 @@ def test_expert_reactive_on_fail():
         # ② 错阶段（phase 3 不在 applicable_phases [6,8,11]）→ 适用门阻断 → ''
         wrong_phase = rt._relevant_expert_on_fail(st, phase3, "AND门组合未用判定表穷举", spec)
         check("错阶段 → 适用门阻断返空", wrong_phase == "", "适用门失效: %s" % wrong_phase)
-        # ③ draft（endorsed-only 信任门，无 occ≥3 逃生口）→ ''（失败文本命中但信任门阻断）
+        # ③ draft occ=3（v0.11.11 信任门重开 occ≥3 逃生口）→ 失败文本命中即注入
         fp2 = kb_store.fingerprint({"kind": "expert", "category": "状态机",
                                      "principle": "状态机须覆盖终态后非法流转拦截"})
         _kb_seed_expert(workdir, [_kb_expert_rec(
@@ -2598,8 +2706,19 @@ def test_expert_reactive_on_fail():
             "draft", 3, ["状态机", "非法流转", "终态"],
             "状态机方法论 draft occ=3", source_req="A")])
         draft_block = rt._relevant_expert_on_fail(st, phase6, "状态机终态非法流转未拦截", spec)
-        check("draft occ=3 反应式仍不注入（endorsed-only）", draft_block == "",
-              "信任门失效: %s" % draft_block)
+        check("draft occ=3 反应式自动生效注入（occ≥3 逃生口重开）",
+              bool(draft_block) and "##RELEVANT_EXPERT_KB##" in draft_block,
+              "信任门应放行 occ=3 expert: %s" % draft_block)
+        # ③' draft occ=1 → 反应式仍不注入（信任门阻断）
+        fp1 = kb_store.fingerprint({"kind": "expert", "category": "场景法",
+                                     "principle": "端到端主链路须覆盖正常+关键异常分支"})
+        _kb_seed_expert(workdir, [_kb_expert_rec(
+            fp1, "场景法", "端到端主链路须覆盖正常+关键异常分支", [6, 8],
+            "draft", 1, ["场景法", "主链路", "异常分支"],
+            "场景法方法论 draft occ=1", source_req="A")])
+        draft_block1 = rt._relevant_expert_on_fail(st, phase6, "场景法主链路漏异常分支", spec)
+        check("draft occ=1 反应式仍不注入（信任门阻断）", draft_block1 == "",
+              "occ<3 不应放行 expert: %s" % draft_block1)
         # ④ endorsed 但 trigger 与 REQ/失败文本零重叠 → 相关性门阻断 → ''
         #    用独立 req_id（REQ 无 全部条件/条件N 等词）避免 hit_req≥2 误放行
         rid2 = "界面需求-20260817"

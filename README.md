@@ -3,7 +3,7 @@
 > 企业级 AI QA 工具集 —— 用「规格先行、测试驱动」的方式，把需求文档自动变成高质量、可执行、可追溯的测试用例，并对需求文档本身做多角色专家评审。
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Version](https://img.shields.io/badge/version-0.11.10-green)
+![Version](https://img.shields.io/badge/version-0.11.11-green)
 ![Python](https://img.shields.io/badge/python-3.7+-blue)
 ![Platforms](https://img.shields.io/badge/platform-Claude%20Code%20%7C%20Codex%20%7C%20Cursor-9cf)
 ![CI](https://github.com/xiaozhi86/qamaster/actions/workflows/check-plugin.yml/badge.svg)

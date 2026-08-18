@@ -1,7 +1,7 @@
 # requirement-review — 需求文档多角色评审 Skill（Claude Code）
 
 > 版本：v0.2.0 · 更新：2026-08-18 · 版本变更明细见 `CHANGELOG.md`
-> Runtime 受控流程已随插件 v0.11.10 迁移（8 阶段状态机，见 §7）
+> Runtime 受控流程已随插件 v0.11.11 迁移（8 阶段状态机，见 §7）
 
 一套跑在 **Claude Code** 上的需求文档评审 Skill：输入需求文档（支持含图 / 扫描件 / Word / PDF / PPT / Excel），内部 7 个专家 Agent 并行评审，Review Master 汇总去重 + 冲突仲裁，经用户确认后自动重构出一份**高质量、可开发、可测试**的需求文档，并附评审问题详情清单。
 
@@ -176,7 +176,7 @@
 
 ## 7. 评审流程（Runtime 状态机）
 
-SKILL.md 的「并行评审 + 汇总仲裁」9 阶段（0-9）已压缩为 **8 个受控阶段（0-7）**，由 `runtime/requirement_review_phases.py` 驱动（v0.11.10 起，与 case-design 同走通用 workflow 引擎）：
+SKILL.md 的「并行评审 + 汇总仲裁」9 阶段（0-9）已压缩为 **8 个受控阶段（0-7）**，由 `runtime/requirement_review_phases.py` 驱动（v0.11.11 起，与 case-design 同走通用 workflow 引擎）：
 
 | # | 阶段 | gate | 出口检查 |
 |---|---|---|---|
