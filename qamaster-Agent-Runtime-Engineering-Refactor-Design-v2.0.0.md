@@ -24,8 +24,9 @@
 
 - [`skills/case-design/PHASE_GATE_DESIGN.md`](skills/case-design/PHASE_GATE_DESIGN.md) — 门禁前移（Phase 3/5/7/8/10 出口 gate 由 runtime 强制）+ 跨阶段制品传递（state.json `artifacts` 注册表 + 契约卡 `PRIOR_ARTIFACTS` 注入）。
 - [`COVERAGE_HARDENING_DESIGN-v1.0.0.md`](COVERAGE_HARDENING_DESIGN-v1.0.0.md) — 覆盖率四道硬门（需求条目 + 测试点 + 风险 + 安全）+ 设计文档作为正式追溯源。
+- [`skills/case-design/EXPERT_KB_AUTO_SEDIMENT_DESIGN-v1.0.0.md`](skills/case-design/EXPERT_KB_AUTO_SEDIMENT_DESIGN-v1.0.0.md) — 专家方法论沉淀侧自动化（自动识别可抽象反馈 + `kb extract-expert` 自动提炼 + occ≥3 自动生效 / 一键背书）。
 
-本文（v2.1.0）描述**流程控制层**的整体架构、多需求并行机制与自我进化知识系统；上面两份描述**质量门禁层**的细节。两层共同兑现"Runtime 控制流程、模型执行任务"。
+本文（v2.1.0）描述**流程控制层**的整体架构、多需求并行机制与自我进化知识系统；上面三份描述**质量门禁层**与**自我进化沉淀侧**的细节。两层共同兑现"Runtime 控制流程、模型执行任务"。
 
 ---
 
