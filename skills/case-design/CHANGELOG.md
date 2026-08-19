@@ -6,6 +6,25 @@
 
 # 发布说明（面向使用者）
 
+## v0.11.13（2026-08-19，上下文/token 主动防护层）
+
+**本次发布给 Runtime 补一层主动、建议性、可度量的上下文防护**——闭合上一轮分析发现的"全程会话转录持续累积、超限处理完全依赖 Claude Code 原生压缩、qamaster 自身无任何 token 计量"缺口。
+
+**核心机制（默认零输出，小/中需求下与现状逐字节一致）**：
+- **阈值门控 `##CONTEXT_BUDGET##`**：`_context_budget_block` 估算当前工作集 token（REQ + KB + refs 输入 / 用例行数与输出 token），越过告警线才在契约卡末尾追加「压缩 → PART 拆分 → 分响应」三条合法出口 + 靠后阶段附「可先 `/compact`（状态已落盘，压缩后 `status` 可恢复）」。未越线 → 返回 `""`，卡片与现状逐字节一致（复用既有「无 KB → no-op」惯例）。
+- **阶段边界建议**：case-design Phase 8/13、requirement-review Phase 5/6 这些已知重输出点，即便 REQ 不大也恒追加一行 advisory。
+- **`context` 只读命令**：`context --workflow <wf> --req-id <id>` 结构化打印工作集估算与**累计输入/输出 token**（qamaster 足迹，由 `_cumulative_footprint` 幂等重算，不写 state.json 新字段；非模型真实会话 token）。
+- **纯 stdlib、确定性、只读/只追加文本**：不新增门禁、不改状态机、不改状态 schema、不改既有测试断言。
+
+**case-design / requirement-review 零影响**：`phases.py`/`requirement_review_phases.py`/`manifest.py`/`state_store.py`/`kb_store.py`/`locking.py`/`registry.py` 与两个 workflow 文件**完全未改**；估算 helper 与 `_context_budget_block` 为纯函数、不被门禁/状态机调用；`status` 既有 JSON 键保持不变（累计量只暴露在新增的 `context` 命令）。全量 434 项断言（422 既有 + 12 新增上下文防护回归）保持绿。
+
+**变更文件**：
+- `runtime/qamaster_runtime.py`：新增 `_est_tokens`/`_file_tokens`/`_count_case_rows`/`_kb_counts` 估算 helper、`_budget_snapshot`/`_context_budget_block`（阈值门控 advisory）、`_cumulative_footprint`（累计足迹幂等重算）、`cmd_context`（只读诊断命令）；`_card()` 末尾按需接入 `##CONTEXT_BUDGET##`。
+- `scripts/test_runtime.py`：新增 `test_context_budget_guard`（默认零输出、越线才提示、阶段边界提示、`context` 命令字段、累计幂等/单调、`status` 形状不变）。
+- `skills/case-design/SKILL.md` + `skills/requirement-review/SKILL.md` + 根 `README.md` + 本说明同步（文档纯说明，不影响运行时行为）。
+
+---
+
 ## v0.11.12（2026-08-18，requirement-review 完整多需求并行评审支持）
 
 **本次发布把 requirement-review 从「单需求评审」升级为「同工程多需求并行评审」**——闭合 v0.11.10 引入 requirement-review 状态机时遗留的两处多需求缺口：门禁 req_id 未隔离（串扰）与无聚合索引（缺失）。

@@ -486,6 +486,8 @@ def main():
     test_requirement_review_state_machine()
     # v0.11.12 回归：requirement-review 多需求并发门禁 req_id 隔离 + MANIFEST 聚合
     test_requirement_review_concurrent_reqs()
+    # v0.11.13 回归：上下文预算防护（阈值门控 + context 命令 + 累计足迹）
+    test_context_budget_guard()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -2949,6 +2951,83 @@ def test_requirement_review_concurrent_reqs():
         # status --all 列出两 req
         rall = run(workdir, "status", "--all", "--workflow", "requirement-review", req_id=None, expect_rc=0)
         check("status --all 列出两 req", rA in rall.stdout and rB in rall.stdout, rall.stdout[:400])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_context_budget_guard():
+    """v0.11.13 上下文防护：阈值门控 advisory 块（默认零输出）+ context 只读命令 + 累计足迹幂等。
+
+    验证：①小需求（REQ 小/无 KB/轻阶段）→ _context_budget_block 返回 ''（卡片与现状逐字节一致）；
+    ②大 REQ 越线 → 出现 ##CONTEXT_BUDGET##；③case-design Phase 8 / requirement-review Phase 5
+    出现 /compact 重输出提示、轻阶段不出现；④context 命令输出结构化 JSON + 累计非负；
+    ⑤累计幂等（重跑相等）+ 单调（落 TestCases 后 output 增）；⑥status 输出不含 cumulative 键。
+    """
+    print("\n[context-budget] 上下文预算防护（阈值门控 + context 命令 + 累计足迹）")
+    import qamaster_runtime as rt
+    rt._register_workflows()
+    from case_design import spec as _cd_spec
+    from registry import get_workflow
+    cd = _cd_spec()
+    rr = get_workflow("requirement-review")
+    workdir = tempfile.mkdtemp(prefix="qamaster-ctx-")
+    rid = "上下文测试-20260819"
+    try:
+        # ① 默认零输出：小 REQ、轻阶段
+        st = {"workdir": workdir, "req_id": rid, "depth": "heavy", "run_mode": "full",
+              "completed": [], "current_phase": 0}
+        check("小需求 Phase 0 → 无 CONTEXT_BUDGET", rt._context_budget_block(st, cd.get_phase(0), cd) == "")
+        check("小需求 Phase 1 → 无 CONTEXT_BUDGET", rt._context_budget_block(st, cd.get_phase(1), cd) == "")
+
+        # ② 越线才提示：写大 REQ（> CTX_INPUT_TOKENS_WARN）
+        big_req = os.path.join(workdir, "case-design-out", "REQ_%s.md" % rid)
+        os.makedirs(os.path.dirname(big_req), exist_ok=True)
+        with open(big_req, "w", encoding="utf-8") as f:
+            f.write("# 大需求\n\n" + ("需" * 70000) + "\n")
+        block = rt._context_budget_block(st, cd.get_phase(1), cd)
+        check("大 REQ 越线 → 出现 CONTEXT_BUDGET", "##CONTEXT_BUDGET##" in block, block[:200])
+        check("越线文案含压缩/PART 建议", ("压缩" in block) or ("PART" in block), block[:200])
+        os.remove(big_req)
+
+        # ③ 阶段边界提示：Phase 8（case-design）、Phase 5（requirement-review）恒含 /compact；轻阶段不含
+        st2 = {"workdir": workdir, "req_id": rid, "depth": "heavy", "run_mode": "full"}
+        c8 = rt._context_budget_block(st2, cd.get_phase(8), cd)
+        check("case-design Phase 8 → /compact 提示", "/compact" in c8, c8[:200])
+        c1 = rt._context_budget_block(st2, cd.get_phase(1), cd)
+        check("case-design Phase 1 → 无 /compact（非重输出）", "/compact" not in c1)
+        r5 = rt._context_budget_block(st2, rr.get_phase(5), rr)
+        check("requirement-review Phase 5 → /compact 提示", "/compact" in r5, r5[:200])
+
+        # ④ context 命令（真实子命令）+ 累计非负
+        run(workdir, "start", "--req-id", rid, req_id=rid, expect_rc=0)
+        r = run(workdir, "context", req_id=rid, expect_rc=0)
+        snap = json.loads(r.stdout)
+        check("context 输出含 workflow/phase/累计字段",
+              snap.get("workflow") == "case-design" and "cumulative" in snap and
+              isinstance(snap["cumulative"].get("input_tokens_est"), int) and
+              isinstance(snap["cumulative"].get("output_tokens_est"), int),
+              r.stdout[:400])
+        check("context 累计非负",
+              snap["cumulative"]["input_tokens_est"] >= 0 and snap["cumulative"]["output_tokens_est"] >= 0)
+
+        # ⑤ 累计幂等 + 单调（落 TestCases 后 output 增）
+        r2 = run(workdir, "context", req_id=rid, expect_rc=0)
+        snap2 = json.loads(r2.stdout)
+        check("累计幂等（重跑相等）",
+              snap2["cumulative"]["output_tokens_est"] == snap["cumulative"]["output_tokens_est"])
+        tc = os.path.join(workdir, "case-design-out", "TestCases_%s.md" % rid)
+        os.makedirs(os.path.dirname(tc), exist_ok=True)
+        with open(tc, "w", encoding="utf-8") as f:
+            f.write("# 用例\n\n" + HEADER + "\n" + SEP + "\n" +
+                    ("| %s_C_001 | 见需求文档 | R1 | 功能 | 接口验证 | 订单 | 【订单】【创建】【正常】【成功】 | Given | When | Then | STEP | AI | AI | P0 | Completed |\n" % rid) * 70)
+        r3 = run(workdir, "context", req_id=rid, expect_rc=0)
+        snap3 = json.loads(r3.stdout)
+        check("累计单调（落 TestCases 后 output 增）",
+              snap3["cumulative"]["output_tokens_est"] > snap["cumulative"]["output_tokens_est"])
+
+        # ⑥ status 输出不含 cumulative 键（既有形状不变）
+        rs = run(workdir, "status", req_id=rid, expect_rc=0)
+        check("status 输出不含 cumulative（既有形状不变）", "cumulative" not in rs.stdout)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

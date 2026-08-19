@@ -816,6 +816,7 @@ requirement-review 走与 case-design 相同的 Runtime 状态机（8 阶段 0-7
 - **人工确认门（Phase 4）不可绕过**：用户未明确确认前，Runtime 拒绝推进到 Phase 5。
 - **MANIFEST 自动维护**：`requirement-review-out/MANIFEST.md` 聚合索引由 Runtime 在 gate PASS 时自动维护，模型禁止 Write/Edit。
 - **多需求并行评审**：同一工程可对多个需求分别 `start --req-id <id>` 并发评审，状态按 `(requirement-review, req_id)` 分区落盘，互不覆盖。
+- **上下文预算提示（v0.11.13·建议性）**：契约卡末尾按需追加 `##CONTEXT_BUDGET##` 段（阈值门控）——估算工作集 token 越线或进入已知重输出阶段（Phase 5/6）时，给出「压缩 → PART 拆分 → 分响应」出口，会话上下文已长时可先 `/compact`（状态已落盘，压缩后 `status` 可恢复）。未越线时整段不出现。随时可跑 `context --workflow requirement-review --req-id <id>` 查工作集估算与累计输入/输出 token（qamaster 足迹，非模型真实会话 token）。
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 

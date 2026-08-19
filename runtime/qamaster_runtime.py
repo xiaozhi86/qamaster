@@ -140,6 +140,190 @@ def _kb_path(workdir, spec, kind="lessons"):
     return os.path.join(workdir, spec.output_dir, name)
 
 
+# —— v0.11.13 上下文防护（纯估算·只读·确定性，永不参与门禁/状态机）——
+# Runtime 是 Bash 子进程，读不到 Claude Code 会话的真实 token 计数；本节只做
+# 「qamaster 足迹」估算 + 建议性提示 + 按需诊断。全部为 advisory：估错只影响提示早晚，
+# 不影响门禁/阶段推进/制品落盘的任何正确性（对齐既有「预算只决定怎么写、永不决定写哪些」）。
+
+def _est_tokens(text):
+    """保守估算 token：CJK 字符≈1 token，其余≈4 字符/token，估高不估低（宁早提示）。"""
+    if not text:
+        return 0
+    cjk = 0
+    for ch in text:
+        if '一' <= ch <= '鿿':
+            cjk += 1
+    return cjk + (len(text) - cjk) // 4 + 1
+
+
+def _file_tokens(path):
+    """文件 token 估算（UTF-8 读全文，errors=replace；不存在/异常 → 0）。"""
+    try:
+        if not os.path.isfile(path):
+            return 0
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return _est_tokens(f.read())
+    except Exception:
+        return 0
+
+
+def _count_case_rows(path):
+    """近似数 checkpoint 的 15 列表格数据行（| 开头的非分隔行，减表头 1 行）。仅用于估算。"""
+    try:
+        if not os.path.isfile(path):
+            return 0
+        n = 0
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                s = ln.strip()
+                if not s.startswith("|"):
+                    continue
+                body = "".join(ch for ch in s if ch not in "|-: ")
+                if not body:
+                    continue  # 分隔行 |---|---|
+                n += 1
+        return max(0, n - 1)  # 减表头
+    except Exception:
+        return 0
+
+
+def _kb_counts(workdir, spec):
+    """三类 KB 记录数（存在才计；load 异常 → 0）。供 kb_inject_est 展示。"""
+    counts = {}
+    for kind in ("lessons", "business", "expert"):
+        p = _kb_path(workdir, spec, kind)
+        n = 0
+        if os.path.isfile(p):
+            try:
+                n = len(kb_store.load_records(p))
+            except Exception:
+                n = 0
+        counts[kind] = n
+    return counts
+
+
+CTX_INPUT_TOKENS_WARN = 60000   # 输入工作集（REQ+refs+KB）估算 token 告警线
+CTX_OUTPUT_ROWS_WARN = 60       # Phase 8/10/13 用例行数告警线（对应 24000 输出预算）
+CTX_OUTPUT_TOKENS_WARN = 24000  # 输出 token 告警线（与 SKILL.md 写前预算同口径）
+
+
+def _budget_snapshot(st, phase, spec):
+    """结构化估算当前阶段工作集（供 _context_budget_block 与 cmd_context 复用）。
+
+    只读、确定性、幂等；不写 state。warnings 为空时卡片侧不再输出任何内容。
+    """
+    workdir = st.get("workdir") or os.getcwd()
+    req_id = st.get("req_id") or ""
+    pid = phase["id"]
+    out = os.path.join(workdir, spec.output_dir)
+
+    req_tokens = _file_tokens(os.path.join(out, "REQ_%s.md" % req_id)) if req_id else 0
+    refs_tokens = 0
+    for r in phase.get("refs", []):
+        refs_tokens += _file_tokens(os.path.join(PLUGIN_ROOT, spec.skill_dir, r))
+    kb_tokens = 0
+    for kind in ("lessons", "business", "expert"):
+        kb_tokens += _file_tokens(_kb_path(workdir, spec, kind))
+    input_tokens = req_tokens + refs_tokens + kb_tokens
+
+    output_rows = 0
+    output_tokens = 0
+    if spec.name == "case-design":
+        case_cp = None
+        for cpid in (10, 8):  # 优先最近的用例 checkpoint（10 覆盖 8）
+            p = _checkpoint_path(workdir, spec, req_id, cpid)
+            if os.path.isfile(p):
+                case_cp = p
+                break
+        if case_cp:
+            output_rows = _count_case_rows(case_cp)
+            output_tokens = _file_tokens(case_cp)
+    elif spec.name == "requirement-review" and pid in (5, 6):
+        output_tokens = int(req_tokens * 1.2)
+
+    warnings = []
+    if input_tokens > CTX_INPUT_TOKENS_WARN:
+        warnings.append("输入工作集约 %d token（REQ %d / refs %d / KB %d）较大，建议按章节分块读取；会话若已长可先 /compact"
+                        % (input_tokens, req_tokens, refs_tokens, kb_tokens))
+    if spec.name == "case-design" and output_rows > CTX_OUTPUT_ROWS_WARN:
+        warnings.append("用例表约 %d 行（估 %d token）将超单次 Write 预算，优先压缩 → 拆最小 PART → 展示与写入分响应"
+                        % (output_rows, output_tokens))
+    elif output_tokens > CTX_OUTPUT_TOKENS_WARN:
+        warnings.append("输出约 %d token 将超单次 Write 预算，优先压缩 → 拆最小 PART → 展示与写入分响应" % output_tokens)
+    if (spec.name == "case-design" and pid in (8, 13)) or (spec.name == "requirement-review" and pid in (5, 6)):
+        warnings.append("本阶段为重输出点：会话上下文若已长，可先 /compact（状态已落盘，压缩后 status 可恢复）")
+
+    eff = spec.effective_phases(st.get("depth") or "heavy")
+    return {
+        "workflow": spec.name,
+        "req_id": req_id,
+        "phase": pid,
+        "phase_total": len(eff),
+        "req_tokens_est": req_tokens,
+        "input_tokens_est": input_tokens,
+        "output_rows_est": output_rows,
+        "output_tokens_est": output_tokens,
+        "kb_inject_est": _kb_counts(workdir, spec),
+        "warnings": warnings,
+    }
+
+
+def _context_budget_block(st, phase, spec):
+    """阈值门控的契约卡 advisory 块。未越线 → ""（卡片与现状逐字节一致）。"""
+    snap = _budget_snapshot(st, phase, spec)
+    if not snap["warnings"]:
+        return ""
+    lines = ["##CONTEXT_BUDGET##（Runtime 上下文预算建议·非门禁·永不缩减用例集）"]
+    lines.append("  qamaster 视角估算（非模型真实会话 token）：输入≈%d / 输出≈%d token"
+                 % (snap["input_tokens_est"], snap["output_tokens_est"]))
+    for w in snap["warnings"]:
+        lines.append("  - %s" % w)
+    lines.append("  合法出口仅：压缩 → 拆最小 PART → 展示与写入分响应（或抬高 CLAUDE_CODE_MAX_OUTPUT_TOKENS）；禁止缩减用例集/跳阶段/放宽门禁。")
+    return "\n".join(lines)
+
+
+def _cumulative_footprint(st, spec):
+    """v0.11.13（需求 2）：累计输入/输出 token 估算（qamaster 足迹·幂等重算·只读）。
+
+    输入累计 = SKILL.md(常驻 1 次) + 已完成∪当前阶段 refs(去重) + REQ + 三类 KB + 已沉淀 checkpoint。
+    输出累计 = 各阶段 checkpoint + output_dir 下模型落盘制品（排除 Runtime 维护的 MANIFEST/KB）。
+    按状态边界枚举、按路径 set 去重，每次重算结果一致；不写 state.json 任何新字段。
+    注意：这是 Runtime 经手文件的 token 量，系统性低于模型真实会话 token。
+    """
+    workdir = st.get("workdir") or os.getcwd()
+    req_id = st.get("req_id") or ""
+    out = os.path.join(workdir, spec.output_dir)
+    boundary = set(st.get("completed") or []) | {st.get("current_phase")}
+
+    in_paths = {_skill_md_abs(spec)}
+    for pid in boundary:
+        ph = spec.get_phase(pid)
+        if not ph:
+            continue
+        for r in ph.get("refs", []):
+            in_paths.add(os.path.join(PLUGIN_ROOT, spec.skill_dir, r))
+    if req_id:
+        in_paths.add(os.path.join(out, "REQ_%s.md" % req_id))
+    for kind in ("lessons", "business", "expert"):
+        in_paths.add(_kb_path(workdir, spec, kind))
+    input_tokens = sum(_file_tokens(p) for p in in_paths)
+
+    out_tokens = 0
+    for pid in boundary:
+        out_tokens += _file_tokens(_checkpoint_path(workdir, spec, req_id, pid))
+    if os.path.isdir(out):
+        for fn in os.listdir(out):
+            if fn in ("MANIFEST.md", "KB_lessons.md", "KB_business.md", "KB_expert.md"):
+                continue
+            if fn.endswith(".md") or fn.endswith(".xlsx"):
+                out_tokens += _file_tokens(os.path.join(out, fn))
+    return {
+        "input_tokens_est": input_tokens,
+        "output_tokens_est": out_tokens,
+        "footprint_note": "qamaster 经手文件的 token 量，非模型真实会话 token（真实会话请用 /context）",
+    }
+
+
 # v0.11.5: KB 健康摘要（命令侧·通道B）——数三类 KB 中 status==draft 且非 superseded 的条数，
 # 供 cmd_status / cmd_confirm Phase14 暴露给人"还有 N 条 draft 待 endorse"。
 # 不触碰契约卡渲染路径（不影响 150/0）。无 draft → 返 ""（caller 非空才 print）。
@@ -1281,6 +1465,11 @@ def _card(st, phase, spec, extra="", correction_context=None):
     if extra:
         lines.append("")
         lines.append(extra)
+    # v0.11.13: 阈值门控的上下文预算 advisory 块（未越线 → ""，卡片与现状逐字节一致）
+    ctx = _context_budget_block(st, phase, spec)
+    if ctx:
+        lines.append("")
+        lines.append(ctx)
     return "\n".join(lines)
 
 
@@ -1696,6 +1885,17 @@ def cmd_status(a):
     if a.card:
         print()
         print(_card(st, phase, spec))
+
+
+def cmd_context(a):
+    """v0.11.13：打印当前需求的工作集 token 估算 + 累计足迹（只读，不写任何状态）。"""
+    spec = _spec(a)
+    req_id = _require_req_id(a)
+    st, _ = _load_or_die(a.workdir, a.workflow, req_id)
+    phase = spec.get_phase(st["current_phase"])
+    snap = _budget_snapshot(st, phase, spec)
+    snap["cumulative"] = _cumulative_footprint(st, spec)
+    print(json.dumps(snap, ensure_ascii=False, indent=2))
 
 
 def cmd_next(a):
@@ -2611,6 +2811,12 @@ def main():
     _wf(sp)
     _wd(sp)
     sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("context", help="打印当前需求的工作集 token 估算 + 累计足迹（只读）")
+    _ri(sp, required=True)
+    _wf(sp)
+    _wd(sp)
+    sp.set_defaults(fn=cmd_context)
 
     sp = sub.add_parser("next", help="推进到下一阶段（仅当前阶段已过 gate）")
     _ri(sp)

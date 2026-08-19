@@ -457,6 +457,10 @@ Runtime 按**当前阶段 `consumes`** 从 `state.json.artifacts` 注入上游�
 - Phase 8 卡片注入：规则 R1-R24 / 风险 RK1-RKn(P0/P1 计数) / 测试点 TP1-TPn / 台账(已解决/待确认/假设) + 消费约束（关联规则列 R/RK/TP 须在清单内·悬空引用 exit=1；用例等级须映射 RK 等级；台账"已解决"事实须落成断言；假设A<n> 须在台账假设清单内；台账"待确认"须闭环或转假设）。
 - 上下文裁剪也不丢：制品注册表持久化在 state.json，契约卡每次按需渲染。
 
+## 契约卡末尾 ##CONTEXT_BUDGET##（v0.11.13·建议性防护）
+
+Runtime 按需在契约卡末尾追加 `##CONTEXT_BUDGET##` 段（阈值门控）：估算工作集 token 越过告警线或进入已知重输出阶段（Phase 8/13）时，给出「压缩 → PART 拆分 → 分响应」三条合法出口，会话上下文已长时可先 `/compact`（状态已落盘，压缩后 `status` 可恢复）。该段为**建议性提示**，绝不缩减用例集/跳阶段/放宽门禁；未越线时整段不出现（卡片与现状逐字节一致）。随时可跑 `context --workflow case-design --req-id <id>` 查看工作集估算与累计输入/输出 token（qamaster 足迹，非模型真实会话 token）。
+
 ## verify_cases.py 检查项加固（exit=1 硬门 + 软探针）
 
 - **项1 反向引用完整性**（D1）：用例关联规则列引用的 R/RK/TP/API/SC 须在清单内真实存在。
