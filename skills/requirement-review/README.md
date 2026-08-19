@@ -1,7 +1,7 @@
 # requirement-review — 需求文档多角色评审 Skill（Claude Code）
 
-> 版本：v0.2.0 · 更新：2026-08-18 · 版本变更明细见 `CHANGELOG.md`
-> Runtime 受控流程已随插件 v0.11.12 支持多需求并行评审（8 阶段状态机，见 §7）
+> 版本：v0.2.0 · 更新：2026-08-19 · 版本变更明细见 `CHANGELOG.md`
+> Runtime 受控流程已随插件 v0.11.12 支持多需求并行评审（8 阶段状态机，见 §7）；v0.11.13 起契约卡末尾按需追加 `##CONTEXT_BUDGET##` 上下文建议（Phase 5/6 重输出点提示 `/compact`），并新增 `context` 只读命令查工作集估算与累计 token 足迹
 
 一套跑在 **Claude Code** 上的需求文档评审 Skill：输入需求文档（支持含图 / 扫描件 / Word / PDF / PPT / Excel），内部 7 个专家 Agent 并行评审，Review Master 汇总去重 + 冲突仲裁，经用户确认后自动重构出一份**高质量、可开发、可测试**的需求文档，并附评审问题详情清单。
 
