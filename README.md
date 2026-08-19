@@ -191,6 +191,22 @@ flowchart TD
     LLM -->|业务规范| SK[skills/case-design/SKILL.md + references/<br/>单一事实源·不变]
 ```
 
+**requirement-review 状态机**（v0.11.10 起走**同一 Runtime 引擎**，8 阶段 0-7；与 case-design 共用控制器、状态分区、门禁裁决，仅阶段注册表 / 产物目录 / 门禁类型不同）：
+
+```mermaid
+flowchart TD
+    U2[用户 /requirement-review] --> CMD2[commands/requirement-review.md]
+    CMD2 --> RT2[runtime/qamaster_runtime.py<br/>Runtime Controller CLI<br/>同一引擎·workflow 无关]
+    RT2 --> SM2[state_store.py<br/>原子 JSON 状态机<br/>.qamaster/requirement-review/&lt;req_id&gt;/state.json]
+    RT2 --> PH2[requirement_review_phases.py<br/>8 阶段注册表 0-7<br/>流程定义单一事实源]
+    RT2 -->|颁发契约卡| LLM2[LLM Worker<br/>7 Agent 并行评审<br/>只做当前阶段产物]
+    LLM2 -->|gate| RT2
+    RT2 -->|机器判定| GATE2{文件存在性门<br/>exists_any·req_id 绑定}
+    GATE2 -->|人工门 Phase 4| USER2[用户确认]
+    LLM2 -->|输入预处理| SCR2[skills/requirement-review/scripts/extract_text.py<br/>OCR/PDF/Word/PPT/Excel]
+    LLM2 -->|业务规范| SK2[skills/requirement-review/SKILL.md + config/input_rules.json<br/>单一事实源·不变]
+```
+
 **三条设计原则**（在原有"单一事实源 + 薄引用"之上新增第 1 条）：
 
 - **Runtime 控制流程**：`runtime/qamaster_runtime.py` 是唯一权威控制点。每阶段向模型颁发【RUNTIME CONTRACT 契约卡】（当前阶段/允许动作/禁止动作/产出物/出口门禁）；`gate` 由确定性检查 + skill 自带校验脚本判定，**禁止模型自证**；人工门（澄清/审核/Excel 许可）未确认前状态机不放行。
@@ -208,6 +224,17 @@ flowchart TD
 | 审核反馈回退 | `fail --to <阶段>` 回退到受影响最深阶段，从起点依次重走到 Phase 14 | 修改场景跳阶段 |
 | 上下文预算防护 | 契约卡末尾 `##CONTEXT_BUDGET##` 阈值门控提示（压缩 → PART 拆分 → 分响应）+ `context` 命令展示当前工作集估算与累计输入/输出 token（qamaster 足迹）；默认零输出，小/中需求与现状逐字节一致 | 长会话 token 溢出、单次 Write 超预算 |
 | 自证测试 | `scripts/test_runtime.py`：434 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行、多需求并发隔离（case-design + requirement-review）、legacy 迁移、MANIFEST 并发/重建、上下文预算防护 | Runtime 自身正确性 |
+
+**requirement-review 流程保障机制**（8 阶段 0-7，无 Excel 许可门 / 无知识总结后置动作，末阶段 auto 门 PASS 即 DONE）：
+
+| 机制 | 实现 | 防什么 |
+|---|---|---|
+| 非法跳转拦截 | `next` 只允许 current+1（0-7 序列），否则 RUNTIME_ERROR | 模型跳阶段/合并阶段 |
+| 机器质量门 | Phase 0（`REQ_{req_id}.md` 落盘）、Phase 1（`ReviewIssues_{req_id}.md` 评审问题清单）、Phase 5（`ReviewedReq_{req_id}.md` 重构需求文档）、Phase 7（最终输出：`ReviewedReq` + `ReviewIssues` 双存在）；均为 req_id 绑定的文件存在性 glob，多需求并发评审互不串扰 | 产物缺失却自称完成、多需求门禁串扰 |
+| 人工确认门 | Phase 4 用户确认（复用 Runtime `confirm` 机制，未确认不放行到 Phase 5） | 未经用户确认擅自重构/定稿 |
+| 断点续跑 | 状态按 (requirement-review, req_id) 分区落盘 `.qamaster/requirement-review/<req_id>/state.json` | 长会话状态丢失、多需求互覆 |
+| MANIFEST 聚合索引 | `requirement-review-out/MANIFEST.md` 由 Runtime 在 gate PASS 时自动维护（列集独立于 case-design，模型禁写） | 多需求评审无索引、手动整表写丢行 |
+| 上下文预算防护 | 同 case-design：Phase 5/6 重输出点 `/compact` 提示 + `context` 命令查工作集估算与累计 token 足迹 | 长会话 token 溢出 |
 
 > 设计方案见 [`qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md`](qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md)。
 
