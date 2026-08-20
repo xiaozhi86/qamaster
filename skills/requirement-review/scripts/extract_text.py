@@ -197,7 +197,7 @@ def detect_kind(path):
         return "text", ext
     if ext == ".pdf":
         return "pdf", ext
-    if ext in (".docx", ".doc"):
+    if ext in (".docx", ".docs"):
         return "word", ext
     if ext in (".pptx",):
         return "ppt", ext
