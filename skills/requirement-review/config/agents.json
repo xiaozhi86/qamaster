@@ -1,10 +1,22 @@
 {
-  "_comment": "requirement-review 专家池目录（可扩展池）单一事实源。核心团（core_agents）恒参与任何需求评审；扩展团（agents 中 required_signals 非空者）由 Phase 0 专家团路由按需求文本信号词命中启用。SKILL.md 保留每个专家的 Expert Level 评审标准（唯一细则来源），本文件只声明「谁」与「何时启用」，不承载评审细则。",
+  "_comment": "requirement-review 专家池目录（可扩展池）单一事实源。核心团（core_agents）恒参与任何需求评审；扩展团（agents 中 required_signals 非空者）由 Phase 0 专家团路由按需求文本信号词命中 + co_trigger 连带 + 语义兜底启用。SKILL.md 保留每个专家的 Expert Level 评审标准（唯一细则来源），本文件只声明「谁」与「何时启用」，不承载评审细则。",
   "_usage": "本文件为可选配置；缺失时用内置默认（全量 7 专家），行为与现状一致。",
-  "_routing_model": "纯语义路由（模型读 REQ 文本 + 本文件信号词裁决，Phase 0 落盘 Agents_<req_id>.md，Phase 1 契约卡注入专家团）。信号词数据积累后可原地替换为确定性脚本打分（数据契约不变，仅执行者从模型换成脚本）。",
+  "_routing_model": "纯语义路由（模型读 REQ 文本 + 本文件裁决，Phase 0 落盘 Agents_<req_id>.md，Phase 1 契约卡注入专家团）。裁决顺序：①信号词命中必启用 → ②co_trigger 连带启用 → ③语义兜底（存疑即启用，宁多勿漏）。信号词数据积累后可原地替换为确定性脚本打分（数据契约不变，仅执行者从模型换成脚本）。",
+  "_routing_policy": {
+    "default_bias": "存疑即启用，宁多勿漏：漏选一个专家 = 漏掉整个评审维度；裁掉一个专家只是省 token，对「评审质量门」场景覆盖率优先于 token 成本。",
+    "hit": "需求文本命中该专家任一 required_signals → 必启用（确定性，机器可复核）。",
+    "co_trigger": "命中 co_trigger 规则（某专家启用 → 连带启用另一专家）→ 启用，见 _co_trigger_semantics。",
+    "no_hit": "未命中信号词但该视角仍有关键价值 → 启用并在 Agents_<id>.md 记录启用理由；仅当明确无关（如后端接口无 UI → UX）才裁掉。",
+    "record": "Agents_<id>.md 逐行记录「id + 中文名 + 命中依据/启用理由」，可审计可回放。"
+  },
   "_signal_semantics": "required_signals 为 OR 关系：需求文本命中任一信号词即启用该专家；空数组=核心团成员，恒参与。核心团成员即使 listed 在 agents 中，required_signals 也应为空（由 core_agents 数组统一声明恒参与）。",
+  "_co_trigger_semantics": "co_trigger 为「连带启用」：键是「被连带启用」的专家，值是「触发源」专家列表——任一触发源被启用，则键专家连带启用。用于编码领域相关性：资金/接口类需求的共性高发缺口正是「数据口径/业务规则/枚举全集」，属 BA 主场，故 Arch 或 Risk 命中即连带 BA。值必须引用 agents[].id 或 core_agents 中存在的 id。",
 
   "core_agents": ["PM", "QA", "Dev"],
+
+  "co_trigger": {
+    "BA": ["Arch", "Risk"]
+  },
 
   "agents": [
     {
@@ -14,7 +26,8 @@
       "required_signals": [
         "上下游", "跨部门", "跨系统", "对账", "分账", "结算", "多角色", "角色职责",
         "业务规则", "业务目标", "业务范围", "数据口径", "数据语义", "外部依赖",
-        "主流程", "分支流程", "异常流程", "逆向流程", "闭环"
+        "主流程", "分支流程", "异常流程", "逆向流程", "闭环",
+        "枚举", "校验", "约束", "触发", "状态流转", "兜底", "默认值"
       ]
     },
     {

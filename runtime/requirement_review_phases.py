@@ -34,15 +34,16 @@ PHASES = [
     {
         "id": 0, "name": "输入预处理与需求定位", "gate": "auto",
         "refs": [],
-        "objective": "将用户需求文档（含图片/扫描件）经 extract_text.py 预处理为纯文本并落盘 requirement-review-out/REQ_<需求标识>.md（纯散文补 ## 二级标题分节）；读 config/agents.json 按需求文本信号词路由专家团，落盘 requirement-review-out/Agents_<需求标识>.md（核心团 PM/QA/Dev 恒参与 + 命中信号的扩展团）。",
+        "objective": "将用户需求文档（含图片/扫描件）经 extract_text.py 预处理为纯文本并落盘 requirement-review-out/REQ_<需求标识>.md（纯散文补 ## 二级标题分节）；读 config/agents.json 路由评审专家团，落盘 requirement-review-out/Agents_<需求标识>.md（核心团 PM/QA/Dev 恒参与 + 信号词命中 / co_trigger 连带 / 语义兜底的扩展团）。",
         "allowed": [
             "需求文档含图片/扫描件时先跑 python skills/requirement-review/scripts/extract_text.py <文件> --json 抽取文本",
             "将预处理后的需求文档落盘为 requirement-review-out/REQ_<需求标识>.md",
-            "读 config/agents.json，按 REQ 文本信号词路由评审专家团（core_agents 恒参与；扩展团命中 required_signals 任一即启用）",
-            "专家团名单落盘 requirement-review-out/Agents_<需求标识>.md（逐行列出启用专家 id + 命中依据）",
+            "读 config/agents.json 路由评审专家团（core_agents 恒参与；扩展团命中 required_signals 任一即启用；co_trigger 连带启用；未命中但视角仍有价值则启用并记理由）",
+            "扩展团采用「存疑即启用、宁多勿漏」默认偏向：仅当明确无关（如后端接口无 UI → UX）才裁掉",
+            "专家团名单落盘 requirement-review-out/Agents_<需求标识>.md（逐行列出启用专家 id + 中文名 + 命中依据/启用理由）",
             "需求标识由 bootstrap 预先派生写入 state.req_id，本阶段不再派生 id",
         ],
-        "forbidden": ["跳过需求文档落盘直接进入评审", "漏选核心团（PM/QA/Dev 任一缺失）", "生成评审结论或最终需求文档"],
+        "forbidden": ["跳过需求文档落盘直接进入评审", "漏选核心团（PM/QA/Dev 任一缺失）", "仅按字面信号词硬裁专家（忽略语义兜底与 co_trigger 连带）", "生成评审结论或最终需求文档"],
         "produces": ["requirement-review-out/REQ_<需求标识>.md", "requirement-review-out/Agents_<需求标识>.md"],
         "exit_condition": "REQ 文件 + 专家团名单存在于磁盘，且专家团名单含核心团（Runtime 机器判定）",
         "gate_checks": [

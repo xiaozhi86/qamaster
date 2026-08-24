@@ -490,6 +490,8 @@ def main():
     test_context_budget_guard()
     # v0.11.14 回归：requirement-review 专家团动态路由（contains 门禁 + 契约卡注入专家团名单）
     test_requirement_review_roster_contains_gate()
+    # v0.11.15 回归：专家池配置契约（core_agents 恒 PM/QA/Dev + co_trigger 引用合法 + 扩展团信号词非空）
+    test_requirement_review_agents_config_contract()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -3000,6 +3002,53 @@ def test_requirement_review_roster_contains_gate():
         check("Phase 1 契约卡含核心团成员", "PM" in r.stdout and "QA" in r.stdout and "Dev" in r.stdout, r.stdout[:800])
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_requirement_review_agents_config_contract():
+    """v0.11.15 专家池配置契约：agents.json 结构自洽（核心团 PM/QA/Dev + co_trigger 引用合法 + 扩展团信号词非空）。
+
+    验证：①core_agents 恒为 PM/QA/Dev；②co_trigger 键与值都引用 agents 中真实存在的 id；
+    ③每个 agent 有 id/name/role/required_signals 四字段；④core_agents ⊆ agents[].id；⑤BA 可被 Arch/Risk 连带。
+    不验证模型语义路由（无 LLM），只守护配置契约不被破坏（一旦改坏，Phase 0 路由与 contains 门禁会失真）。
+    """
+    print("\n[requirement-review] 专家池配置契约：agents.json 结构自洽（core_agents + co_trigger + 信号词）")
+    cfg_path = os.path.join(ROOT, "skills", "requirement-review", "config", "agents.json")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+
+        core = cfg.get("core_agents")
+        check("core_agents 恒为 PM/QA/Dev", core == ["PM", "QA", "Dev"], "core_agents=%s" % core)
+
+        agents = cfg.get("agents", [])
+        agent_ids = [a.get("id") for a in agents]
+        check("agents 非空", len(agent_ids) >= 7, "ids=%s" % agent_ids)
+        check("core_agents ⊆ agents[].id", set(core) <= set(agent_ids), "missing=%s" % (set(core) - set(agent_ids)))
+
+        # 每个 agent 字段齐全
+        for a in agents:
+            ok = all(k in a and a[k] for k in ("id", "name", "role")) and isinstance(a.get("required_signals"), list)
+            check("agent %s 字段齐全（id/name/role/required_signals）" % a.get("id"), ok, str(a))
+
+        # 核心团 required_signals 必须为空（恒参与由 core_agents 声明，而非信号词）
+        for aid in core:
+            a = next(x for x in agents if x["id"] == aid)
+            check("核心团 %s required_signals 为空" % aid, a["required_signals"] == [], "signals=%s" % a["required_signals"])
+
+        # co_trigger 键/值都引用真实 agent id
+        co = cfg.get("co_trigger", {})
+        check("co_trigger 存在且 BA 被 Arch/Risk 连带", co.get("BA") == ["Arch", "Risk"], "co_trigger=%s" % co)
+        for key, vals in co.items():
+            check("co_trigger 键 %s 引用真实 id" % key, key in agent_ids, "key=%s ids=%s" % (key, agent_ids))
+            for v in vals:
+                check("co_trigger 值 %s 引用真实 id" % v, v in agent_ids, "v=%s ids=%s" % (v, agent_ids))
+
+        # 扩展团（非核心团）required_signals 必须非空（否则等于恒参与，失去动态路由意义）
+        extended = [a for a in agents if a["id"] not in core]
+        check("扩展团 required_signals 均非空", all(a["required_signals"] for a in extended),
+              "empty=%s" % [a["id"] for a in extended if not a["required_signals"]])
+    except Exception as e:  # noqa: BLE001
+        check("agents.json 可解析且契约自洽", False, "异常: %r" % e)
 
 
 def test_context_budget_guard():

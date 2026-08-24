@@ -1,9 +1,9 @@
 # requirement-review — 需求文档多角色评审 Skill（Claude Code）
 
-> 版本：v0.3.0 · 更新：2026-08-21 · 版本变更明细见 `CHANGELOG.md`
-> Runtime 受控流程已随插件 v0.11.12 支持多需求并行评审（8 阶段状态机，见 §7）；v0.11.13 起契约卡末尾按需追加 `##CONTEXT_BUDGET##` 上下文建议（Phase 5/6 重输出点提示 `/compact`），并新增 `context` 只读命令查工作集估算与累计 token 足迹；v0.11.14 起 Phase 0 专家团动态路由（`config/agents.json` + `contains` 门禁）
+> 版本：v0.3.1 · 更新：2026-08-24 · 版本变更明细见 `CHANGELOG.md`
+> Runtime 受控流程已随插件 v0.11.12 支持多需求并行评审（8 阶段状态机，见 §7）；v0.11.13 起契约卡末尾按需追加 `##CONTEXT_BUDGET##` 上下文建议（Phase 5/6 重输出点提示 `/compact`），并新增 `context` 只读命令查工作集估算与累计 token 足迹；v0.11.14 起 Phase 0 专家团动态路由（`config/agents.json` + `contains` 门禁）；v0.11.15 起路由升级为三级裁决 + 存疑即启用（`co_trigger` 连带 + 语义兜底）
 
-一套跑在 **Claude Code** 上的需求文档评审 Skill：输入需求文档（支持含图 / 扫描件 / Word / PDF / PPT / Excel），按需求内容动态路由出**评审专家团**（核心团 PM/QA/Dev 恒参与 + BA/Arch/UX/Risk 按信号词命中），并行评审，Review Master 汇总去重 + 冲突仲裁，经用户确认后自动重构出一份**高质量、可开发、可测试**的需求文档，并附评审问题详情清单。
+一套跑在 **Claude Code** 上的需求文档评审 Skill：输入需求文档（支持含图 / 扫描件 / Word / PDF / PPT / Excel），按需求内容动态路由出**评审专家团**（核心团 PM/QA/Dev 恒参与 + BA/Arch/UX/Risk 按信号词命中 / co_trigger 连带 / 语义兜底），并行评审，Review Master 汇总去重 + 冲突仲裁，经用户确认后自动重构出一份**高质量、可开发、可测试**的需求文档，并附评审问题详情清单。
 
 核心模式：**「并行评审 + 汇总仲裁」**——专家团各专家独立思考、互不影响的并行输出，再由 Review Master 统一汇总、去重、检测冲突并给出权衡推荐。
 
@@ -53,7 +53,7 @@
 - 问题建议
 - 建议依据
 
-> **专家团动态路由**：不是任何需求都全量 7 专家。Phase 0 按需求文本信号词路由，从 `config/agents.json` 选出「核心团 + 命中扩展团」作为本次评审专家团，落盘 `Agents_<需求标识>.md`。**核心团 PM/QA/Dev 恒参与**；BA/Arch/UX/Risk 按信号词命中才启用（如涉资金/支付/合规 → Risk；涉接口/性能/并发 → Arch；涉页面/交互 → UX；涉跨部门流程/复杂业务 → BA）。信号词定义见 `config/agents.json`。
+> **专家团动态路由**：不是任何需求都全量 7 专家。Phase 0 按需求内容三级裁决路由，从 `config/agents.json` 选出「核心团 + 命中扩展团」作为本次评审专家团，落盘 `Agents_<需求标识>.md`。**核心团 PM/QA/Dev 恒参与**；扩展团 BA/Arch/UX/Risk 按：①信号词命中必启用 → ②co_trigger 连带启用（Arch/Risk 命中即连带 BA）→ ③语义兜底（存疑即启用、宁多勿漏，仅明确无关才裁掉）。信号词/co_trigger 定义见 `config/agents.json`。
 
 | Agent | 参与方式 | 角色 | 核心视角 | 评审要点 |
 |---|---|---|---|---|

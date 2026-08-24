@@ -4,6 +4,15 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-08-24
+
+### 变更
+
+- 专家团路由从「纯字面信号词命中」升级为「三级裁决 + 存疑即启用」：①信号词命中必启用 → ②co_trigger 连带启用（`config/agents.json` 新增 `co_trigger`：Arch/Risk 命中即连带 BA）→ ③语义兜底（未命中但视角仍有价值则启用并记理由，仅明确无关才裁掉）。
+- 修复 0.3.0 的路由漏选：资金/接口类需求原文无 BA 字面词（"上下游/对账/业务规则"）时 BA 被误裁，但其「数据口径/枚举/业务规则」视角价值高——现经 co_trigger + 语义兜底兜回。
+- `config/agents.json` 新增 `_routing_policy`（默认偏向「宁多勿漏」）、`_co_trigger_semantics` 字段；BA `required_signals` 增补「枚举/校验/约束/触发/状态流转/兜底/默认值」等场景语义词。
+- SKILL.md 第0阶段步骤6、README §2 同步三级裁决说明；`requirement_review_phases.py` Phase 0 objective/allowed/forbidden 措辞同步（forbidden 增「仅按字面信号词硬裁专家」）。
+
 ## [0.3.0] - 2026-08-21
 
 ### 新增
