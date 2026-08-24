@@ -1201,6 +1201,21 @@ def _run_check(chk, st, spec):
             resolved = _fmt_cmd(pat, st, spec)  # v0.11.12: {req_id} 占位（无占位 pattern 为恒等，case-design 不变）
             hits.extend(glob.glob(os.path.join(workdir, resolved)))
         return (bool(hits), "%s: %s" % (chk["label"], ("命中 %d 个" % len(hits)) if hits else "缺失"))
+    if kind == "contains":
+        # v0.11.14: 确定性「必须包含全部子串」门禁——校验产物文件含全部 must_contain 子串
+        # （如评审专家团名单必须含核心团 PM/QA/Dev），机器判定，禁止模型自证。
+        p = os.path.join(workdir, _fmt_cmd(chk["path"], st, spec))
+        if not os.path.isfile(p):
+            return (False, "%s: 文件缺失 %s" % (chk["label"], p))
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as e:
+            return (False, "%s: 读取失败 %s (%s)" % (chk["label"], p, e))
+        missing = [s for s in chk.get("must_contain", []) if s not in text]
+        if missing:
+            return (False, "%s: 缺少必需项 %s" % (chk["label"], "/".join(missing)))
+        return (True, "%s: 全部必需项命中" % chk["label"])
     if kind == "phase_gate":
         # v0.7.0: 阶段出口门禁——调 verify_cases.py --phase-gate <N> <checkpoint> --req .. --ledger ..
         phase = chk.get("phase")

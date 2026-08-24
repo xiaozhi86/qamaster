@@ -39,7 +39,7 @@ disable-model-invocation: true
 1. **状态以 Runtime 为准**：每次接到用户新消息，先运行 `python "runtime/qamaster_runtime.py" status --workflow requirement-review --req-id <id>` 恢复权威状态，禁止凭对话记忆推断"现在该哪一步"。
 2. **门禁以机器判定为准**：`gate` 的 PASS/FAIL 由确定性检查给出；禁止模型自证"已通过"（声明≠核实）。
 3. **MANIFEST 由 Runtime 维护**：`requirement-review-out/MANIFEST.md` 是多需求共享索引，由 Runtime 在 gate PASS 时自动维护（Phase 0 `add` / Phase 1 `update` 评审问题清单 / Phase 5 `update` 最终需求文档 / Phase 7 `complete`）。模型**禁止 Write/Edit MANIFEST.md**。失步时执行 `python runtime/qamaster_runtime.py manifest reconcile` 重建。
-4. **业务规范不变**：Runtime 只做流程控制；7-Agent 评审标准、输入协议、输出协议等全部业务规则仍以本文件为唯一细则来源。**流程由 Runtime 严格控制、与模型无关。**
+4. **业务规范不变**：Runtime 只做流程控制；专家 Agent 评审标准、输入协议、输出协议等全部业务规则仍以本文件为唯一细则来源。**流程由 Runtime 严格控制、与模型无关。**
 
 ---
 
@@ -59,9 +59,14 @@ disable-model-invocation: true
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 
-🧠 Agent 角色定义（必须并行执行）
+🧠 Agent 角色定义（按专家团并行执行）
 
-  你内部包含以下7个Agent：
+  你内部包含以下 7 个专家 Agent（评审标准见下）：
+
+  > ⚠️ 专家团动态路由：不是任何需求都全量 7 专家。第0阶段按需求文本信号词路由，
+  > 从 config/agents.json 选出「核心团 + 命中扩展团」作为本次评审专家团，落盘
+  > `Agents_<需求标识>.md`。**核心团 PM/QA/Dev 恒参与**；BA/Arch/UX/Risk 按信号词命中才启用。
+  > 第1阶段只启用名单内的专家；名单外的评审标准仅供仲裁参考，不单独出问题清单。
 
     每个Agent必须逐条检查其评审标准，并输出：
     - ✅ 已满足项
@@ -629,7 +634,7 @@ disable-model-invocation: true
 
 > 当前部署模型为文本-only（报错 "Model only support text input" 即本约束触发）。
 > 需求文档常含原型截图/流程图/扫描件/含图PDF，非文本内容直接喂模型会 400 硬崩。
-> 本阶段把任何非文本输入统一转为纯文本，再喂7-Agent评审。规则契约单一事实源：config/input_rules.json。
+> 本阶段把任何非文本输入统一转为纯文本，再喂专家团评审。规则契约单一事实源：config/input_rules.json。
 
 执行步骤（按序，禁止跳过）：
 
@@ -659,15 +664,23 @@ disable-model-invocation: true
    - 扫描件PDF但 pdf2image/poppler 不可用 → 回退：提示用户转文字版或提供截图文字说明
 
 5. 标准化文本需求产出
-   - 抽取后的纯文本作为后续7-Agent评审的唯一文本输入
+   - 抽取后的纯文本作为后续专家团评审的唯一文本输入
    - 回显抽取来源/置信度/降级标记（供用户复核抽取质量）
    - 超长文档(>24000 token) → 按章节/模块分块，分批喂评审Agent（不可超32000单响应上限）
+
+6. 专家团路由（动态选专家·核心团恒参与）
+   - 读 config/agents.json：核心团 core_agents（PM/QA/Dev）恒参与；扩展团（BA/Arch/UX/Risk）按 required_signals 信号词命中启用（任一命中即启用）
+   - 需求文本逐词扫信号词，产出「核心团 ∪ 命中扩展团」作为本次评审专家团
+   - 专家团名单落盘 requirement-review-out/Agents_<需求标识>.md（逐行：Agent id + 中文名 + 命中依据）
+   - 名单必须含核心团 PM/QA/Dev（Runtime `contains` 门禁机器判定，缺失即 FAIL，禁止自证）
+   - 扩展团命中信号词才启用；未命中不启用（名单外专家标准仅作仲裁参考，不单独出问题清单）
 
 强制：
 - 禁止将图片/扫描件/含图二进制文档直接喂给文本-only模型
 - 必须经脚本抽取为纯文本后再分析；抽取失败须显式降级提示，不得静默中断
 - 图片 OCR 文本须就地回填原图位置，保留图文上下文语义
 - 原型图/流程图优先要"文字说明"（用户提供文字版 > OCR > 多模态理解，当前无多模态端点则止于OCR）
+- 专家团名单必须含核心团 PM/QA/Dev；禁止漏选
 
 可选增强（若后续接入视觉模型端点）：
 - 复杂流程图/泳道图/原型图 优先走多模态LLM理解（比OCR文字更准，能理解箭头/泳道语义）
@@ -676,6 +689,8 @@ disable-model-invocation: true
 ━━━━━━━━━━━━━━━━━━━━━━━
 
 第一阶段：并行评审（核心）
+
+    按专家团名单（Agents_<需求标识>.md）并行评审，只启用名单内专家：
 
     每个Agent分别输出：
 
@@ -696,7 +711,7 @@ disable-model-invocation: true
 
     你作为【Review Master Agent】需要：
 
-      1. 汇总所有Agent问题
+      1. 汇总本专家团（Agents_<需求标识>.md 列出的）所有问题
       2. 去重（相似问题合并）
       3. 标准化描述
       4. 分类整理（按模块/优先级）
@@ -717,10 +732,10 @@ disable-model-invocation: true
 
 第三阶段：冲突检测（关键高级能力）
 
-    检查是否存在：
+    检查实际参与专家两两之间是否存在建议冲突（只覆盖本专家团，不引入名单外视角）：
     - Agent之间建议冲突
-    - 业务 vs 技术冲突
-    - 用户体验 vs 风控冲突
+    - 业务 vs 技术冲突（BA/PM vs Arch/Dev，若同时参与）
+    - 用户体验 vs 风控冲突（UX vs Risk，若同时参与）
 
     如果存在，必须输出：
 

@@ -4,6 +4,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-08-21
+
+### 新增
+
+- 专家团动态路由：不是任何需求都全量 7 专家，Phase 0 按需求文本信号词从 `config/agents.json` 选出「核心团 + 命中扩展团」作为本次评审专家团（落盘 `Agents_<需求标识>.md`）。
+- 专家池目录 `config/agents.json`（可扩展池）：核心团 `core_agents`（PM/QA/Dev 恒参与）+ 各专家 `required_signals` 信号词（BA/Arch/UX/Risk 按需）；新增专家只需加一条 + SKILL.md 补评审标准，不改 Runtime。
+- Runtime 新增 `contains` 门禁类型：确定性校验产物文件含全部 `must_contain` 子串，Phase 0 gate 机器判定专家团名单含核心团 PM/QA/Dev（防模型漏选核心团）。
+- Phase 1 契约卡经 `extra_card_text` 钩子注入本次评审专家团（只启用名单内专家）；Phase 2 冲突检测改按实际参与专家两两组合。
+
+### 变更
+
+- SKILL.md / README.md：措辞「7-Agent」→「专家团」，新增「专家团动态路由」说明；§2 专家表加「参与方式」列；§7 阶段表、§9 产出物（+ `Agents_<req_id>.md`）、§11 目录结构（+ `config/agents.json`）同步。
+
 ## [0.2.0] - 2026-07-17
 
 ### 新增

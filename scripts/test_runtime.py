@@ -488,6 +488,8 @@ def main():
     test_requirement_review_concurrent_reqs()
     # v0.11.13 回归：上下文预算防护（阈值门控 + context 命令 + 累计足迹）
     test_context_budget_guard()
+    # v0.11.14 回归：requirement-review 专家团动态路由（contains 门禁 + 契约卡注入专家团名单）
+    test_requirement_review_roster_contains_gate()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -2838,7 +2840,11 @@ def test_requirement_review_state_machine():
         check("Phase 0 缺 REQ → gate FAIL", "GATE RESULT: FAIL" in r.stdout)
         w(workdir, os.path.join(rr_out, "REQ_%s.md" % rid), "# %s\n\n## 下单\n\n用户下单。\n" % rid)
         r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
-        check("Phase 0 补齐 REQ → gate PASS", "GATE RESULT: PASS" in r.stdout)
+        check("Phase 0 缺专家团名单 → gate FAIL（exists_any 门禁）", "GATE RESULT: FAIL" in r.stdout)
+        w(workdir, os.path.join(rr_out, "Agents_%s.md" % rid),
+          "# 评审专家团\n\n## 核心团（恒参与）\n\n- PM\n- QA\n- Dev\n\n## 命中扩展团\n\n- Risk（命中信号：支付）\n")
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 0 补齐 REQ + 专家团名单（含核心团）→ gate PASS", "GATE RESULT: PASS" in r.stdout)
         rr_rows = _MANIFEST.load_rows(os.path.join(workdir, rr_out, "MANIFEST.md"), workflow="requirement-review")
         rr_ids = [row.get("req_id") for row in rr_rows]
         check("Phase 0 PASS 写 MANIFEST 且含该 req 行", rid in rr_ids, "ids=%s" % rr_ids)
@@ -2846,6 +2852,7 @@ def test_requirement_review_state_machine():
         # ④ 推进到 Phase 1（并行评审）
         r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
         check("next → Phase 1 并行评审", "Phase 1" in r.stdout and "并行评审" in r.stdout)
+        check("Phase 1 契约卡注入专家团名单", "评审专家团" in r.stdout and "Risk" in r.stdout, r.stdout[:800])
         r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
         check("Phase 1 缺问题清单 → gate FAIL", "GATE RESULT: FAIL" in r.stdout)
         w(workdir, os.path.join(rr_out, "ReviewIssues_%s.md" % rid), "# 评审问题清单\n\n## 问题1\n\n- P1\n")
@@ -2906,11 +2913,12 @@ def test_requirement_review_concurrent_reqs():
     rA = "并发评审甲-20260818"
     rB = "并行评审乙-20260818"
     try:
-        # A：start → Phase 0 落 REQ_A → gate PASS → next Phase 1 → 落问题清单 → gate PASS → next Phase 2
+        # A：start → Phase 0 落 REQ_A + Agents_A → gate PASS → next Phase 1 → 落问题清单 → gate PASS → next Phase 2
         run(workdir, "start", "--workflow", "requirement-review", "--req-id", rA, req_id=rA, expect_rc=0)
         w(workdir, os.path.join(rr_out, "REQ_%s.md" % rA), "# %s\n\n## 下单\n\n内容甲。\n" % rA)
+        w(workdir, os.path.join(rr_out, "Agents_%s.md" % rA), "# 评审专家团\n\n- PM\n- QA\n- Dev\n- Risk\n")
         r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rA, expect_rc=0)
-        check("A Phase 0 补齐 REQ → gate PASS", "GATE RESULT: PASS" in r.stdout)
+        check("A Phase 0 补齐 REQ + 专家团 → gate PASS", "GATE RESULT: PASS" in r.stdout)
         run(workdir, "next", "--workflow", "requirement-review", req_id=rA, expect_rc=0)
         w(workdir, os.path.join(rr_out, "ReviewIssues_%s.md" % rA), "# 评审问题清单\n\n## 问题1\n\n- P1\n")
         r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rA, expect_rc=0)
@@ -2922,11 +2930,15 @@ def test_requirement_review_concurrent_reqs():
         r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
         check("B Phase 0 门禁 req_id 隔离：缺 REQ_B → FAIL（不因 REQ_A 误放行）",
               "GATE RESULT: FAIL" in r.stdout, r.stdout[-1200:])
-
-        # B 落盘 REQ_B → Phase 0 PASS；next → Phase 1，缺问题清单 → FAIL（不因 ReviewIssues_A 误放行）
+        # B 补齐 REQ_B 但缺 Agents_B → 仍 FAIL（专家团名单 req_id 隔离）
         w(workdir, os.path.join(rr_out, "REQ_%s.md" % rB), "# %s\n\n## 下单\n\n内容乙。\n" % rB)
         r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
-        check("B Phase 0 补齐 REQ_B → gate PASS", "GATE RESULT: PASS" in r.stdout)
+        check("B Phase 0 缺 Agents_B → FAIL（不因 Agents_A 误放行）", "GATE RESULT: FAIL" in r.stdout, r.stdout[-1200:])
+
+        # B 补齐 Agents_B → Phase 0 PASS；next → Phase 1，缺问题清单 → FAIL（不因 ReviewIssues_A 误放行）
+        w(workdir, os.path.join(rr_out, "Agents_%s.md" % rB), "# 评审专家团\n\n- PM\n- QA\n- Dev\n")
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
+        check("B Phase 0 补齐 REQ_B + Agents_B → gate PASS", "GATE RESULT: PASS" in r.stdout)
         run(workdir, "next", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
         r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rB, expect_rc=0)
         check("B Phase 1 门禁 req_id 隔离：缺 ReviewIssues_B → FAIL（不因 ReviewIssues_A 误放行）",
@@ -2951,6 +2963,41 @@ def test_requirement_review_concurrent_reqs():
         # status --all 列出两 req
         rall = run(workdir, "status", "--all", "--workflow", "requirement-review", req_id=None, expect_rc=0)
         check("status --all 列出两 req", rA in rall.stdout and rB in rall.stdout, rall.stdout[:400])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_requirement_review_roster_contains_gate():
+    """v0.11.14 专家团动态路由：contains 门禁（核心团 PM/QA/Dev 必须齐全）+ Phase 1 契约卡注入专家团。
+
+    验证：①专家团名单缺核心团 → contains 门禁 FAIL；②补齐核心团 → PASS；③Phase 1 契约卡
+    注入名单（含命中扩展团，如 Risk）；④contains 对核心团子串按任一顺序命中（幂等）。
+    """
+    print("\n[requirement-review] 专家团动态路由：contains 门禁（核心团齐全）+ 契约卡注入")
+    workdir = tempfile.mkdtemp(prefix="qamaster-rr-roster-")
+    rr_out = "requirement-review-out"
+    rid = "专家团路由-20260821"
+    try:
+        run(workdir, "start", "--workflow", "requirement-review", "--req-id", rid, req_id=rid, expect_rc=0)
+        w(workdir, os.path.join(rr_out, "REQ_%s.md" % rid),
+          "# %s\n\n## 支付\n\n用户下单支付，涉及资金与退款，需记录审计日志。\n" % rid)
+
+        # ① 名单缺核心团 PM/Dev → contains 门禁 FAIL（只含 QA）
+        w(workdir, os.path.join(rr_out, "Agents_%s.md" % rid), "# 评审专家团\n\n- QA\n- Risk\n")
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("contains 门禁：缺核心团 PM/Dev → gate FAIL", "GATE RESULT: FAIL" in r.stdout)
+        check("contains 门禁反馈缺项", "PM" in r.stdout and "Dev" in r.stdout, r.stdout[-800:])
+
+        # ② 补齐核心团 → PASS
+        w(workdir, os.path.join(rr_out, "Agents_%s.md" % rid),
+          "# 评审专家团\n\n## 核心团\n\n- Dev\n- QA\n- PM\n\n## 命中扩展团\n\n- Risk（命中信号：资金/退款/审计）\n")
+        r = run(workdir, "gate", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("补齐核心团（乱序）→ contains 门禁 PASS", "GATE RESULT: PASS" in r.stdout)
+
+        # ③ Phase 1 契约卡注入专家团名单
+        r = run(workdir, "next", "--workflow", "requirement-review", req_id=rid, expect_rc=0)
+        check("Phase 1 契约卡注入专家团名单", "评审专家团" in r.stdout and "Risk" in r.stdout, r.stdout[:800])
+        check("Phase 1 契约卡含核心团成员", "PM" in r.stdout and "QA" in r.stdout and "Dev" in r.stdout, r.stdout[:800])
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

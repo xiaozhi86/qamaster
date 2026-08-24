@@ -27,7 +27,31 @@ _EXTRA_PHASE4 = (
 )
 
 
+def _roster_block(st):
+    """Phase 1 契约卡注入：读 Agents_<req_id>.md 评审专家团名单，告知模型本次只启用哪些专家。
+
+    名单缺失/空 → 返回空串（Phase 1 契约卡不追加该段，避免破坏逐字节一致性）。
+    """
+    workdir = st.get("workdir") or ""
+    req_id = (st.get("req_id") or "").strip()
+    if not workdir or not req_id:
+        return ""
+    roster_path = os.path.join(workdir, OUTPUT_DIR, "Agents_%s.md" % req_id)
+    try:
+        with open(roster_path, "r", encoding="utf-8", errors="replace") as f:
+            roster = f.read().strip()
+    except OSError:
+        return ""
+    if not roster:
+        return ""
+    return ("\n🎯 本次评审专家团（Phase 0 路由结果·只启用下列专家，其余不参与）:\n" +
+            roster +
+            "\n  汇总去重（Phase 2）与冲突检测（Phase 3）也只覆盖上述专家，不引入名单外视角。")
+
+
 def _extra_card_text(phase, st):
+    if phase == 1:
+        return _roster_block(st)
     if phase == 4:
         return _EXTRA_PHASE4
     return ""
