@@ -43,6 +43,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1756,40 +1757,74 @@ def _derive_req_id(a, spec, workdir):
 
 
 def _parse_input_docs(ui):
-    """把用户输入解析为多文档文件清单（requirement-review 多文档综合评审）。
+    """把用户输入解析为多文档/混排输入条目清单（requirement-review 多文档综合评审）。
 
-    仅当「整串按空白拆出的每个 token 都是已存在文件」且 ≥2 个时返回 (files, True)；
-    否则返回 (None, False)——调用方走旧的 _derive_req_id 单输入路径（逐字节不变）。
+    返回 (entries, True) 或 (None, False)。entry 形如 ("file", 路径) 或 ("text", 内联片段)。
+    规则（宁缺毋滥，退回即走旧 _derive_req_id 单输入路径，逐字节不变）：
+      - 整串外层引号包裹 → 先剥外层。
+      - 按空白拆分 token：shlex(posix=False) 支持引号包裹的含空格路径（保留 Windows 反斜杠）；
+        引号未闭合回退朴素 ui.split()。
+      - 逐 token：剥外层引号 → 剥 @ 前缀 → os.path.isfile 判文件。
+      - 文件数 ≥2 → (entries, True)：文件保留为 ("file", 路径)，非文件 token 保留为 ("text", 片段)，
+        两者按原始出现顺序排列（混排输入）。
+      - 否则（0/1 个文件，或纯文本）→ (None, False)。
     """
     ui = (ui or "").strip()
-    if len(ui) >= 2 and ui[0] in "\"'" and ui[-1] == ui[0]:
+    # shlex 无法处理 @"path" 这种 @ 紧贴引号的写法（@ 会与后随引号黏连成非法 token），
+    # 先剥掉「紧贴引号的 @」；其余 @ 前缀（@a.md）由逐 token 剥离处理。
+    ui = re.sub(r'@(?=["\'])', "", ui)
+    # 整串外层引号包裹（如 "a.md b.md"）→ 剥外层；但逐文件引号包裹（"a.md" "b.md"）
+    # 内层仍含引号 → 不剥，交由 shlex 逐 token 处理，避免把引号语义剥坏。
+    if len(ui) >= 2 and ui[0] in "\"'" and ui[-1] == ui[0] and ui[0] not in ui[1:-1]:
         ui = ui[1:-1].strip()
     if not ui:
         return (None, False)
-    toks = ui.split()
-    if len(toks) < 2:
-        return (None, False)
-    files = []
+    try:
+        toks = shlex.split(ui, posix=False)
+    except ValueError:
+        toks = ui.split()
+    entries = []
     for t in toks:
-        p = t[1:] if t.startswith("@") else t
-        if not os.path.isfile(p):
-            return (None, False)      # 任一 token 非文件 → 退回单输入
-        files.append(p)
-    return (files, True)
+        if len(t) >= 2 and t[0] in "\"'" and t[-1] == t[0]:
+            t = t[1:-1]
+        if t.startswith("@"):
+            t = t[1:]
+        if os.path.isfile(t):
+            entries.append(("file", t))
+        else:
+            entries.append(("text", t))
+    nfiles = sum(1 for k, _ in entries if k == "file")
+    if nfiles < 2:
+        return (None, False)
+    return (entries, True)
 
 
-def _write_inputs_manifest(workdir, spec, req_id, files):
+def _write_inputs_manifest(workdir, spec, req_id, entries):
     """多文档评审的输入清单（Runtime 落盘，模型只读）。
 
-    幂等：已存在则覆盖刷新。失败静默（best-effort，不阻断 bootstrap）。
+    entries：[(kind, val), ...]，kind ∈ {"file","text"}。首个 file 为主需求文档，
+    其余 file 按序为设计文档，text 为内联补充说明。幂等：已存在则覆盖刷新。
+    失败静默（best-effort，不阻断 bootstrap）。
     """
     p = os.path.join(workdir, spec.output_dir, "INPUTS_%s.md" % req_id)
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         lines = ["# 评审输入清单（qamaster Runtime 落盘·模型只读）", ""]
-        for i, f in enumerate(files):
-            role = "主需求文档" if i == 0 else "设计文档 %d" % i
-            lines.append("- %s：%s" % (role, f))
+        design_i = 0
+        note_i = 0
+        seen_first_file = False
+        for kind, val in entries:
+            if kind == "file":
+                if not seen_first_file:
+                    role = "主需求文档"
+                    seen_first_file = True
+                else:
+                    design_i += 1
+                    role = "设计文档 %d" % design_i
+            else:
+                note_i += 1
+                role = "补充说明 %d" % note_i
+            lines.append("- %s：%s" % (role, val))
         with open(p, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
     except OSError:
@@ -1833,20 +1868,22 @@ def _bootstrap_finish(a, spec, workdir, req_id):
 def cmd_bootstrap(a):
     """派生 req_id 但不创建状态（幂等）。已有进行中则输出 RESUME。
 
-    多文档综合评审（requirement-review 专属）：输入整串按空白拆出 ≥2 个已存在文件时，
-    第一个文件作为主需求派生 req_id，其余作为设计文档，落盘 INPUTS_<req_id>.md 清单。
+    多文档综合评审（requirement-review 专属）：输入整串拆出 ≥2 个已存在文件 token 时，
+    首个文件作为主需求派生 req_id，其余作为设计文档（可夹带内联补充说明），
+    落盘 INPUTS_<req_id>.md 清单；支持引号包裹的含空格路径。
     """
     spec = _spec(a)
     workdir = a.workdir
     # 惰性迁移 legacy
     state_store.migrate_legacy_state(workdir, spec.name)
     # 多文档综合评审分支（仅 requirement-review；case-design 不生效）
-    files, is_multi = _parse_input_docs(a.user_input)
+    entries, is_multi = _parse_input_docs(a.user_input)
     if is_multi and spec.name == "requirement-review":
-        req_id = _derive_from_file(files[0]) or _clean_id(os.path.basename(files[0]))
+        primary = next((val for kind, val in entries if kind == "file"), None)
+        req_id = _derive_from_file(primary) or _clean_id(os.path.basename(primary))
         if not req_id:
             _die("bootstrap 无法从主需求文档派生需求标识。请显式传 --req-id <需求标识>。")
-        _write_inputs_manifest(workdir, spec, req_id, files)
+        _write_inputs_manifest(workdir, spec, req_id, entries)
         _bootstrap_finish(a, spec, workdir, req_id)
         return
     req_id = _derive_req_id(a, spec, workdir)

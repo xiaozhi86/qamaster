@@ -3056,9 +3056,9 @@ def test_requirement_review_agents_config_contract():
 def test_requirement_review_multi_docs():
     """v0.4.0 多文档综合评审：_parse_input_docs 解析 + Phase 0 契约卡清单块注入（无清单逐字节 no-op）。
 
-    验证：①单文件/单内联 → (None,False)（走旧单输入）；②两文件 → (files,True) 顺序正确 + @ 前缀剥离；
-    ③含非文件 token → 退回 (None,False)；④引号包裹解析；⑤无 INPUTS_<id>.md → Phase 0 卡片不追加清单块；
-    ⑥有 INPUTS_<id>.md → Phase 0 卡片含「多文档综合评审」+ 主需求/设计文档清单。
+    验证：①单文件/单内联/空 → (None,False)（走旧单输入）；②两文件 → (entries,True) 顺序正确 + @ 前缀剥离；
+    ③含非文件 token（内联补充说明）混排 → (entries,True) 含 ("text",片段)；④引号包裹解析（整串/逐文件/含空格路径）；
+    ⑤无 INPUTS_<id>.md → Phase 0 卡片不追加清单块；⑥有 INPUTS_<id>.md → 卡片含多文档清单 + 需求vs设计一致性核对指令。
     """
     print("\n[requirement-review] 多文档综合评审：_parse_input_docs + Phase 0 清单块注入")
     import qamaster_runtime as rt
@@ -3069,49 +3069,64 @@ def test_requirement_review_multi_docs():
     rid = "多文档评审-20260824"
     rr_out = "requirement-review-out"
     try:
-        # 造两个真实文件 + 一个不存在路径
+        # 造真实文件（含一个带空格文件名）+ 一个不存在路径
         f_main = os.path.join(workdir, "需求.md")
         f_d1 = os.path.join(workdir, "设计A.md")
         f_d2 = os.path.join(workdir, "设计B.md")
-        for f in (f_main, f_d1, f_d2):
+        f_space = os.path.join(workdir, "设计 文档.md")   # 含空格路径
+        for f in (f_main, f_d1, f_d2, f_space):
             with open(f, "w", encoding="utf-8") as fh:
                 fh.write("# 标题\n\n正文。\n")
 
-        # ① 单文件 / 单内联 → (None, False)
-        files, multi = rt._parse_input_docs(f_main)
-        check("单文件 → (None,False)", (files is None and multi is False), "files=%s multi=%s" % (files, multi))
-        files, multi = rt._parse_input_docs("用户在购物车点击提交订单")
-        check("单内联 → (None,False)", (files is None and multi is False), "files=%s multi=%s" % (files, multi))
-        files, multi = rt._parse_input_docs("")
-        check("空输入 → (None,False)", (files is None and multi is False))
+        # ① 单文件 / 单内联 / 空 → (None, False)
+        entries, multi = rt._parse_input_docs(f_main)
+        check("单文件 → (None,False)", (entries is None and multi is False), "entries=%s multi=%s" % (entries, multi))
+        entries, multi = rt._parse_input_docs("用户在购物车点击提交订单")
+        check("单内联 → (None,False)", (entries is None and multi is False), "entries=%s multi=%s" % (entries, multi))
+        entries, multi = rt._parse_input_docs("")
+        check("空输入 → (None,False)", (entries is None and multi is False))
 
-        # ② 两文件 → (files,True) 顺序正确 + @ 前缀剥离
-        files, multi = rt._parse_input_docs("@%s @%s" % (f_main, f_d1))
-        check("两文件 → (files,True)", multi is True and files == [f_main, f_d1], "files=%s" % files)
+        # ② 两文件 → (entries,True) 顺序正确 + @ 前缀剥离
+        entries, multi = rt._parse_input_docs("@%s @%s" % (f_main, f_d1))
+        check("两文件 → (entries,True)", multi is True and entries == [("file", f_main), ("file", f_d1)],
+              "entries=%s" % entries)
 
-        # ③ 含非文件 token → 退回 (None,False)
-        files, multi = rt._parse_input_docs("%s 补充说明" % f_main)
-        check("混排非文件 token → (None,False)", (files is None and multi is False), "files=%s" % files)
-        files, multi = rt._parse_input_docs("%s %s" % (f_main, os.path.join(workdir, "不存在.md")))
-        check("含不存在文件 → (None,False)", (files is None and multi is False), "files=%s" % files)
+        # ③ 含非文件 token：单文件+内联 → 仍退回 (None,False)（文件数<2）；两文件+内联 → (entries,True) 混排
+        entries, multi = rt._parse_input_docs("%s 补充说明" % f_main)
+        check("单文件+内联 → (None,False)", (entries is None and multi is False), "entries=%s" % entries)
+        entries, multi = rt._parse_input_docs("%s %s" % (f_main, os.path.join(workdir, "不存在.md")))
+        check("含不存在文件 → (None,False)", (entries is None and multi is False), "entries=%s" % entries)
+        entries, multi = rt._parse_input_docs("%s @%s 补充说明文字" % (f_main, f_d1))
+        check("两文件+内联混排 → (entries,True)",
+              multi is True and entries == [("file", f_main), ("file", f_d1), ("text", "补充说明文字")],
+              "entries=%s" % entries)
 
-        # ④ 整串引号包裹解析（外壳引号剥离后按空白拆分）；逐文件引号包裹则退回单输入
-        files, multi = rt._parse_input_docs('"%s %s"' % (f_main, f_d2))
-        check("整串引号包裹两文件 → (files,True)", multi is True and files == [f_main, f_d2], "files=%s" % files)
-        files, multi = rt._parse_input_docs('"%s" "%s"' % (f_main, f_d2))
-        check("逐文件引号包裹 → 退回 (None,False)", (files is None and multi is False), "files=%s" % files)
+        # ④ 引号包裹解析：整串外层引号 / 逐文件引号 / 含空格路径
+        entries, multi = rt._parse_input_docs('"%s %s"' % (f_main, f_d2))
+        check("整串引号包裹两文件 → (entries,True)", multi is True and entries == [("file", f_main), ("file", f_d2)],
+              "entries=%s" % entries)
+        entries, multi = rt._parse_input_docs('"%s" "%s"' % (f_main, f_d2))
+        check("逐文件引号包裹 → (entries,True)", multi is True and entries == [("file", f_main), ("file", f_d2)],
+              "entries=%s" % entries)
+        entries, multi = rt._parse_input_docs('"%s" "%s"' % (f_main, f_space))
+        check("含空格路径（引号包裹）→ (entries,True)",
+              multi is True and entries == [("file", f_main), ("file", f_space)], "entries=%s" % entries)
+        entries, multi = rt._parse_input_docs('@"%s" @"%s"' % (f_main, f_space))
+        check("含空格路径（@+引号包裹）→ (entries,True)",
+              multi is True and entries == [("file", f_main), ("file", f_space)], "entries=%s" % entries)
 
         # ⑤ 无 INPUTS_<id>.md → Phase 0 卡片不追加清单块（逐字节 no-op）
         st = {"workdir": workdir, "req_id": rid}
         check("无清单文件 → Phase 0 extra_card_text 空",
               spec.extra_card_text(0, st) == "", repr(spec.extra_card_text(0, st)))
 
-        # ⑥ 有 INPUTS_<id>.md → Phase 0 卡片含多文档清单
-        rt._write_inputs_manifest(workdir, spec, rid, [f_main, f_d1, f_d2])
+        # ⑥ 有 INPUTS_<id>.md → Phase 0 卡片含多文档清单 + 一致性核对指令
+        rt._write_inputs_manifest(workdir, spec, rid, [("file", f_main), ("file", f_d1), ("file", f_d2), ("text", "补充说明文字")])
         block = spec.extra_card_text(0, st)
         check("有清单文件 → 注入多文档综合评审块", "多文档综合评审" in block, block[:200])
-        check("清单块含主需求文档 + 设计文档", "主需求文档" in block and "设计文档" in block, block[:300])
+        check("清单块含主需求文档 + 设计文档 + 补充说明", "主需求文档" in block and "设计文档" in block and "补充说明" in block, block[:400])
         check("清单块含合并指令（REQ_ 落盘）", "REQ_<需求标识>.md" in block, block[:300])
+        check("清单块含需求vs设计一致性核对", "需求 vs 设计一致性核对" in block, block[:400])
         # 非 Phase 0 阶段不受影响（Phase 1 走 roster、Phase 4 走确认话术）
         check("Phase 1 不注入多文档块", "多文档综合评审" not in (spec.extra_card_text(1, st) or ""))
         check("Phase 4 不注入多文档块", "多文档综合评审" not in (spec.extra_card_text(4, st) or ""))

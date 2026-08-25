@@ -4,6 +4,20 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] - 2026-08-25
+
+### 新增
+
+- 需求 vs 设计一致性核对：Phase 0 多文档清单块追加核对指令——专家团逐条对照主需求文档的业务规则/数据口径/状态流转/异常边界，与各设计文档的技术/接口/数据结构细节，找出冲突（设计改口径/规则未同步）与遗漏（需求有定义、设计未落地），结论纳入评审问题清单并统一回填（`runtime/workflows/requirement_review.py` `_inputs_block` + SKILL.md 第0阶段）。
+
+### 变更
+
+- `_parse_input_docs`（`runtime/qamaster_runtime.py`）升级为「文件 + 内联混排」解析：①返回 `(entries, True)`，entry 形如 `("file", 路径)` 或 `("text", 片段)`；②改用 `shlex.split(posix=False)` 支持引号包裹的含空格路径（保留 Windows 反斜杠），引号未闭合回退 `ui.split()`；③外层引号仅在整串包裹且内部无同引号时剥离（避免剥坏逐文件引号）；④文件数 ≥2 才走多文档分支，非文件 token 保留为「补充说明 N」按出现位置排序。
+- `_write_inputs_manifest`（`runtime/qamaster_runtime.py`）接受 `entries`，文件按「主需求文档 / 设计文档 N」、内联片段按「补充说明 N」落盘；首个 file 为主需求文档。
+- `cmd_bootstrap` 多文档分支改为从 `entries` 取首个 file 派生 req_id。
+- 单文档路径逐字节不变：无 `INPUTS_<id>.md` 时 Phase 0 契约卡不追加清单块；case-design 不受影响（多文档分支显式 `spec.name == "requirement-review"` 门禁）。
+- SKILL.md 第0阶段、README §6.2/§9、版本头同步 v0.4.1。
+
 ## [0.4.0] - 2026-08-24
 
 ### 新增
