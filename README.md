@@ -3,7 +3,6 @@
 > 企业级 AI QA 工具集 —— 用「规格先行、测试驱动」的方式，把需求文档自动变成高质量、可执行、可追溯的测试用例，并对需求文档本身做多角色专家评审。
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Version](https://img.shields.io/badge/version-0.11.13-green)
 ![Python](https://img.shields.io/badge/python-3.7+-blue)
 ![Platforms](https://img.shields.io/badge/platform-Claude%20Code%20%7C%20Codex%20%7C%20Cursor-9cf)
 ![CI](https://github.com/xiaozhi86/qamaster/actions/workflows/check-plugin.yml/badge.svg)
@@ -27,12 +26,12 @@ QA Master 提供两个核心能力，覆盖「需求评审 → 测试用例设�
 - **风险优先**：按 P0–P3 风险分级，优先覆盖资金/支付/权限/状态流转/数据一致性等核心链路。
 - **多角色协同**：case-design 引入开发/产品/业务视角（澄清路由 + 审核门禁，不增提问往返）；requirement-review 用 7 个专家 Agent 并行评审。
 - **阶段出口校验，agent-loop 式有界纠错**：第3/5/8阶段在写前于**内存内**跑机器检查（`verify_cases.py run_inmemory`，≤2 轮有界自修，零临时文件）；第5/8阶段另加**有界对抗式 critique 循环**（≤2 轮，查机器查不出的"P0 漏标""漏测用例"，检查14 含**界面结构遗漏**盲区）；第11阶段写前 LLM 自查（≤3 轮）+ 第13阶段写后回读。机器判定与主观对抗分层、5 个有界循环各自独立计数不嵌套——缺陷在阶段出口就地拦住，不聚合到写后才反向捕获。
-- **UI 类测试子维度完备**（0.5.0）：UI 测试锚定"界面结构是否正确承载业务规则/数据/权限/状态"（查询条件项默认/单条件/组合/重置、列表字段映射/分页/排序/四态区分/脱敏、表单联动回显、按业务态启用按钮、权限 UI），不测元素存在/框架渲染；8 子维 + 边界表（不与输入/数据/接口类重复）+ 适度性校准（按风险分级，防爆炸）。0.1 禁令已精确剥离，业务 UI 承载测试不再被反向劝退。
+- **UI 类测试子维度完备**：UI 测试锚定"界面结构是否正确承载业务规则/数据/权限/状态"（查询条件项默认/单条件/组合/重置、列表字段映射/分页/排序/四态区分/脱敏、表单联动回显、按业务态启用按钮、权限 UI），不测元素存在/框架渲染；8 子维 + 边界表（不与输入/数据/接口类重复）+ 适度性校准（按风险分级，防爆炸）。业务 UI 承载测试不再被反向劝退。
 - **质量红线内建**：禁止脑补业务规则、禁止杜撰表名/字段/缓存 Key、禁止模糊断言、禁止过度设计、禁止跳过澄清。
 - **渐进式加载，省 token**：case-design 常驻核心 ~6K tokens，各阶段细则按需读取 `references/`，回读核对用 `scripts/` 脚本返回摘要，不把整份用例读进上下文；阶段出口机器 gate 在内存内跑同一套校验，零权限弹窗。
 - **脚本化校验，可机器解析**：`verify_md.py`（结构）+ `verify_cases.py`（内容/覆盖，文件入口 + 内存入口 `run_inmemory`）回读核对，Excel 经 `openpyxl` 脚本产出 + 结构验证 + 数据完整性校验。
 - **跨会话可追溯**：澄清台账、知识总结、需求索引跨会话保留，不重复提问已解决问题。
-- **自我进化知识系统**（0.11.0 / 0.11.3）：内置**三知识库**——**经验库（`KB_lessons.md`）**自动捕获每次 `fail`/`patch` 的错误纠正经验，**业务库（`KB_business.md`）**沉淀每需求 13 维度业务知识，**专家方法论库（`KB_expert.md`）**沉淀可跨需求复用的通用测试设计方法论；开工前**预防性提醒**、失败处**定向修正**、方法论**每阶段每轮注入**，经**双门（相关性 + 信任）过滤后软注入**（参考而非硬约束），只引相关经验、绝不全量塞入；同一坑被多个需求踩中自动累计加权（越用越准）。机制层纯标准库、**与模型无关**，经验内容归属人类（自动起草为 `draft`，人工 `endorse` 后才注入；专家库——**endorsed 或跨 ≥3 独立需求命中自动转正**，均可 `supersede` 撤销）。详见下方「自我进化知识系统」节。
+- **自我进化知识系统**：内置**三知识库**——**经验库（`KB_lessons.md`）**自动捕获每次 `fail`/`patch` 的错误纠正经验，**业务库（`KB_business.md`）**沉淀每需求 13 维度业务知识，**专家方法论库（`KB_expert.md`）**沉淀可跨需求复用的通用测试设计方法论；开工前**预防性提醒**、失败处**定向修正**、方法论**每阶段每轮注入**，经**双门（相关性 + 信任）过滤后软注入**（参考而非硬约束），只引相关经验、绝不全量塞入；同一坑被多个需求踩中自动累计加权（越用越准）。机制层纯标准库、**与模型无关**，经验内容归属人类（自动起草为 `draft`，人工 `endorse` 后才注入；专家库——**endorsed 或跨 ≥3 独立需求命中自动转正**，均可 `supersede` 撤销）。详见下方「自我进化知识系统」节。
 - **按规模自动分级**：重型走完整 15 步、中型合并裁剪、轻型跳过规格建模；运行模式（完整 / 连跑 / 轻量）与流程深度正交；阶段出口 gate 全规模必跑（轻型不跳）。
 - **单事实源配置**：`config/validation_rules.json` 集中校验口径（含边界值 4 值模型），`config/domain_config.json` 支持金融/医疗等垂直领域扩展。
 
@@ -173,9 +172,9 @@ flowchart TD
 
 ## 🏗️ 架构：Agent Runtime Engineering（模型无关的流程强制）
 
-> **模型负责思考，Runtime 负责控制。** 自 v0.6 起，case-design 的 0-14(+Excel) 阶段流程不再依赖模型的指令遵循能力，而由内置 Python 状态机（`runtime/`）裁决：阶段迁移、质量门禁、人工确认点全部代码化，**任何模型（Claude / GPT / GLM / Gemini / DeepSeek）都不可绕过**。
+> **模型负责思考，Runtime 负责控制。** case-design 的 0-14(+Excel) 阶段流程不再依赖模型的指令遵循能力，而由内置 Python 状态机（`runtime/`）裁决：阶段迁移、质量门禁、人工确认点全部代码化，**任何模型（Claude / GPT / GLM / Gemini / DeepSeek）都不可绕过**。
 >
-> Runtime 已演化为**通用 workflow 引擎**（`runtime/workflows/registry.py` + `WorkflowSpec`）：状态按 `(workflow, req_id)` 分区，天然支持**同一工程多需求并行**（每个需求独立 `state.json`/检查点，互不覆盖）；新增独立 skill 只需注册自己的阶段机即继承隔离 + 强控。**v0.11.10 起 `requirement-review` 也走同一状态机**（`runtime/requirement_review_phases.py`，8 阶段 0-7：预处理→并行评审→汇总去重/冲突→方案总览→**用户确认（人工门）**→重构→复查/修复→最终输出；无知识总结/Excel 许可门，末阶段自动门 PASS 即 DONE；门禁 req_id 绑定，多需求并发评审互不串扰）。多需求共享索引 `MANIFEST.md` 由 Runtime 在 gate PASS 时自动维护（case-design 与 requirement-review 各自独立列集），是 gate 通过的**确定性副作用**——协调权属 Runtime 不属模型，强化"与模型无关"。
+> Runtime 已演化为**通用 workflow 引擎**（`runtime/workflows/registry.py` + `WorkflowSpec`）：状态按 `(workflow, req_id)` 分区，天然支持**同一工程多需求并行**（每个需求独立 `state.json`/检查点，互不覆盖）；新增独立 skill 只需注册自己的阶段机即继承隔离 + 强控。**`requirement-review` 也走同一状态机**（`runtime/requirement_review_phases.py`，8 阶段 0-7：预处理→并行评审→汇总去重/冲突→方案总览→**用户确认（人工门）**→重构→复查/修复→最终输出；无知识总结/Excel 许可门，末阶段自动门 PASS 即 DONE；门禁 req_id 绑定，多需求并发评审互不串扰）。多需求共享索引 `MANIFEST.md` 由 Runtime 在 gate PASS 时自动维护（case-design 与 requirement-review 各自独立列集），是 gate 通过的**确定性副作用**——协调权属 Runtime 不属模型，强化"与模型无关"。
 
 ```mermaid
 flowchart TD
@@ -191,7 +190,7 @@ flowchart TD
     LLM -->|业务规范| SK[skills/case-design/SKILL.md + references/<br/>单一事实源·不变]
 ```
 
-**requirement-review 状态机**（v0.11.10 起走**同一 Runtime 引擎**，8 阶段 0-7；与 case-design 共用控制器、状态分区、门禁裁决，仅阶段注册表 / 产物目录 / 门禁类型不同）：
+**requirement-review 状态机**（走**同一 Runtime 引擎**，8 阶段 0-7；与 case-design 共用控制器、状态分区、门禁裁决，仅阶段注册表 / 产物目录 / 门禁类型不同）：
 
 ```mermaid
 flowchart TD
@@ -223,7 +222,7 @@ flowchart TD
 | 断点续跑 | 状态按 (workflow,req_id) 分区落盘 `.qamaster/case-design/<req_id>/state.json`；二次 `start` 恢复而非重置；`status --all` 查看全部在途需求 | 长会话状态丢失、重复生成覆盖、多需求互相覆盖 |
 | 审核反馈回退 | `fail --to <阶段>` 回退到受影响最深阶段，从起点依次重走到 Phase 14 | 修改场景跳阶段 |
 | 上下文预算防护 | 契约卡末尾 `##CONTEXT_BUDGET##` 阈值门控提示（压缩 → PART 拆分 → 分响应）+ `context` 命令展示当前工作集估算与累计输入/输出 token（qamaster 足迹）；默认零输出，小/中需求与现状逐字节一致 | 长会话 token 溢出、单次 Write 超预算 |
-| 自证测试 | `scripts/test_runtime.py`：434 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行、多需求并发隔离（case-design + requirement-review）、legacy 迁移、MANIFEST 并发/重建、上下文预算防护 | Runtime 自身正确性 |
+| 自证测试 | `scripts/test_runtime.py`：478 项断言覆盖全程 15 阶段、非法跳转、门禁失败、回退、Excel 生成、断点续跑、连跑放行、多需求并发隔离（case-design + requirement-review）、legacy 迁移、MANIFEST 并发/重建、上下文预算防护 | Runtime 自身正确性 |
 
 **requirement-review 流程保障机制**（8 阶段 0-7，无 Excel 许可门 / 无知识总结后置动作，末阶段 auto 门 PASS 即 DONE）：
 
@@ -236,7 +235,7 @@ flowchart TD
 | MANIFEST 聚合索引 | `requirement-review-out/MANIFEST.md` 由 Runtime 在 gate PASS 时自动维护（列集独立于 case-design，模型禁写） | 多需求评审无索引、手动整表写丢行 |
 | 上下文预算防护 | 同 case-design：Phase 5/6 重输出点 `/compact` 提示 + `context` 命令查工作集估算与累计 token 足迹 | 长会话 token 溢出 |
 
-> 设计方案见 [`qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md`](qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md)。
+> 设计方案见 [`qamaster-Agent-Runtime-Engineering-Refactor-Design`](qamaster-Agent-Runtime-Engineering-Refactor-Design-v2.0.0.md)。
 
 ---
 
@@ -391,6 +390,47 @@ Q1 按方案A，Q2 按方案B
 
 ---
 
+## 📝 用法示例（requirement-review）
+
+**1. 触发并提供需求**（三种方式任选其一）：
+
+- 纯文本直接粘贴：
+
+```
+/requirement-review
+
+<<<需求文档开始>>>
+用户在购物车点击"提交订单"，系统创建订单，状态为"待支付"，扣减库存。
+订单金额 = 商品单价 × 数量。数量需为 1-99 整数。同一请求重复提交只创建一个订单。
+<<<需求文档结束>>>
+```
+
+- 提供文件路径：`/requirement-review @需求文档.docx`（PDF / Word / PPT / Excel / 图片 / 扫描件均可，自动经 `extract_text.py` 抽取为纯文本）。
+
+- **多文档综合评审**：第一个文件为主需求文档，其余按序为设计文档，综合输出一份评审语料：
+
+```
+/requirement-review @主需求.md @设计文档A.md @设计文档B.md
+```
+
+**2. 专家团动态路由 + 并行评审**：核心团 PM/QA/Dev 恒参与，BA/Arch/UX/Risk 按需求信号词命中 / co_trigger 连带 / 语义兜底自动启用；各专家并行输出问题清单，Review Master 汇总去重 + 冲突仲裁，再给出 P0/P1/P2 优化方案总览。
+
+**3. 用户确认**（第4阶段·人工门，必须等待明确答复）：
+
+```
+是否接受全部优化？是否有需要忽略/修改的建议？是否补充业务？
+```
+
+**4. 重构输出**：确认后自动生成 10 节齐全的最终需求文档 + 评审问题详情列表（含已解决/未解决），落盘到项目根 `requirement-review-out/`：
+
+- `ReviewedReq_<需求标识>.md` —— 重构后的高质量需求文档（可直接作为 case-design 输入）。
+- `ReviewIssues_<需求标识>.md` —— 评审问题详情列表。
+- `Agents_<需求标识>.md` —— 本次评审专家团名单（含命中依据）。
+
+> 完整使用说明见 [`skills/requirement-review/README.md`](skills/requirement-review/README.md)。
+
+---
+
 ## 🎛️ 运行模式（case-design）
 
 在输入开头声明触发词即可切换模式：
@@ -431,9 +471,9 @@ case-design 内置**三个相互独立的知识库**，让"踩过的坑"、"沉�
 
 | 知识库 | 文件 | 收什么 | 怎么进库 |
 |---|---|---|---|
-| **经验库**（MVP1） | `case-design-out/KB_lessons.md` | 每次审核 `fail`/`patch` 的错误纠正经验（出错阶段 + 维度 + 原文 + 触发词） | `fail`/`patch` 时自动捕获为 `draft` 草稿；人工 `kb endorse <id>` 背书后才参与注入 |
-| **业务库**（MVP2b） | `case-design-out/KB_business.md` | 各需求 Phase 14 产出的 13 维度业务知识（按"更新模块"聚合） | `kb reconcile --kind business` 从 `Knowledge_*.md` 聚合，直接以 `endorsed` 入库 |
-| **专家库**（0.11.3） | `case-design-out/KB_expert.md` | **可跨需求复用的通用测试设计方法论**（脱去具体业务实体后仍成立的结构化原则），字段：`category`（方法类目：边界值/等价类/状态迁移/判定表/场景法/契约测试…）· `principle`（脱业务原则）· `applicable_phases`（适用阶段，空=全阶段）· `trigger`（触发词） | **三条通道**落 `draft`（见下节）；`kb endorse --kind expert --id <id>` 背书，或跨 ≥3 独立需求命中同一指纹自动转正——**endorsed 或 occ≥3**（≥3 独立需求现实验证 + 可 `supersede` 撤销兜底） |
+| **经验库** | `case-design-out/KB_lessons.md` | 每次审核 `fail`/`patch` 的错误纠正经验（出错阶段 + 维度 + 原文 + 触发词） | `fail`/`patch` 时自动捕获为 `draft` 草稿；人工 `kb endorse <id>` 背书后才参与注入 |
+| **业务库** | `case-design-out/KB_business.md` | 各需求 Phase 14 产出的 13 维度业务知识（按"更新模块"聚合） | `kb reconcile --kind business` 从 `Knowledge_*.md` 聚合，直接以 `endorsed` 入库 |
+| **专家库** | `case-design-out/KB_expert.md` | **可跨需求复用的通用测试设计方法论**（脱去具体业务实体后仍成立的结构化原则），字段：`category`（方法类目：边界值/等价类/状态迁移/判定表/场景法/契约测试…）· `principle`（脱业务原则）· `applicable_phases`（适用阶段，空=全阶段）· `trigger`（触发词） | **三条通道**落 `draft`（见下节）；`kb endorse --kind expert --id <id>` 背书，或跨 ≥3 独立需求命中同一指纹自动转正——**endorsed 或 occ≥3**（≥3 独立需求现实验证 + 可 `supersede` 撤销兜底） |
 
 ### 双链注入：预防 + 定向修正 + 方法论常注
 
@@ -452,14 +492,14 @@ case-design 内置**三个相互独立的知识库**，让"踩过的坑"、"沉�
 
 > 过滤后候选为空 → 注入返回空串 → 输出与"没有知识库"时**字节一致**。即**无 KB 文件即零影响**，是回归基线（新增此系统不改变任何既有产出）。
 
-### 专家方法论库：功能与内容来源（v0.11.3 起 · v0.11.11 终版）
+### 专家方法论库：功能与内容来源
 
 **功能**——把"人教过的测试设计方法论"变成跨需求可复用的注入资产：
 
 - **沉淀**：`kb add-expert`（人肉精调）与 `kb extract-expert`（自动提炼，带确定性忽略门 + category 词表校验）**共享同一落盘逻辑**（抽公共 `_build_expert_rec`，消除双写漂移）落结构化方法论记录（`draft` 状态，不注入）；同 `category|principle` 指纹去重合并（触发词跨需求取并集、occurrences 按不同来源需求累计）。
 - **暴露**：draft 永不注入，但 Phase 14/15 契约卡 `##METHODOLOGY_CAPTURE##` 的"待 endorse draft"子节**无条件**列出（不做相关性预筛——endorse 是跨需求的人工判断；occ≥3 已自动生效的 draft 不再重复提示），人看得见才 endorse 得了——单条 `kb endorse --kind expert --id <id>`，或一键全背 `kb endorse --kind expert --all-drafts`。
-- **注入**：`kb endorse` 后，每张契约卡 `##PRIOR_EXPERT_KB##` 注入 **三门过滤 + top-3** 结果：适用门（当前 phase ∈ `applicable_phases`）→ 信任门（**endorsed 或 occ≥3**）→ 相关性门（触发词对**需求正文 + 澄清台账**语料 surface≥2，子串遮蔽去重后计数，或模块标题命中）。每条只渲染 category / principle / 适用阶段 / 触发词——**绝不全量送模型**。**v0.11.9 补反应式失败定向**：`gate` 失败 / `fail` / `patch` 时，用失败上下文文本做 surface 命中，注入 `##RELEVANT_EXPERT_KB##`（失败文本命中≥1 或 REQ 命中≥2，同 lessons/business 反应链），对齐此前只有 lessons/business 有反应式定向、expert 缺失的不对称。
-- **防词域错配（v0.11.6 / v0.11.8 根因修复）**：触发词为**双词域**——方法论术语（判定表/AND门，给人读）+ REQ 域实词（全部条件/条件1/既不是…，供注入门逐字匹配）。`add-expert` 写入时自动从来源 REQ + 台账命中 REQ 域信号词并入触发词；读取时对历史触发词先分词（存量畸形格式自愈）。**v0.11.8 补两层**：①相关性门扫描语料从"仅 REQ 正文"扩到"REQ + 澄清台账"（结构性规则常经澄清引入，如台账 Q32 二轮需求变更引入三前置条件 AND 门，REQ 正文永远没有）；②「1./2./3.」编号条件归一为「条件1/2/3」，使存量 trigger 无需重建数据即可命中台账编号条件。
+- **注入**：`kb endorse` 后，每张契约卡 `##PRIOR_EXPERT_KB##` 注入 **三门过滤 + top-3** 结果：适用门（当前 phase ∈ `applicable_phases`）→ 信任门（**endorsed 或 occ≥3**）→ 相关性门（触发词对**需求正文 + 澄清台账**语料 surface≥2，子串遮蔽去重后计数，或模块标题命中）。每条只渲染 category / principle / 适用阶段 / 触发词——**绝不全量送模型**。**反应式失败定向**：`gate` 失败 / `fail` / `patch` 时，用失败上下文文本做 surface 命中，注入 `##RELEVANT_EXPERT_KB##`（失败文本命中≥1 或 REQ 命中≥2，同 lessons/business 反应链），对齐此前只有 lessons/business 有反应式定向、expert 缺失的不对称。
+- **防词域错配（根因修复）**：触发词为**双词域**——方法论术语（判定表/AND门，给人读）+ REQ 域实词（全部条件/条件1/既不是…，供注入门逐字匹配）。`add-expert` 写入时自动从来源 REQ + 台账命中 REQ 域信号词并入触发词；读取时对历史触发词先分词（存量畸形格式自愈）。**两层补强**：①相关性门扫描语料从"仅 REQ 正文"扩到"REQ + 澄清台账"（结构性规则常经澄清引入，如台账 Q32 二轮需求变更引入三前置条件 AND 门，REQ 正文永远没有）；②「1./2./3.」编号条件归一为「条件1/2/3」，使存量 trigger 无需重建数据即可命中台账编号条件。
 
 **内容来源**——三条通道，全部经 Runtime `kb` 命令落盘（**模型禁止 Write/Edit 该文件**）：
 
@@ -546,7 +586,7 @@ pip3 install openpyxl     # macOS / Linux
 ├─ codex/prompts/                   # Codex 自定义 prompt（拷到 ~/.codex/prompts/）
 ├─ .cursor/rules/                   # 平台三：Cursor rule
 ├─ scripts/check_plugin.py          # 插件结构自检（含 Runtime 完整性校验）
-├─ scripts/test_runtime.py          # Runtime 自证测试（434 项断言，无 LLM）
+├─ scripts/test_runtime.py          # Runtime 自证测试（478 项断言，无 LLM）
 └─ .github/workflows/check-plugin.yml  # CI
 ```
 
@@ -563,13 +603,13 @@ python scripts/test_runtime.py
 
 `check_plugin.py` 校验三平台适配层、skills 结构与 **Runtime 完整性**：`plugin.json` / `marketplace.json` 字段、各 `SKILL.md` frontmatter、`commands/` 与 `.cursor/rules/` frontmatter、Codex 适配必要文件、`runtime/` 核心文件存在性 + 阶段注册表（编号 0-15 连续、人工门/许可门类型、引用细则存在）、以及不应入库的 `__pycache__`/`.pyc`。CI 还会字节编译 runtime 与 skill 脚本做语法检查。
 
-`test_runtime.py` 为 Runtime 自证测试（无 LLM，434 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪，**以及多需求并行隔离（同 workdir 两 req 状态/检查点互不覆盖 + 降级对账不误报）、MANIFEST 并发更新、Phase 0 gate PASS 自动建索引、legacy 状态迁移、bootstrap 幂等、manifest reconcile 重建**，以及**自我进化知识库**（经验/业务/专家三库·捕获·预防+反应+方法论三链注入·相关性+信任双门过滤（专家库三门，endorsed 或 occ≥3）·去重·跨需求累计·触发词双词域（自动补 REQ 域实词+子串遮蔽去重）·`kb query --top` 预览，详见下方「自我进化知识系统」节）。
+`test_runtime.py` 为 Runtime 自证测试（无 LLM，478 项断言）：全程模拟 0-15 阶段流程、非法跳转拒绝、人工门未确认阻断、机器门失败停留、审核反馈回退重走、审核通过→知识沉淀→Excel 真实生成（openpyxl 缺失时自动降级测 reject 路径）、断点续跑、连跑模式审核门自动放行（审计痕迹）、深度裁剪，**以及多需求并行隔离（同 workdir 两 req 状态/检查点互不覆盖 + 降级对账不误报）、MANIFEST 并发更新、Phase 0 gate PASS 自动建索引、legacy 状态迁移、bootstrap 幂等、manifest reconcile 重建**，以及**自我进化知识库**（经验/业务/专家三库·捕获·预防+反应+方法论三链注入·相关性+信任双门过滤（专家库三门，endorsed 或 occ≥3）·去重·跨需求累计·触发词双词域（自动补 REQ 域实词+子串遮蔽去重）·`kb query --top` 预览，详见下方「自我进化知识系统」节）。
 
 本地运行完整检查：
 
 ```bash
 python scripts/check_plugin.py            # 插件结构自检（含 Runtime 完整性）
-python scripts/test_runtime.py            # Runtime 自证测试（434 项断言，无 LLM）
+python scripts/test_runtime.py            # Runtime 自证测试（478 项断言，无 LLM）
 python -m py_compile runtime/*.py skills/case-design/scripts/*.py   # 脚本语法检查
 python skills/case-design/scripts/verify_cases.py --dump-rules      # 打印校验规则契约
 ```
