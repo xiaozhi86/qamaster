@@ -49,7 +49,34 @@ def _roster_block(st):
             "\n  汇总去重（Phase 2）与冲突检测（Phase 3）也只覆盖上述专家，不引入名单外视角。")
 
 
+def _inputs_block(st):
+    """Phase 0 契约卡注入：多文档综合评审的输入清单 + 合并指令。
+
+    无 INPUTS_<req_id>.md（单文档）→ 返回 ""（Phase 0 卡片与现状逐字节一致）。
+    """
+    workdir = st.get("workdir") or ""
+    req_id = (st.get("req_id") or "").strip()
+    if not workdir or not req_id:
+        return ""
+    p = os.path.join(workdir, OUTPUT_DIR, "INPUTS_%s.md" % req_id)
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            body = f.read().strip()
+    except OSError:
+        return ""
+    if not body:
+        return ""
+    return ("\n📥 本次为「多文档综合评审」：原始需求 + 设计文档须合并为一份评审语料。\n" +
+            body + "\n" +
+            "  处理要求：对清单中每份文件分别运行 `python skills/requirement-review/scripts/extract_text.py <文件> --json` 抽取纯文本，\n" +
+            "  再按清单顺序合并落盘 requirement-review-out/REQ_<需求标识>.md——主需求文档在前，各设计文档按序追加，\n" +
+            "  每份前加「## 输入文档：<文件名>」二级标题分节，保留各份内容原样、不删减。\n" +
+            "  req_id、专家团信号词路由以【主需求文档】为准；后续评审/重构统一基于合并后的 REQ_<需求标识>.md 全文。")
+
+
 def _extra_card_text(phase, st):
+    if phase == 0:
+        return _inputs_block(st)
     if phase == 1:
         return _roster_block(st)
     if phase == 4:

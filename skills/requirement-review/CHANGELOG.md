@@ -4,6 +4,18 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-08-24
+
+### 新增
+
+- 多文档综合评审：`/requirement-review @主需求.md @设计A.md @设计B.md` 一次提供多份文件，第一个为主需求文档（决定 req_id、专家团信号词路由、MANIFEST 需求文档列），其余按序作为设计文档；Runtime 在 bootstrap 落盘 `INPUTS_<需求标识>.md` 清单，Phase 0 契约卡注入「多文档综合评审」清单块，模型逐份抽取后按序合并为一份 `REQ_<需求标识>.md` 评审语料（主需求在前 + 各设计文档 `## 输入文档：<文件名>` 分节），后续评审/重构统一综合多份文档、输出一份 `ReviewedReq_<需求标识>.md`。
+- 新增 `_parse_input_docs` / `_write_inputs_manifest` / `_bootstrap_finish`（`runtime/qamaster_runtime.py`）；`_inputs_block`（`runtime/workflows/requirement_review.py` Phase 0 注入）。
+
+### 变更
+
+- 单文档路径逐字节不变：无 `INPUTS_<id>.md` 时 Phase 0 契约卡不追加清单块；case-design 不受影响（多文档分支显式 `spec.name == "requirement-review"` 门禁）。
+- SKILL.md 第0阶段补「多文档综合评审」步骤；README §6.2/§9、CHANGELOG 同步。
+
 ## [0.3.1] - 2026-08-24
 
 ### 变更

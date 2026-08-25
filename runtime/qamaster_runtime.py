@@ -1755,15 +1755,49 @@ def _derive_req_id(a, spec, workdir):
     return _derive_from_text(ui)
 
 
-def cmd_bootstrap(a):
-    """派生 req_id 但不创建状态（幂等）。已有进行中则输出 RESUME。"""
-    spec = _spec(a)
-    workdir = a.workdir
-    # 惰性迁移 legacy
-    state_store.migrate_legacy_state(workdir, spec.name)
-    req_id = _derive_req_id(a, spec, workdir)
-    if not req_id:
-        _die("bootstrap 无法从输入派生需求标识。请显式传 --req-id <需求标识>。")
+def _parse_input_docs(ui):
+    """把用户输入解析为多文档文件清单（requirement-review 多文档综合评审）。
+
+    仅当「整串按空白拆出的每个 token 都是已存在文件」且 ≥2 个时返回 (files, True)；
+    否则返回 (None, False)——调用方走旧的 _derive_req_id 单输入路径（逐字节不变）。
+    """
+    ui = (ui or "").strip()
+    if len(ui) >= 2 and ui[0] in "\"'" and ui[-1] == ui[0]:
+        ui = ui[1:-1].strip()
+    if not ui:
+        return (None, False)
+    toks = ui.split()
+    if len(toks) < 2:
+        return (None, False)
+    files = []
+    for t in toks:
+        p = t[1:] if t.startswith("@") else t
+        if not os.path.isfile(p):
+            return (None, False)      # 任一 token 非文件 → 退回单输入
+        files.append(p)
+    return (files, True)
+
+
+def _write_inputs_manifest(workdir, spec, req_id, files):
+    """多文档评审的输入清单（Runtime 落盘，模型只读）。
+
+    幂等：已存在则覆盖刷新。失败静默（best-effort，不阻断 bootstrap）。
+    """
+    p = os.path.join(workdir, spec.output_dir, "INPUTS_%s.md" % req_id)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        lines = ["# 评审输入清单（qamaster Runtime 落盘·模型只读）", ""]
+        for i, f in enumerate(files):
+            role = "主需求文档" if i == 0 else "设计文档 %d" % i
+            lines.append("- %s：%s" % (role, f))
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def _bootstrap_finish(a, spec, workdir, req_id):
+    """cmd_bootstrap 的尾部共用逻辑：in-flight 碰撞 → RESUME；manifest 同名 → MODIFY/归档重跑。"""
     # 碰撞检查：in-flight 状态 → RESUME
     active = state_store.list_active_reqs(workdir, spec.name)
     if req_id in active:
@@ -1794,6 +1828,31 @@ def cmd_bootstrap(a):
             print("BOOTSTRAP MODIFY req_id=%s manifest_status=%s（复用 req_id，start 走修改分支）"
                   % (req_id, hit_status), file=sys.stderr)
     print("BOOTSTRAP OK req_id=%s" % req_id)
+
+
+def cmd_bootstrap(a):
+    """派生 req_id 但不创建状态（幂等）。已有进行中则输出 RESUME。
+
+    多文档综合评审（requirement-review 专属）：输入整串按空白拆出 ≥2 个已存在文件时，
+    第一个文件作为主需求派生 req_id，其余作为设计文档，落盘 INPUTS_<req_id>.md 清单。
+    """
+    spec = _spec(a)
+    workdir = a.workdir
+    # 惰性迁移 legacy
+    state_store.migrate_legacy_state(workdir, spec.name)
+    # 多文档综合评审分支（仅 requirement-review；case-design 不生效）
+    files, is_multi = _parse_input_docs(a.user_input)
+    if is_multi and spec.name == "requirement-review":
+        req_id = _derive_from_file(files[0]) or _clean_id(os.path.basename(files[0]))
+        if not req_id:
+            _die("bootstrap 无法从主需求文档派生需求标识。请显式传 --req-id <需求标识>。")
+        _write_inputs_manifest(workdir, spec, req_id, files)
+        _bootstrap_finish(a, spec, workdir, req_id)
+        return
+    req_id = _derive_req_id(a, spec, workdir)
+    if not req_id:
+        _die("bootstrap 无法从输入派生需求标识。请显式传 --req-id <需求标识>。")
+    _bootstrap_finish(a, spec, workdir, req_id)
 
 
 # ---------------------------------------------------------------- commands
