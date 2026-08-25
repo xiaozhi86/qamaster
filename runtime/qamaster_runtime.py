@@ -725,26 +725,38 @@ def _req_signal_hits(req_text):
 # 常驻一条软提醒，由见到反馈的模型负责分类并主动 kb add-expert / kb add-lesson。
 # 纪律同 _abstraction_hint：非约束软上下文，不自动沉淀、不改铁律#5、不触碰信任门、不碰 _maybe_capture_lesson。
 def _methodology_capture_hint(st, phase, spec):
-    """Phase 14/15 → 返回 ##METHODOLOGY_CAPTURE## 软提醒串；其余阶段返回 ''。
+    """方法论捕捉阶段（spec.methodology_capture_phases，默认 {14,15}）→ 返回 ##METHODOLOGY_CAPTURE## 软提醒串；其余阶段返回 ''。
 
     v0.11.5：在静态基串末尾，追加"近可注入 draft（仅卡信任门）"子节，把已沉淀但未 endorse
     的 expert draft 暴露给人工——闭合 RC-a（draft 永不 endorse → 永不注入）断裂。
     No-op 护 150/0：无过双门 draft → 子节不追加 → 返回值与改动前逐字节一致；无 KB_expert.md
     → _pending_endorse_drafts 返 [] → 同样逐字节一致。该函数从静态变读 KB 重开 no-op 表面，
-    护栏=空列表短路 + 镜像 noop 断言（test_runtime.test_methodology_capture_lists_pending_draft）。"""
+    护栏=空列表短路 + 镜像 noop 断言（test_runtime.test_methodology_capture_lists_pending_draft）。
+
+    v2.4.1：硬编码 (14, 15) → spec.methodology_capture_phases（workflow 泛化）。case-design
+    默认 {14,15} 行为不变；requirement-review 设 {4,7}（用户确认门/最终输出门），使其也能
+    在人工反馈面沉淀可复用评审方法论（expert），补上"KB 只覆盖 case-design"的缺口。
+    """
     pid = phase.get("id") if isinstance(phase, dict) else phase
-    if pid not in (14, 15):
+    capture_phases = getattr(spec, "methodology_capture_phases", None) or {14, 15}
+    if pid not in capture_phases:
         return ""
+    # workflow 措辞适配：case-design 沉淀「测试设计方法论」，requirement-review 沉淀「评审方法论」。
+    is_rr = getattr(spec, "name", "") == "requirement-review"
+    stage_label = "用户确认/最终输出" if is_rr else "审核/许可"
+    method_label = "评审方法论" if is_rr else "测试设计方法论"
+    biz_guide = ("汇入 ReviewedReq_<需求标识>.md（最终需求文档本身）" if is_rr
+                 else "汇入 Knowledge_<需求标识>.md")
     base = (
-        "##METHODOLOGY_CAPTURE##（审核/许可环节方法论沉淀提醒·软上下文·非约束）\n"
-        "  若用户在本轮审核/许可反馈中给出【可跨需求复用的测试设计方法论】（脱去具体业务实体后仍成立，\n"
+        "##METHODOLOGY_CAPTURE##（%s环节方法论沉淀提醒·软上下文·非约束）\n" % stage_label +
+        "  若用户在本轮反馈中给出【可跨需求复用的%s】（脱去具体业务实体后仍成立，\n" % method_label +
         "  如“多条件判定须用判定表穷举 2^n 组合”“状态机须覆盖终态后非法流转拦截”），须分类路由：\n"
         "  - 可提炼为通用方法论 → kb add-expert --category <方法类目> --principle \"<脱业务原则>\" \\\n"
         "      --applicable-phases <阶段> --trigger <词>  (draft 不注入；人工 endorse 后进 ##PRIOR_EXPERT_KB##)\n"
         "  - 仅本次业务特例（离开本需求即无意义）→ kb add-lesson --phase <N> --summary \"<人类原话>\"\n"
-        "  - 需求层变更（新规则/新字段/新业务约束）→ 汇入 Knowledge_<需求标识>.md，不进专家库\n"
+        "  - 需求层变更（新规则/新字段/新业务约束）→ %s，不进专家库\n" % biz_guide +
         "  禁止以写入 Claude 个人记忆/项目记忆（~/.claude/.../memory）替代——个人记忆不注入 qamaster\n"
-        "  任何阶段、对后续需求设计不可见；方法论须经 Runtime `kb` 命令落盘方可经 endorse 注入。\n"
+        "  任何阶段、对后续需求不可见；方法论须经 Runtime `kb` 命令落盘方可经 endorse 注入。\n"
         "  分类决策树与可提炼判定见 references/expert_kb.md。"
     )
     # v0.11.5: 追加近可注入 draft 子节（仅卡信任门）。空 → 不追加 → 逐字节等于 base（护 150/0）。

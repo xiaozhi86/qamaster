@@ -330,26 +330,57 @@ def upsert_lesson(path, rec):
     return fp
 
 
+def _surface_map_from_agents_json(skill_dir):
+    """降级兜底：从 config/agents.json 组装 surface 词表（{agent_id: required_signals}）。
+
+    供无 verify_cases.py 的 skill（如 requirement-review）复用 Phase 0 专家团路由的
+    单一事实源——agents.json 的 required_signals 正是需求正文会出现、也是该视角该盯的词，
+    与 _CLARIFY_CATEGORIES 同构（dict[类] -> [词]）。读失败/无该文件 → {}（不阻断）。
+    """
+    cfg_path = os.path.join(skill_dir, "config", "agents.json")
+    if not os.path.isfile(cfg_path):
+        return {}
+    try:
+        with open(cfg_path, "r", encoding="utf-8", errors="replace") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for a in cfg.get("agents", []) or []:
+        aid = (a or {}).get("id")
+        sig = (a or {}).get("required_signals") or []
+        if aid and sig:
+            out[str(aid)] = [str(w) for w in sig]
+    return out
+
+
 def get_surface_map(skill_dir):
     """经子进程取 verify_cases.py 的 surface 词表（单一真源，零漂移）。
 
     调用 `python verify_cases.py --dump-surface-map`，解析其
     `json.dumps(_CLARIFY_CATEGORIES)` 输出。进程内 memoize（键=skill_dir）。
-    失败返回 {}（不阻断，best-effort）。
+    主路失败（无 verify_cases.py / 非零退出）→ 降级读 config/agents.json 的
+    required_signals 组装词表（供 requirement-review 等无该脚本的 skill）。
+    双路均失败返回 {}（不阻断，best-effort）。
     """
     if skill_dir in _surf_cache:
         return _surf_cache[skill_dir]
     script = os.path.join(skill_dir, "scripts", "verify_cases.py")
-    try:
-        proc = subprocess.run(
-            [sys.executable, script, "--dump-surface-map"],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30,
-        )
-        out = proc.stdout or ""
-        m = json.loads(out) if out.strip() else {}
-    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
-        m = {}
+    m = {}
+    if os.path.isfile(script):
+        try:
+            proc = subprocess.run(
+                [sys.executable, script, "--dump-surface-map"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30,
+            )
+            out = proc.stdout or ""
+            m = json.loads(out) if out.strip() else {}
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+            m = {}
+    if not m:
+        # 降级兜底：无 verify_cases.py（或 dump 失败）→ 从 agents.json 组装词表
+        m = _surface_map_from_agents_json(skill_dir)
     _surf_cache[skill_dir] = m
     return m
 

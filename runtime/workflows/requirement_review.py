@@ -97,6 +97,7 @@ def register():
         depth_skips=requirement_review_phases.DEPTH_SKIPS,
         knowledge_gate=[],
         extra_card_text=_extra_card_text,
+        methodology_capture_phases={4, 7},  # 用户确认门 + 最终输出门（requirement-review 无 Phase 14/15）
     )
     # last_phase 由 __post_init__ 从 phases 末尾推导，但显式取权威值
     spec.last_phase = requirement_review_phases.LAST_PHASE

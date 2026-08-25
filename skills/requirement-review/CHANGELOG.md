@@ -4,6 +4,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-08-25
+
+### 新增
+
+- 自我进化知识系统解锁（lessons/expert 两库，v2.4.1）：`KB_lessons.md`（经验库）/`KB_expert.md`（专家方法论库）及其 `kb` 命令族、纠正自动捕获（`fail`/`patch` 沉淀 draft）、`##PRIOR_LESSONS##`/`##RELEVANT_LESSONS##`/`##PRIOR_EXPERT_KB##` 注入链、以及 Phase 4/7（用户确认门/最终输出门）的 `##METHODOLOGY_CAPTURE##` 沉淀提醒均对 requirement-review 生效。
+- surface 词表兜底：`kb_store.get_surface_map` 主路（`verify_cases.py --dump-surface-map`）失败后降级读 `config/agents.json` 的 `agents[].required_signals`（键=扩展专家 id），使无 `verify_cases.py` 的 skill 也能派生 lesson 的 dim/trigger。
+- 方法论捕捉阶段泛化：`WorkflowSpec.methodology_capture_phases` 字段（默认 `{14,15}`）取代硬编码，requirement-review 设 `{4,7}`，措辞适配「评审方法论」（case-design 仍「测试设计方法论」）。
+
+### 变更
+
+- `KB_business.md`（业务历史知识库）仍为 case-design 专属（requirement-review 无 `Knowledge_*.md` 业务总结产物、无 reconcile 聚合源）；`knowledge_gate` 仍为空。
+- README §10、case-design README §8.5、设计文档 §8.5.6 同步 KB 覆盖范围说明。
+
 ## [0.4.1] - 2026-08-25
 
 ### 新增

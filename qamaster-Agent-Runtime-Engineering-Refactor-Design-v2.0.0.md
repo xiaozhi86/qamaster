@@ -1,6 +1,6 @@
 # qamaster Agent Runtime Engineering 重构详细设计方案
 
-版本：v2.4.0
+版本：v2.4.1
 日期：2026-08-25
 作者：xiaozhi
 
@@ -10,7 +10,7 @@
 
 ---
 
-## 0. 版本演进说明（v1.0.0 → v2.4.0）
+## 0. 版本演进说明（v1.0.0 → v2.4.1）
 
 | 版本 | 内容 | 状态 |
 |---|---|---|
@@ -19,9 +19,10 @@
 | **v2.1.0** | 在 v2.0.0 之上补齐两大落地：④ requirement-review 全状态机迁移完成（第二 workflow）；⑤ 自我进化知识系统（经验/业务/专家三库 + 双/三门注入）。同步铁律 5→6 条、CLI 增 `patch`/`kb`、断言 122→383 | 已被 v2.2.0 取代，保留为历史设计 |
 | **v2.2.0** | requirement-review 完整多需求并行评审：门禁 req_id 隔离（`exists_any` 支持 `{req_id}` 占位）+ 独立 MANIFEST 聚合索引（`manifest.py` 泛化为按 workflow 的 schema 注册表）；case-design 零影响。断言 383→422 | 已被 v2.3.0 取代，保留为历史设计 |
 | **v2.3.0** | 上下文/token 主动防护层：阈值门控 `##CONTEXT_BUDGET##`（契约卡末尾建议性提示）+ `context` 只读诊断命令 + 累计输入/输出 token 足迹（幂等重算）。默认零输出、零影响。断言 422→434 | 已被 v2.4.0 取代，保留为历史设计 |
-| **v2.4.0** | requirement-review 专家团动态路由 + 多文档综合评审：①专家团路由三级裁决（信号词命中 → co_trigger 连带 → 语义兜底，`config/agents.json` + `contains` 门禁）；②多文档综合评审（1 主需求 + N 设计文档 + 内联补充说明，`_parse_input_docs`/`_write_inputs_manifest`/`_inputs_block`）。断言 434→478 | **当前权威设计** |
+| **v2.4.0** | requirement-review 专家团动态路由 + 多文档综合评审：①专家团路由三级裁决（信号词命中 → co_trigger 连带 → 语义兜底，`config/agents.json` + `contains` 门禁）；②多文档综合评审（1 主需求 + N 设计文档 + 内联补充说明，`_parse_input_docs`/`_write_inputs_manifest`/`_inputs_block`）。断言 434→478 | 已被 v2.4.1 取代，保留为历史设计 |
+| **v2.4.1** | requirement-review 自我进化知识系统解锁（lessons/expert 两库）：①surface 词表兜底——无 `verify_cases.py` 的 skill 经 `kb_store.get_surface_map` 降级读 `config/agents.json` 的 `required_signals`（键=扩展专家 id）；②方法论捕捉阶段泛化——`WorkflowSpec.methodology_capture_phases` 取代硬编码 `{14,15}`，requirement-review 设 `{4,7}`（用户确认门/最终输出门）措辞适配「评审方法论」。`KB_business.md` 仍 case-design 专属（无 `Knowledge_*.md` 聚合源）。断言 478→497 | **当前权威设计** |
 
-**v1.0.0 为何被取代**：原愿景的分目录（engine/gate/validator/memory）与 yaml 流程定义在实践中偏重，最终按"一个 workflow 无关控制器 + 一个阶段注册表 + 分区状态存储"的务实结构落地。v2.0.0 的首要工作是**让设计文档与真实代码对齐**（v1.0.0 的目录结构从未实现，长期是文档与代码的悬空）；v2.1.0 继续这一对齐——补记 v2.0.0 之后落地的 requirement-review 第二 workflow 与自我进化知识系统；v2.2.0 再次对齐——补记 requirement-review 多需求并行评审（门禁 req_id 隔离 + 独立 MANIFEST 聚合索引）落地。v2.3.0 第三次对齐——补记上下文/token 主动防护层（阈值门控 `##CONTEXT_BUDGET##` + `context` 只读诊断 + 累计足迹）落地，闭合"全程会话转录持续累积、超限处理完全依赖 Claude Code 原生压缩、qamaster 自身无任何主动计量"的缺口。v2.4.0 第四次对齐——补记 requirement-review 两处自 v2.3.0 之后落地的功能：专家团动态路由（三级裁决）与多文档综合评审，闭合「requirement-review 一直是全量 7 专家、只认单份输入」与最新能力的差距。
+**v1.0.0 为何被取代**：原愿景的分目录（engine/gate/validator/memory）与 yaml 流程定义在实践中偏重，最终按"一个 workflow 无关控制器 + 一个阶段注册表 + 分区状态存储"的务实结构落地。v2.0.0 的首要工作是**让设计文档与真实代码对齐**（v1.0.0 的目录结构从未实现，长期是文档与代码的悬空）；v2.1.0 继续这一对齐——补记 v2.0.0 之后落地的 requirement-review 第二 workflow 与自我进化知识系统；v2.2.0 再次对齐——补记 requirement-review 多需求并行评审（门禁 req_id 隔离 + 独立 MANIFEST 聚合索引）落地。v2.3.0 第三次对齐——补记上下文/token 主动防护层（阈值门控 `##CONTEXT_BUDGET##` + `context` 只读诊断 + 累计足迹）落地，闭合"全程会话转录持续累积、超限处理完全依赖 Claude Code 原生压缩、qamaster 自身无任何主动计量"的缺口。v2.4.0 第四次对齐——补记 requirement-review 两处自 v2.3.0 之后落地的功能：专家团动态路由（三级裁决）与多文档综合评审，闭合「requirement-review 一直是全量 7 专家、只认单份输入」与最新能力的差距。v2.4.1 第五次对齐——补记 requirement-review 自我进化知识系统（lessons/expert 两库）的解锁，闭合「KB 只覆盖 case-design、requirement-review 无自我进化」的缺口：surface 词表兜底 + 方法论捕捉阶段泛化，使评审流程也能沉淀可复用经验与评审方法论（business KB 仍 case-design 专属）。
 
 **与三份细化设计的关系**（互补、不互斥，本文是总览）：
 
@@ -389,7 +390,7 @@ patch_directives[], history[], created_at, updated_at,
 
 - **预防式（开工前）**：`##PRIOR_LESSONS##`（Phase 0 起）、`##PRIOR_BUSINESS_KB##`（Phase 0 起）、`##PRIOR_EXPERT_KB##`（**每阶段每轮 0-14 含自检轮**，按阶段适用性 + 信任门 + 相关性门过滤）。
 - **反应式（失败定向）**：`gate`/`fail` 触发时按失败文本打分注入 `##RELEVANT_LESSONS##` / `##RELEVANT_BUSINESS_KB##` / `##RELEVANT_EXPERT_KB##`（RC-g 补齐专家库反应式路径）。
-- **方法论捕捉提醒**：审核门(14)/许可门(15) 契约卡常驻 `##METHODOLOGY_CAPTURE##`，提醒模型把用户可通用的方法论反馈主动 `kb add-expert`（个人记忆不注入任何阶段，v0.11.4 根因修复）。
+- **方法论捕捉提醒**：审核门(14)/许可门(15) 契约卡常驻 `##METHODOLOGY_CAPTURE##`，提醒模型把用户可通用的方法论反馈主动 `kb add-expert`（个人记忆不注入任何阶段，v0.11.4 根因修复）。v2.4.1 起捕捉阶段由 `WorkflowSpec.methodology_capture_phases` 驱动（不再硬编码 14/15）：case-design 仍 `{14,15}`；requirement-review 设 `{4,7}`（用户确认门/最终输出门），措辞适配「评审方法论」。
 
 ### 8.5.3 词域匹配与去重（RC-d/e/f 系列修复）
 
@@ -409,6 +410,14 @@ patch_directives[], history[], created_at, updated_at,
 ### 8.5.5 与 MANIFEST 的对称性
 
 MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺写权后，所有变更都是 Runtime 的确定性副作用（MANIFEST=gate PASS 副作用；KB_lessons=fail/patch 自动捕获；KB_business=reconcile 聚合；KB_expert=人工 add-expert+endorse）。`check_plugin.py` 对 MANIFEST 禁写的回归护栏同样适用于 KB（SKILL 文本不得含 `Write/Edit KB_*.md` 权限示例）。
+
+### 8.5.6 跨 workflow 覆盖（v2.4.1 新增）
+
+v2.4.1 之前三库只对 case-design 生效——requirement-review 无 `verify_cases.py`（`get_surface_map` 主路取不到 surface 词表）、无 `Knowledge_*.md`（business 无聚合源）、无 Phase 14/15（`##METHODOLOGY_CAPTURE##` 硬编码 14/15 永不触发）。v2.4.1 解锁 lessons/expert 两库：
+
+- **surface 词表兜底**：`kb_store.get_surface_map` 主路（`verify_cases.py --dump-surface-map`）失败后，降级读 `<skill_dir>/config/agents.json` 的 `agents[].required_signals` 组装 `{agent_id: [词]}`——扩展专家的信号词正是"该视角该盯、需求正文会出现"的词，与 `_CLARIFY_CATEGORIES` 同构。requirement-review 据此获得 dim/trigger 派生能力，`fail`/`patch` 纠正即自动沉淀 lesson draft。
+- **方法论捕捉阶段泛化**：`WorkflowSpec.methodology_capture_phases` 字段（默认 `{14,15}`）取代 `_methodology_capture_hint` 的硬编码。requirement-review 设 `{4,7}`——用户确认门/最终输出门正是评审反馈面，措辞适配「评审方法论」（case-design 仍「测试设计方法论」、Knowledge 汇入，requirement-review 则汇入 `ReviewedReq_*.md` 最终文档）。
+- **明确不做**：`KB_business.md` 仍 case-design 专属（requirement-review 无 `Knowledge_*.md` 业务总结产物、无 reconcile 聚合源）；`knowledge_gate` 仍为空（评审流程无等价 Phase 14 知识沉淀后置动作）。
 
 ---
 
@@ -534,7 +543,7 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 
 ## 13. 验证体系
 
-`scripts/test_runtime.py` 全套断言（当前达 **478 项**），含并发/迁移/索引/自我进化知识库/上下文防护/专家团路由/多文档综合评审测试：
+`scripts/test_runtime.py` 全套断言（当前达 **497 项**），含并发/迁移/索引/自我进化知识库/上下文防护/专家团路由/多文档综合评审测试：
 
 - `test_concurrent_reqs`：同 workdir 两 req 各推进到 Phase 2，断言 state/checkpoint 互不覆盖，audit 不误报对方用例，MANIFEST 两行共存，`status --all` 列出两 req（**并发的核心证明**）。
 - `test_requirement_review_concurrent_reqs`：同 workdir 两需求并发评审，断言门禁 req_id 隔离（A 的 REQ/问题清单不误放行 B 的门）、状态分区独立、`requirement-review-out/MANIFEST.md` 两行共存、`status --all` 列出两 req（requirement-review 多需求并发的核心证明）。
@@ -550,7 +559,7 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 
 回归护栏 `scripts/check_plugin.py`：校验 `locking.py`/`manifest.py`/`kb_store.py`/`requirement_review_phases.py`/`workflows/{__init__,registry,case_design,requirement_review}.py` 存在、`bootstrap`/`manifest`/`kb` 子命令存在、SKILL 文本不含 `Write/Edit(MANIFEST.md)` 权限示例；另校验 requirement-review 阶段机连续 0-7、Phase 4=confirm、Phase 7=auto、无 license 门、Phase 0 含 `contains` 核心团门禁；README 断言计数一致性护栏。
 
-最终状态：`py_compile runtime/*.py runtime/workflows/*.py` 通过；`check_plugin.py` rc=0；`test_runtime.py` 478 通过 / 0 失败。
+最终状态：`py_compile runtime/*.py runtime/workflows/*.py` 通过；`check_plugin.py` rc=0；`test_runtime.py` 497 通过 / 0 失败。
 
 ---
 
@@ -565,6 +574,7 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 | **Phase 4** | **requirement-review 全状态机迁移（第二 workflow）+ 自我进化知识系统（经验/业务/专家三库）（本文 v2.1.0）** | **✅ 已完成** |
 | **Phase 4.5** | **requirement-review 完整多需求并行评审（门禁 req_id 隔离 + 独立 MANIFEST 聚合索引）（本文 v2.2.0）** | **✅ 已完成** |
 | **Phase 4.6** | **requirement-review 专家团动态路由（三级裁决 + `contains` 核心团门禁）+ 多文档综合评审（本文 v2.4.0）** | **✅ 已完成** |
+| **Phase 4.7** | **requirement-review 自我进化知识系统解锁（lessons/expert 两库：surface 词表兜底 + 方法论捕捉阶段泛化）（本文 v2.4.1）** | **✅ 已完成** |
 | Phase 5 | interface-test 新 skill；Phase dict→dataclass；跨 workflow 共享索引 | 后续 |
 
 ---

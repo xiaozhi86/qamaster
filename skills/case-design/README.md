@@ -360,7 +360,7 @@ python runtime/qamaster_runtime.py kb prune                            # 清理�
 
 ### 8.5 与 requirement-review 的关系
 
-自我进化知识系统**目前只在 case-design 生效**（requirement-review 是单次评审产出，无知识总结后置动作、无经验捕获挂载点）。评审产出的最终需求文档 `ReviewedReq_*.md` 可直接作为 case-design 输入，再经 case-design 沉淀经验 / 业务知识。
+自我进化知识系统**三库中，lessons/expert 两库已对 requirement-review 生效**（v2.4.1 起）：`KB_lessons.md`/`KB_expert.md`、纠正自动捕获（`fail`/`patch` 沉淀 draft）、`##PRIOR_LESSONS##`/`##RELEVANT_LESSONS##`/`##PRIOR_EXPERT_KB##` 注入链、以及 Phase 4/7 的 `##METHODOLOGY_CAPTURE##` 沉淀提醒均覆盖评审流程（surface 词表兜底自 `requirement-review/config/agents.json` 的 `required_signals`）。`KB_business.md`（业务历史知识库）**仍为 case-design 专属**——requirement-review 无 `Knowledge_*.md` 业务总结产物、无 business KB 聚合源。评审产出的最终需求文档 `ReviewedReq_*.md` 可直接作为 case-design 输入，再经 case-design 沉淀经验 / 业务知识。
 
 ---
 

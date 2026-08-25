@@ -28,6 +28,8 @@ class WorkflowSpec:
       last_phase    — 末阶段号
       skill_md      — SKILL.md 相对 workdir 路径（默认 <skill_dir>/SKILL.md）
       extra_card_text — 可选钩子 (phase, st) -> str，给 _card 追加 workflow 专属片段
+      methodology_capture_phases — 方法论捕捉提醒（##METHODOLOGY_CAPTURE##）的阶段集合；
+        默认 {14, 15}（case-design 审核门/许可门）；requirement-review 设 {4, 7}（用户确认门/最终输出门）
     """
     name: str
     output_dir: str
@@ -38,6 +40,7 @@ class WorkflowSpec:
     last_phase: int = 0
     skill_md: Optional[str] = None
     extra_card_text: Optional[Callable[[int, Dict[str, Any]], str]] = None
+    methodology_capture_phases: set = field(default_factory=lambda: {14, 15})
 
     def __post_init__(self):
         if self.skill_md is None:

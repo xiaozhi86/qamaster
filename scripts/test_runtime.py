@@ -494,6 +494,10 @@ def main():
     test_requirement_review_agents_config_contract()
     # v0.4.0 回归：多文档综合评审（_parse_input_docs + Phase 0 清单块注入 + 无清单逐字节 no-op）
     test_requirement_review_multi_docs()
+    # v2.4.1 回归：requirement-review 自我进化 KB 解锁（surface map 兜底 + fail 沉淀 + 方法论捕捉阶段泛化）
+    test_requirement_review_kb_surface_map_fallback()
+    test_requirement_review_kb_fail_captures_lesson()
+    test_requirement_review_kb_methodology_capture()
 
     print("\n结果：%d 通过 / %d 失败" % (len(passed), len(failed)))
     if failed:
@@ -2128,14 +2132,14 @@ def test_expert_noop_preserves_baseline():
         mcap = rt._methodology_capture_hint(st, phase14, spec)
         base = (
             "##METHODOLOGY_CAPTURE##（审核/许可环节方法论沉淀提醒·软上下文·非约束）\n"
-            "  若用户在本轮审核/许可反馈中给出【可跨需求复用的测试设计方法论】（脱去具体业务实体后仍成立，\n"
+            "  若用户在本轮反馈中给出【可跨需求复用的测试设计方法论】（脱去具体业务实体后仍成立，\n"
             "  如“多条件判定须用判定表穷举 2^n 组合”“状态机须覆盖终态后非法流转拦截”），须分类路由：\n"
             "  - 可提炼为通用方法论 → kb add-expert --category <方法类目> --principle \"<脱业务原则>\" \\\n"
             "      --applicable-phases <阶段> --trigger <词>  (draft 不注入；人工 endorse 后进 ##PRIOR_EXPERT_KB##)\n"
             "  - 仅本次业务特例（离开本需求即无意义）→ kb add-lesson --phase <N> --summary \"<人类原话>\"\n"
             "  - 需求层变更（新规则/新字段/新业务约束）→ 汇入 Knowledge_<需求标识>.md，不进专家库\n"
             "  禁止以写入 Claude 个人记忆/项目记忆（~/.claude/.../memory）替代——个人记忆不注入 qamaster\n"
-            "  任何阶段、对后续需求设计不可见；方法论须经 Runtime `kb` 命令落盘方可经 endorse 注入。\n"
+            "  任何阶段、对后续需求不可见；方法论须经 Runtime `kb` 命令落盘方可经 endorse 注入。\n"
             "  分类决策树与可提炼判定见 references/expert_kb.md。"
         )
         check("无 draft → mcap 逐字节等于静态基串（护 150/0）",
@@ -3130,6 +3134,98 @@ def test_requirement_review_multi_docs():
         # 非 Phase 0 阶段不受影响（Phase 1 走 roster、Phase 4 走确认话术）
         check("Phase 1 不注入多文档块", "多文档综合评审" not in (spec.extra_card_text(1, st) or ""))
         check("Phase 4 不注入多文档块", "多文档综合评审" not in (spec.extra_card_text(4, st) or ""))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_requirement_review_kb_surface_map_fallback():
+    """v2.4.1：requirement-review 无 verify_cases.py → get_surface_map 兜底读 config/agents.json
+    的 required_signals 组装词表（键=扩展团 agent id，核心团空信号词不收录）。"""
+    print("\n[requirement-review] KB surface map 兜底 agents.json（无 verify_cases.py 仍可得词表）")
+    import qamaster_runtime as rt
+    import kb_store
+    skill_dir = os.path.join(rt.PLUGIN_ROOT, "skills", "requirement-review")
+    # 兜底前提：该 skill 无 scripts/verify_cases.py（否则走主路，本测试无意义）
+    check("requirement-review 无 verify_cases.py（走兜底路径）",
+          not os.path.isfile(os.path.join(skill_dir, "scripts", "verify_cases.py")))
+    m = kb_store.get_surface_map(skill_dir)
+    # 键 = 扩展团 agent id（required_signals 非空）；核心团 PM/QA/Dev（空信号词）不收录
+    check("词表键 = 扩展团 BA/Arch/UX/Risk", set(m.keys()) == {"BA", "Arch", "UX", "Risk"},
+          "keys=%s" % set(m.keys()))
+    check("核心团 PM/QA/Dev 不收录（required_signals 空）",
+          not ({"PM", "QA", "Dev"} & set(m.keys())), "keys=%s" % set(m.keys()))
+    check("各扩展团信号词非空且为 str 列表",
+          all(isinstance(v, list) and v and all(isinstance(w, str) for w in v) for v in m.values()))
+    check("Risk 含资金域词（支付）", "支付" in m["Risk"], "Risk=%s" % m.get("Risk"))
+    check("Arch 含并发/幂等", "并发" in m["Arch"] and "幂等" in m["Arch"], "Arch=%s" % m.get("Arch"))
+    # memoize：同 skill_dir 二次命中缓存（与主路行为一致）
+    m2 = kb_store.get_surface_map(skill_dir)
+    check("get_surface_map memoize 一致", m2 == m, "两次结果不一致")
+
+
+def test_requirement_review_kb_fail_captures_lesson():
+    """v2.4.1：requirement-review 纠正也自动沉淀 lesson draft，且 trigger 非空
+    （surface 词表来自 agents.json 兜底——扩展团信号词命中）。"""
+    print("\n[requirement-review] KB fail 自动沉淀 lesson（agents.json 词表命中 → trigger 非空）")
+    import qamaster_runtime as rt
+    import kb_store
+    rt._register_workflows()
+    from registry import get_workflow
+    spec = get_workflow("requirement-review")
+    workdir = tempfile.mkdtemp(prefix="qamaster-rr-kb-lesson-")
+    rid = "评审并发-20260825"
+    try:
+        w(workdir, os.path.join("requirement-review-out", "REQ_%s.md" % rid),
+          "# %s\n\n## 支付下单\n\n用户提交订单，系统并发扣减库存，重复提交需幂等。\n" % rid)
+        st = {"workdir": workdir, "req_id": rid}
+        reason = "漏了并发超卖 P0，因为重复提交必须覆盖幂等"
+        rt._maybe_capture_lesson(st, 1, reason, spec)
+        kb_p = os.path.join(workdir, "requirement-review-out", "KB_lessons.md")
+        check("requirement-review 纠正后 KB_lessons.md 被创建", os.path.isfile(kb_p), "应自动沉淀")
+        recs = kb_store.load_records(kb_p)
+        check("沉淀一条 draft 记录", len(recs) == 1 and recs[0]["status"] == "draft",
+              "recs=%s" % [(x.get("status"), x.get("dimension")) for x in recs])
+        trig = recs[0].get("trigger") or []
+        check("trigger 非空（agents.json 兜底词表命中）", len(trig) > 0, "trigger=%s" % trig)
+        check("trigger 含 Arch 信号词 并发/幂等", "并发" in trig and "幂等" in trig,
+              "trigger=%s" % trig)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_requirement_review_kb_methodology_capture():
+    """v2.4.1：requirement-review methodology_capture_phases={4,7}（用户确认门/最终输出门），
+    Phase 4/7 含 ##METHODOLOGY_CAPTURE## 且措辞为「评审方法论」；Phase 0/1 不含；
+    case-design 仍 {14,15}（Phase 4 不含）。"""
+    print("\n[requirement-review] 方法论捕捉阶段泛化（Phase 4/7 捕捉·评审方法论措辞·case-design 不变）")
+    import qamaster_runtime as rt
+    rt._register_workflows()
+    from registry import get_workflow
+    spec = get_workflow("requirement-review")
+    workdir = tempfile.mkdtemp(prefix="qamaster-rr-mcap-")
+    rid = "评审方法论-20260825"
+    try:
+        st = _kb_state(workdir, rid)
+        # 阶段开关：Phase 0/1 不捕捉，Phase 4/7 捕捉
+        check("Phase 0 → mcap 空", rt._methodology_capture_hint(st, spec.get_phase(0), spec) == "")
+        check("Phase 1 → mcap 空", rt._methodology_capture_hint(st, spec.get_phase(1), spec) == "")
+        m4 = rt._methodology_capture_hint(st, spec.get_phase(4), spec)
+        check("Phase 4 → 含 ##METHODOLOGY_CAPTURE##", "##METHODOLOGY_CAPTURE##" in m4, m4[:80])
+        check("Phase 4 → 评审方法论措辞（非测试设计方法论）",
+              "评审方法论" in m4 and "测试设计方法论" not in m4, m4[:240])
+        m7 = rt._methodology_capture_hint(st, spec.get_phase(7), spec)
+        check("Phase 7 → 含 ##METHODOLOGY_CAPTURE##", "##METHODOLOGY_CAPTURE##" in m7, m7[:80])
+        # 完整卡片集成：_card 全链路渲染时 Phase 4 含 mcap、Phase 0 不含
+        card4 = rt._card(st, spec.get_phase(4), spec)
+        check("Phase 4 完整卡片含 ##METHODOLOGY_CAPTURE##", "##METHODOLOGY_CAPTURE##" in card4,
+              card4[-400:])
+        card0 = rt._card(st, spec.get_phase(0), spec)
+        check("Phase 0 完整卡片不含 ##METHODOLOGY_CAPTURE##", "##METHODOLOGY_CAPTURE##" not in card0)
+        # case-design 回归：仍 {14,15}，Phase 4 不捕捉
+        from case_design import spec as _cd_spec
+        cd = _cd_spec()
+        check("case-design Phase 4 → mcap 空（仍 {14,15}）",
+              rt._methodology_capture_hint(st, cd.get_phase(4), cd) == "")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

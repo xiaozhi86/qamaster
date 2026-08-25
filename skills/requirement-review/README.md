@@ -280,7 +280,7 @@ requirement-review 走与 case-design 相同的 Runtime 受控流程（`runtime/
 
 > 完整铁律见 `skills/case-design/SKILL.md` §「六条铁律」——requirement-review 与 case-design 共用同一套铁律（状态/门禁/业务规范/MANIFEST/KB 五条 + gate FAIL 自查通道）。
 
-> **自我进化知识系统（KB）不覆盖 requirement-review**：`KB_lessons.md`/`KB_business.md`/`KB_expert.md` 三库及其 `kb` 命令族、经验自动捕获、`##PRIOR_*##`/`##RELEVANT_*##` 注入链**当前只在 case-design 生效**（详见 `skills/case-design/README.md` §8）。requirement-review 是单次评审产出，无知识总结后置动作、无经验捕获挂载点。评审产出的最终需求文档 `ReviewedReq_<需求标识>.md` 可直接作为 case-design 输入，再经 case-design 沉淀经验 / 业务知识。
+> **自我进化知识系统（KB）对 requirement-review 覆盖 lessons/expert 两库**：`KB_lessons.md`（经验库）与 `KB_expert.md`（专家方法论库）及其 `kb` 命令族、纠正自动捕获（`fail`/`patch` 沉淀 draft）、`##PRIOR_LESSONS##`/`##RELEVANT_LESSONS##`/`##PRIOR_EXPERT_KB##` 注入链、以及 Phase 4/7（用户确认门/最终输出门）的 `##METHODOLOGY_CAPTURE##` 沉淀提醒**均对 requirement-review 生效**（v2.4.1 起）。评审时的 surface 词表兜底自 `config/agents.json` 各扩展专家的 `required_signals`（无 `verify_cases.py` 的 skill 复用专家团路由词表）。`KB_business.md`（业务历史知识库）**仍为 case-design 专属**——requirement-review 无 `Knowledge_*.md` 业务总结产物、无 business KB 聚合源。评审产出的最终需求文档 `ReviewedReq_<需求标识>.md` 可直接作为 case-design 输入，再经 case-design 沉淀业务知识。
 
 ---
 
