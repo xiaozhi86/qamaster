@@ -1,7 +1,7 @@
 # qamaster Agent Runtime Engineering 重构详细设计方案
 
-版本：v2.3.0
-日期：2026-08-19
+版本：v2.4.0
+日期：2026-08-25
 作者：xiaozhi
 
 > **一句话定位**：把 qamaster 从"依赖模型理解流程的 Skill"升级为"由 Runtime 严格控制、模型只负责思考、任何模型不可绕过"的企业级 Agent 系统，并支持**同工程多需求并行、互不干扰**、**跨需求自我进化知识系统**。
@@ -10,7 +10,7 @@
 
 ---
 
-## 0. 版本演进说明（v1.0.0 → v2.3.0）
+## 0. 版本演进说明（v1.0.0 → v2.4.0）
 
 | 版本 | 内容 | 状态 |
 |---|---|---|
@@ -18,9 +18,10 @@
 | v2.0.0 | 校正到**真实落地架构**（单控制器 + 注册表 + 分区状态），并新增三大改造：① 多需求并行；② 通用 workflow 引擎；③ MANIFEST 多需求索引协调权回归 Runtime（强化"与模型无关"） | 已被 v2.1.0 取代，**保留为历史设计** |
 | **v2.1.0** | 在 v2.0.0 之上补齐两大落地：④ requirement-review 全状态机迁移完成（第二 workflow）；⑤ 自我进化知识系统（经验/业务/专家三库 + 双/三门注入）。同步铁律 5→6 条、CLI 增 `patch`/`kb`、断言 122→383 | 已被 v2.2.0 取代，保留为历史设计 |
 | **v2.2.0** | requirement-review 完整多需求并行评审：门禁 req_id 隔离（`exists_any` 支持 `{req_id}` 占位）+ 独立 MANIFEST 聚合索引（`manifest.py` 泛化为按 workflow 的 schema 注册表）；case-design 零影响。断言 383→422 | 已被 v2.3.0 取代，保留为历史设计 |
-| **v2.3.0** | 上下文/token 主动防护层：阈值门控 `##CONTEXT_BUDGET##`（契约卡末尾建议性提示）+ `context` 只读诊断命令 + 累计输入/输出 token 足迹（幂等重算）。默认零输出、零影响。断言 422→434 | **当前权威设计** |
+| **v2.3.0** | 上下文/token 主动防护层：阈值门控 `##CONTEXT_BUDGET##`（契约卡末尾建议性提示）+ `context` 只读诊断命令 + 累计输入/输出 token 足迹（幂等重算）。默认零输出、零影响。断言 422→434 | 已被 v2.4.0 取代，保留为历史设计 |
+| **v2.4.0** | requirement-review 专家团动态路由 + 多文档综合评审：①专家团路由三级裁决（信号词命中 → co_trigger 连带 → 语义兜底，`config/agents.json` + `contains` 门禁）；②多文档综合评审（1 主需求 + N 设计文档 + 内联补充说明，`_parse_input_docs`/`_write_inputs_manifest`/`_inputs_block`）。断言 434→478 | **当前权威设计** |
 
-**v1.0.0 为何被取代**：原愿景的分目录（engine/gate/validator/memory）与 yaml 流程定义在实践中偏重，最终按"一个 workflow 无关控制器 + 一个阶段注册表 + 分区状态存储"的务实结构落地。v2.0.0 的首要工作是**让设计文档与真实代码对齐**（v1.0.0 的目录结构从未实现，长期是文档与代码的悬空）；v2.1.0 继续这一对齐——补记 v2.0.0 之后落地的 requirement-review 第二 workflow 与自我进化知识系统；v2.2.0 再次对齐——补记 requirement-review 多需求并行评审（门禁 req_id 隔离 + 独立 MANIFEST 聚合索引）落地。v2.3.0 第三次对齐——补记上下文/token 主动防护层（阈值门控 `##CONTEXT_BUDGET##` + `context` 只读诊断 + 累计足迹）落地，闭合"全程会话转录持续累积、超限处理完全依赖 Claude Code 原生压缩、qamaster 自身无任何主动计量"的缺口。
+**v1.0.0 为何被取代**：原愿景的分目录（engine/gate/validator/memory）与 yaml 流程定义在实践中偏重，最终按"一个 workflow 无关控制器 + 一个阶段注册表 + 分区状态存储"的务实结构落地。v2.0.0 的首要工作是**让设计文档与真实代码对齐**（v1.0.0 的目录结构从未实现，长期是文档与代码的悬空）；v2.1.0 继续这一对齐——补记 v2.0.0 之后落地的 requirement-review 第二 workflow 与自我进化知识系统；v2.2.0 再次对齐——补记 requirement-review 多需求并行评审（门禁 req_id 隔离 + 独立 MANIFEST 聚合索引）落地。v2.3.0 第三次对齐——补记上下文/token 主动防护层（阈值门控 `##CONTEXT_BUDGET##` + `context` 只读诊断 + 累计足迹）落地，闭合"全程会话转录持续累积、超限处理完全依赖 Claude Code 原生压缩、qamaster 自身无任何主动计量"的缺口。v2.4.0 第四次对齐——补记 requirement-review 两处自 v2.3.0 之后落地的功能：专家团动态路由（三级裁决）与多文档综合评审，闭合「requirement-review 一直是全量 7 专家、只认单份输入」与最新能力的差距。
 
 **与三份细化设计的关系**（互补、不互斥，本文是总览）：
 
@@ -28,7 +29,7 @@
 - [`COVERAGE_HARDENING_DESIGN-v1.0.0.md`](COVERAGE_HARDENING_DESIGN-v1.0.0.md) — 覆盖率四道硬门（需求条目 + 测试点 + 风险 + 安全）+ 设计文档作为正式追溯源。
 - [`skills/case-design/EXPERT_KB_AUTO_SEDIMENT_DESIGN-v1.0.0.md`](skills/case-design/EXPERT_KB_AUTO_SEDIMENT_DESIGN-v1.0.0.md) — 专家方法论沉淀侧自动化（自动识别可抽象反馈 + `kb extract-expert` 自动提炼 + occ≥3 自动生效 / 一键背书）。
 
-本文（v2.3.0）描述**流程控制层**的整体架构、多需求并行机制、自我进化知识系统与上下文防护；上面三份描述**质量门禁层**与**自我进化沉淀侧**的细节。两层共同兑现"Runtime 控制流程、模型执行任务"。
+本文（v2.4.0）描述**流程控制层**的整体架构、多需求并行机制、自我进化知识系统、上下文防护与 requirement-review 的专家团路由/多文档评审；上面三份描述**质量门禁层**与**自我进化沉淀侧**的细节。两层共同兑现"Runtime 控制流程、模型执行任务"。
 
 ---
 
@@ -98,7 +99,10 @@ qamaster/
 │  ├─ scripts/                         # 客观校验脚本（verify_md/verify_cases/gen_excel/...）
 │  └─ config/validation_rules.json     # 校验单一事实源
 ├─ skills/requirement-review/          # 业务规范层（requirement-review workflow）
-│  ├─ SKILL.md                         # 多 Agent 并行评审规范（7 Agent·9 阶段散文）
+│  ├─ SKILL.md                         # 多 Agent 并行评审规范（专家池 7 专家·动态路由·9 阶段散文）
+│  ├─ config/
+│  │  ├─ input_rules.json              # 输入预处理规则单一事实源（格式/OCR/降级/分块/就地回填）
+│  │  └─ agents.json                   # 专家池目录单一事实源（core_agents 核心团 + 各专家 required_signals 信号词）
 │  └─ scripts/extract_text.py          # 非 Markdown 需求文档预处理（含 OCR）
 ├─ runtime/                            # 流程控制层（workflow 无关引擎）
 │  ├─ qamaster_runtime.py              # 控制器：bootstrap/start/status/next/gate/confirm/patch/kb/...
@@ -119,7 +123,7 @@ qamaster/
 │  ├─ KB_lessons.md                    # 自我进化经验库（Runtime 锁控·模型禁写）
 │  ├─ KB_business.md                   # 业务历史知识库（Runtime 锁控·模型禁写）
 │  └─ KB_expert.md                     # 专家方法论库（Runtime 锁控·模型禁写）
-├─ requirement-review-out/             # requirement-review 产物层（REQ/ReviewIssues/ReviewedReq/MANIFEST）
+├─ requirement-review-out/             # requirement-review 产物层（REQ/Agents/ReviewIssues/ReviewedReq/INPUTS/MANIFEST）
 └─ .qamaster/                          # Runtime 控制层根（gitignore，按 workflow/req_id 分区）
    ├─ case-design/<req_id>/
    │  ├─ state.json
@@ -129,7 +133,7 @@ qamaster/
       └─ checkpoint_<N>.md
 ```
 
-> 与 v1.0.0 的差异：v1.0.0 写的 `runtime/engine|gate|validator|memory/`、`workflow/case-design-flow.yaml`、`state/runtime-state.json` **均未实现**；真实结构是上图的"控制器 + 注册表 + 分区状态"。v2.0.0 以此为准；v2.1.0 新增 `requirement_review_phases.py`（第二 workflow 阶段机）与 `kb_store.py`（三 KB 的独占维护），产物层新增三 KB 文件与 `requirement-review-out/`；v2.2.0 新增 requirement-review 独立 MANIFEST 索引（`manifest.py` 按 workflow schema 泛化）。
+> 与 v1.0.0 的差异：v1.0.0 写的 `runtime/engine|gate|validator|memory/`、`workflow/case-design-flow.yaml`、`state/runtime-state.json` **均未实现**；真实结构是上图的"控制器 + 注册表 + 分区状态"。v2.0.0 以此为准；v2.1.0 新增 `requirement_review_phases.py`（第二 workflow 阶段机）与 `kb_store.py`（三 KB 的独占维护），产物层新增三 KB 文件与 `requirement-review-out/`；v2.2.0 新增 requirement-review 独立 MANIFEST 索引（`manifest.py` 按 workflow schema 泛化）。v2.4.0 在 requirement-review 侧新增 `config/agents.json`（专家池目录单一事实源，供 Phase 0 三级裁决路由）+ 产物层新增 `Agents_<id>.md`（专家团名单）与多文档时 `INPUTS_<id>.md`（输入清单）。
 
 ---
 
@@ -213,15 +217,35 @@ def register():
 
 - `runtime/requirement_review_phases.py` — 8 阶段（0-7）轻量状态机，把 SKILL.md 的「并行评审 + 汇总仲裁」9 阶段压缩为受控阶段：
   0 输入预处理与需求定位(auto) → 1 并行评审(auto) → 2 结果汇总去重+冲突检测(auto·无门禁) → 3 优化方案总览(auto·无门禁) → **4 用户确认(confirm)** → 5 需求文档重构(auto) → 6 自动复查+二次修复(auto·无门禁) → 7 最终输出(auto·last)。`DEPTH_SKIPS` 全空（单次评审，无深度裁剪）。
-- `runtime/workflows/requirement_review.py` — 把阶段机包成 `WorkflowSpec` 并显式 `register()`；`_EXTRA_PHASE4` 给 Phase 4 契约卡追加 requirement-review 专属确认话术。
-- 与 case-design 的差异：无知识总结后置动作、无 Excel 许可门（末阶段=auto）；门禁为确定性文件存在性检查（`exists_any`：`REQ_{req_id}.md` / `ReviewIssues_{req_id}.md` / `ReviewedReq_{req_id}.md`，v0.11.12 起 req_id 绑定，此前为 `*` glob）；人工确认门（Phase 4）复用控制器 `confirm` 机制，模型不可绕过。
+- `runtime/workflows/requirement_review.py` — 把阶段机包成 `WorkflowSpec` 并显式 `register()`；`extra_card_text` 三处钩子：`_EXTRA_PHASE4`（Phase 4 专属确认话术）、`_roster_block`（Phase 1 注入专家团名单）、`_inputs_block`（Phase 0 注入多文档评审清单块）。
+- 与 case-design 的差异：无知识总结后置动作、无 Excel 许可门（末阶段=auto）；门禁为确定性文件存在性检查（`exists_any`：`REQ_{req_id}.md` / `Agents_{req_id}.md` / `ReviewIssues_{req_id}.md` / `ReviewedReq_{req_id}.md`，req_id 绑定）+ `contains` 门禁（Phase 0 专家团名单必须含核心团 PM/QA/Dev，机器判定防漏选核心团）；人工确认门（Phase 4）复用控制器 `confirm` 机制，模型不可绕过。
 - 控制器侧 `_manifest_side_effect` 由「`if spec.name != "case-design": return` 护栏」（v0.11.10 缺陷4）演进为按 workflow 分派（v0.11.12）：case-design 走 `_case_design_manifest_side_effect`（原逻辑原样搬入），requirement-review 走 `_rr_manifest_side_effect`（Phase 0/1/5/7 写 `requirement-review-out/MANIFEST.md`，列集独立）。
 
-> requirement-review 的 8 阶段明细见 §6.4；完整阶段定义见 `runtime/requirement_review_phases.py`（单一事实源）。
+> requirement-review 的 8 阶段明细见 §6.4；专家团动态路由与多文档综合评审见 §5.5；完整阶段定义见 `runtime/requirement_review_phases.py`（单一事实源）。
 
 ### 5.4 自我进化知识系统（v2.1.0 新增，详见 §8.5）
 
 runtime 新增 `kb_store.py`（三 KB 的 read-modify-write）与控制器 `cmd_kb`，把"跨需求共享知识"从模型手中收回 Runtime——经验/业务/专家三库同禁写纪律，通过契约卡注入软上下文（消费侧参考，非硬门）。这是 v2.0.0 "MANIFEST 协调权回归 Runtime" 在知识维度的延续。
+
+### 5.5 requirement-review 专家团动态路由与多文档综合评审（v2.4.0 新增）
+
+**专家团动态路由（三级裁决）**——把「任何需求都全量 7 专家」升级为「按需求内容选专家团」，核心团 PM/QA/Dev 恒参与，扩展团 BA/Arch/UX/Risk 按需启用：
+
+- **①信号词命中必启用**：需求文本命中该专家 `required_signals`（`config/agents.json`，OR 关系）任一信号词 → 确定性启用。
+- **②co_trigger 连带启用**：`co_trigger` 规则（`{"BA": ["Arch", "Risk"]}`）——Arch 或 Risk 命中即连带 BA（资金/接口类需求共性高发缺口正是数据口径/业务规则/枚举全集，属 BA 主场）。
+- **③语义兜底（存疑即启用）**：未命中信号词但该视角仍有关键价值 → 启用并记录理由；仅当明确无关（如后端接口无 UI → UX）才裁掉。默认偏向「宁多勿漏」——漏选专家 = 漏掉整个评审维度，覆盖率优先于 token 成本。
+
+落地：Phase 0 读 `config/agents.json` 路由 → 落盘 `Agents_<req_id>.md`（逐行 id + 中文名 + 命中依据/启用理由）；Phase 0 gate 用 `contains` 门禁机器判定名单含核心团 PM/QA/Dev（防模型漏选核心团）；Phase 1 契约卡经 `_roster_block` 注入本次专家团（只启用名单内专家）；Phase 2 冲突检测改按实际参与专家两两组合。专家池可扩展——新增专家只需在 `agents.json` 加一条 + SKILL.md 补评审标准，不改 Runtime。
+
+**多文档综合评审**——把「单份需求文档 → 单份重构文档」升级为「1 主需求 + N 设计文档 → 合并一份评审语料 → 一份重构文档」：
+
+- **输入解析（Runtime 确定性）**：`_parse_input_docs`（`runtime/qamaster_runtime.py`）把用户输入解析为 `(entries, True)` 或退回单输入 `(None, False)`。entry 形如 `("file", 路径)` 或 `("text", 内联片段)`；`shlex.split(posix=False)` 支持引号包裹的含空格路径（保留 Windows 反斜杠），引号未闭合回退朴素 `split`；逐 token 剥 `@` 前缀与外层引号后按 `os.path.isfile` 判文件；文件数 ≥2 才走多文档分支（非文件 token 保留为「补充说明 N」按出现位置排序，混排输入）。
+- **清单落盘（Runtime 确定性）**：`_write_inputs_manifest` 在 bootstrap 落盘 `INPUTS_<req_id>.md`——首个 file 标记「主需求文档」，其余 file 按序「设计文档 N」，text 标记「补充说明 N」；幂等覆盖、失败静默（best-effort，不阻断 bootstrap）。
+- **req_id 派生**：首个 file 作为主需求文档派生 req_id（`_derive_from_file` 取首个 `#` 标题，空则 `_clean_id(basename)`）；专家团信号词路由、MANIFEST「需求文档」列也以主需求文档为准。
+- **合并（模型执行）**：Phase 0 契约卡经 `_inputs_block`（`runtime/workflows/requirement_review.py`）注入「多文档综合评审」清单块 + 合并指令——模型逐份 `extract_text.py` 抽取，按清单顺序合并落盘 `REQ_<req_id>.md`（主需求在前，各设计文档加「## 输入文档：<文件名>」分节，内联补充说明加「## 补充说明 N」分节）；后续 Phase 1~7 照旧基于合并后的 `REQ_<req_id>.md` 全文，天然综合多份文档。
+- **需求 vs 设计一致性核对**：评审时逐条对照主需求文档的业务规则/数据口径/状态流转/异常边界，与各设计文档的技术/接口/数据结构细节，找出冲突（设计改了需求口径/规则未同步）与遗漏（需求有定义、设计未落地），结论纳入评审问题清单并统一回填。
+
+**红线（零破坏）**：case-design 走多文档分支时显式 `spec.name == "requirement-review"` 门禁直接不生效；单文档/纯内联无 `INPUTS_<id>.md` → `_inputs_block` 返回空串 → Phase 0 卡片逐字节不变。所有改动为新增函数 + 新增注入分支，单文档代码路径一行不改。
 
 ---
 
@@ -277,8 +301,8 @@ patch_directives[], history[], created_at, updated_at,
 
 | # | 阶段 | gate | 出口检查 |
 |---|---|---|---|
-| 0 | 输入预处理与需求定位 | auto | `exists_any REQ_{req_id}.md` |
-| 1 | 并行评审（7 Agent） | auto | `exists_any ReviewIssues_{req_id}.md` |
+| 0 | 输入预处理与需求定位（含专家团路由 + 多文档解析落盘） | auto | `exists_any REQ_{req_id}.md` + `exists_any Agents_{req_id}.md` + `contains Agents_{req_id}.md` 含 PM/QA/Dev（核心团门禁） |
+| 1 | 并行评审（专家团） | auto | `exists_any ReviewIssues_{req_id}.md` |
 | 2 | 结果汇总去重 + 冲突检测 | auto | 内存（无门禁） |
 | 3 | 优化方案总览 | auto | 内存（无门禁） |
 | 4 | 用户确认 | confirm | 人工确认门（复用控制器 confirm） |
@@ -286,7 +310,7 @@ patch_directives[], history[], created_at, updated_at,
 | 6 | 自动复查 + 二次修复 | auto | 内存（无门禁） |
 | 7 | 最终输出 | auto | `exists_any ReviewedReq_{req_id}.md` + `exists_any ReviewIssues_{req_id}.md`（last） |
 
-有独立 MANIFEST 聚合索引（`requirement-review-out/MANIFEST.md`，v0.11.12 起）、无知识后置、无许可门；`DEPTH_SKIPS` 全空；门禁均为 req_id 绑定的文件存在性 glob（`{req_id}` 占位，v0.11.12 起）。
+有独立 MANIFEST 聚合索引（`requirement-review-out/MANIFEST.md`）、无知识后置、无许可门；`DEPTH_SKIPS` 全空；门禁均为 req_id 绑定的文件存在性 glob（`{req_id}` 占位，`_fmt_cmd` 替换，多需求并发互不串扰）+ Phase 0 `contains` 核心团门禁（机器判定 `Agents_{req_id}.md` 含 PM/QA/Dev，防漏选核心团）。Phase 0 另落盘 `Agents_{req_id}.md`（专家团名单，§5.5 三级裁决路由）与多文档时 `INPUTS_{req_id}.md`（输入清单，§5.5）。
 
 ---
 
@@ -510,10 +534,13 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 
 ## 13. 验证体系
 
-`scripts/test_runtime.py` 全套断言（v0.11.13 达 **434 项**），含并发/迁移/索引/自我进化知识库/上下文防护测试：
+`scripts/test_runtime.py` 全套断言（当前达 **478 项**），含并发/迁移/索引/自我进化知识库/上下文防护/专家团路由/多文档综合评审测试：
 
 - `test_concurrent_reqs`：同 workdir 两 req 各推进到 Phase 2，断言 state/checkpoint 互不覆盖，audit 不误报对方用例，MANIFEST 两行共存，`status --all` 列出两 req（**并发的核心证明**）。
 - `test_requirement_review_concurrent_reqs`：同 workdir 两需求并发评审，断言门禁 req_id 隔离（A 的 REQ/问题清单不误放行 B 的门）、状态分区独立、`requirement-review-out/MANIFEST.md` 两行共存、`status --all` 列出两 req（requirement-review 多需求并发的核心证明）。
+- `test_requirement_review_roster_contains_gate`：Phase 0 `contains` 核心团门禁——`Agents_{req_id}.md` 缺 PM/QA/Dev 任一即 gate FAIL（防漏选核心团）。
+- `test_requirement_review_agents_config_contract`：`agents.json` 结构自洽契约——core_agents 恒 PM/QA/Dev、co_trigger 键值均引用真实 agent id、每 agent 四字段齐全、core_agents ⊆ agents[].id、BA 可被 Arch/Risk 连带。
+- `test_requirement_review_multi_docs`：`_parse_input_docs` 多文档解析（`@` 前缀、引号包裹含空格路径、Windows 反斜杠保留、纯内联/空串退回单输入、≥2 文件才走多文档分支、非文件 token 保留为「补充说明 N」）+ `_write_inputs_manifest` 清单落盘 + `_inputs_block` 仅 Phase 0 注入（Phase 1/4 不注入多文档块、清单块含需求 vs 设计一致性核对）。
 - `test_manifest_concurrent_update`：12 线程并发 `manifest update`，无损坏无丢行。
 - `test_phase0_manifest_created_on_pass`：空 MANIFEST 下 Phase 0 gate PASS 后 MANIFEST 被创建（验证 C1 时序）。
 - `test_legacy_migration`：v2+req_id 旧 state 迁移到新分区；req_id 为空拒绝迁移并告警。
@@ -521,9 +548,9 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 - `test_manifest_reconcile`：删 MANIFEST 后从磁盘文件重建索引。
 - `test_context_budget_guard`：默认零输出（小需求卡片不含 `##CONTEXT_BUDGET##`）、大 REQ 越线才提示（含压缩/PART）、Phase 8/13 与 requirement-review Phase 5/6 出 `/compact` 提示、轻阶段不出、`context` 命令字段齐全、累计幂等（重跑相等）且单调（落盘后输出增）、`status` 输出不含 `cumulative` 键（既有形状不变）。
 
-回归护栏 `scripts/check_plugin.py`：校验 `locking.py`/`manifest.py`/`kb_store.py`/`requirement_review_phases.py`/`workflows/{__init__,registry,case_design,requirement_review}.py` 存在、`bootstrap`/`manifest`/`kb` 子命令存在、SKILL 文本不含 `Write/Edit(MANIFEST.md)` 权限示例；另校验 requirement-review 阶段机连续 0-7、Phase 4=confirm、Phase 7=auto、无 license 门；README 断言计数一致性护栏。
+回归护栏 `scripts/check_plugin.py`：校验 `locking.py`/`manifest.py`/`kb_store.py`/`requirement_review_phases.py`/`workflows/{__init__,registry,case_design,requirement_review}.py` 存在、`bootstrap`/`manifest`/`kb` 子命令存在、SKILL 文本不含 `Write/Edit(MANIFEST.md)` 权限示例；另校验 requirement-review 阶段机连续 0-7、Phase 4=confirm、Phase 7=auto、无 license 门、Phase 0 含 `contains` 核心团门禁；README 断言计数一致性护栏。
 
-最终状态：`py_compile runtime/*.py runtime/workflows/*.py` 通过；`check_plugin.py` rc=0；`test_runtime.py` 434 通过 / 0 失败。
+最终状态：`py_compile runtime/*.py runtime/workflows/*.py` 通过；`check_plugin.py` rc=0；`test_runtime.py` 478 通过 / 0 失败。
 
 ---
 
@@ -537,6 +564,7 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 | Phase 3 | 多需求并行 + 通用 workflow 引擎 + MANIFEST Runtime 接管（v2.0.0） | ✅ 已完成 |
 | **Phase 4** | **requirement-review 全状态机迁移（第二 workflow）+ 自我进化知识系统（经验/业务/专家三库）（本文 v2.1.0）** | **✅ 已完成** |
 | **Phase 4.5** | **requirement-review 完整多需求并行评审（门禁 req_id 隔离 + 独立 MANIFEST 聚合索引）（本文 v2.2.0）** | **✅ 已完成** |
+| **Phase 4.6** | **requirement-review 专家团动态路由（三级裁决 + `contains` 核心团门禁）+ 多文档综合评审（本文 v2.4.0）** | **✅ 已完成** |
 | Phase 5 | interface-test 新 skill；Phase dict→dataclass；跨 workflow 共享索引 | 后续 |
 
 ---
@@ -556,4 +584,4 @@ MANIFEST 与三 KB 同为"Runtime 独占的可变共享资源"：模型被剥夺
 
 qamaster 从"依赖模型理解流程的 Skill"升级为"由 Runtime 控制流程、模型执行任务、任何模型不可绕过"的企业级 Agent 系统，并支持同工程多需求并行、跨需求自我进化。
 
-核心原则不变：**Runtime 控制流程，模型执行任务，任何模型不可绕过。** v2.1.0 在 v2.0.0 基础上把"不可绕过"进一步延伸：从状态层（state.json 单写、门禁机器判定）到索引层（MANIFEST 由 Runtime 在 gate PASS 副作用维护）再到知识层（三 KB 由 Runtime 独占维护、模型禁写），通过状态分区让"多需求并行、互不干扰"成为引擎内建能力，通过通用 workflow 引擎让第二个 skill（requirement-review）继承同一套隔离 + 强控。v2.2.0 补齐 requirement-review 的多需求并行：门禁 req_id 绑定（`{req_id}` 占位）+ 独立 MANIFEST 聚合索引（`manifest.py` 按 workflow schema 泛化），使第二 workflow 也具备"同工程多需求并行、互不串扰"的完整能力，且对 case-design 零影响。v2.3.0 把防护边界扩展到上下文维度：补一层**建议性、可度量、默认零输出**的上下文/token 防护（阈值门控 `##CONTEXT_BUDGET##` + `context` 只读诊断 + 累计足迹），在「模型负责思考」的前提下由 Runtime 提供越线提示与可观测性，且对 case-design / requirement-review 既有功能零影响。
+核心原则不变：**Runtime 控制流程，模型执行任务，任何模型不可绕过。** v2.1.0 在 v2.0.0 基础上把"不可绕过"进一步延伸：从状态层（state.json 单写、门禁机器判定）到索引层（MANIFEST 由 Runtime 在 gate PASS 副作用维护）再到知识层（三 KB 由 Runtime 独占维护、模型禁写），通过状态分区让"多需求并行、互不干扰"成为引擎内建能力，通过通用 workflow 引擎让第二个 skill（requirement-review）继承同一套隔离 + 强控。v2.2.0 补齐 requirement-review 的多需求并行：门禁 req_id 绑定（`{req_id}` 占位）+ 独立 MANIFEST 聚合索引（`manifest.py` 按 workflow schema 泛化），使第二 workflow 也具备"同工程多需求并行、互不串扰"的完整能力，且对 case-design 零影响。v2.3.0 把防护边界扩展到上下文维度：补一层**建议性、可度量、默认零输出**的上下文/token 防护（阈值门控 `##CONTEXT_BUDGET##` + `context` 只读诊断 + 累计足迹），在「模型负责思考」的前提下由 Runtime 提供越线提示与可观测性，且对 case-design / requirement-review 既有功能零影响。v2.4.0 把 requirement-review 从「固定全量专家 + 单份输入」升级为「按需专家团 + 多文档综合评审」：专家团动态路由三级裁决（信号词命中 → co_trigger 连带 → 语义兜底）把「漏选专家 = 漏掉整个评审维度」的风险交给 Runtime 的 `contains` 核心团门禁兜底，多文档综合评审把「1 主需求 + N 设计文档 + 内联补充说明」的解析/清单落盘/合并指令收进 Runtime（`_parse_input_docs`/`_write_inputs_manifest`/`_inputs_block`），使「评审依据多文档」成为引擎内建能力，同样对 case-design 零影响。
